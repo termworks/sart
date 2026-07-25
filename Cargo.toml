@@ -1,0 +1,26 @@
+[package]
+name = "bootart"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal Linux ASCII boot animation"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "bootart"
+path = "src/main.rs"
+
+[lib]
+name = "bootart"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

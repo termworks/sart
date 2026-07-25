@@ -1,0 +1,21 @@
+[Unit]
+Description=Restore final ASCII boot logo
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=getty@tty1.service display-manager.service
+ConditionPathExists=/dev/tty1
+ConditionKernelCommandLine=!bootart=0
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/lib/bootart/bootart render-final
+StandardInput=null
+StandardOutput=tty
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=no
+TTYVHangup=no
+TTYVTDisallocate=no
+
+[Install]
+WantedBy=sysinit.target
