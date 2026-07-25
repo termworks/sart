@@ -5,28 +5,40 @@ pub enum AnsiColor {
     Reset,
     DarkGray,
     Red,
+    Green,
     Yellow,
     Blue,
     Magenta,
     Cyan,
-    Green,
     LightGray,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
     BrightWhite,
 }
 
 impl AnsiColor {
-    pub fn escape_code(self) -> &'static str {
+    pub fn write_to_buf(self, buf: &mut Vec<u8>) {
         match self {
-            AnsiColor::Reset => "\x1b[0m",
-            AnsiColor::DarkGray => "\x1b[90m",
-            AnsiColor::Red => "\x1b[31m",
-            AnsiColor::Yellow => "\x1b[33m",
-            AnsiColor::Blue => "\x1b[34m",
-            AnsiColor::Magenta => "\x1b[35m",
-            AnsiColor::Cyan => "\x1b[36m",
-            AnsiColor::Green => "\x1b[32m",
-            AnsiColor::LightGray => "\x1b[37m",
-            AnsiColor::BrightWhite => "\x1b[97m",
+            AnsiColor::Reset => buf.extend_from_slice(b"\x1b[0m"),
+            AnsiColor::DarkGray => buf.extend_from_slice(b"\x1b[90m"),
+            AnsiColor::Red => buf.extend_from_slice(b"\x1b[31m"),
+            AnsiColor::Green => buf.extend_from_slice(b"\x1b[32m"),
+            AnsiColor::Yellow => buf.extend_from_slice(b"\x1b[33m"),
+            AnsiColor::Blue => buf.extend_from_slice(b"\x1b[34m"),
+            AnsiColor::Magenta => buf.extend_from_slice(b"\x1b[35m"),
+            AnsiColor::Cyan => buf.extend_from_slice(b"\x1b[36m"),
+            AnsiColor::LightGray => buf.extend_from_slice(b"\x1b[37m"),
+            AnsiColor::BrightRed => buf.extend_from_slice(b"\x1b[91m"),
+            AnsiColor::BrightGreen => buf.extend_from_slice(b"\x1b[92m"),
+            AnsiColor::BrightYellow => buf.extend_from_slice(b"\x1b[93m"),
+            AnsiColor::BrightBlue => buf.extend_from_slice(b"\x1b[94m"),
+            AnsiColor::BrightMagenta => buf.extend_from_slice(b"\x1b[95m"),
+            AnsiColor::BrightCyan => buf.extend_from_slice(b"\x1b[96m"),
+            AnsiColor::BrightWhite => buf.extend_from_slice(b"\x1b[97m"),
         }
     }
 }
@@ -93,53 +105,74 @@ pub fn smoothstep(p: f32) -> f32 {
     clamped * clamped * (3.0 - 2.0 * clamped)
 }
 
-/// Zero-Instant-Appearing Animation Engine:
-///
-/// Frame 0 (progress 0.0) starts 100% EMPTY (black) with ZERO pixels visible.
-/// Pass 1 [0.00 .. 0.45]: Pixels SLOWLY APPEAR one by one across the screen via color wave.
-/// Hold   [0.45 .. 0.55]: Hold full logo in BrightWhite.
-/// Pass 2 [0.55 .. 0.95]: Pixels SLOWLY DISAPPEAR into blackness.
-/// Hold   [0.95 .. 1.00]: Hold 100% empty black screen.
+/// Compute cell projected position for any of 12 30-degree angles around the 360-degree circle:
+fn angle_effective_pos(x: usize, y: usize, width: usize, height: usize, angle_idx: usize) -> i32 {
+    let cx = x as f32 - (width as f32 / 2.0);
+    let cy = (y as f32 * 2.0) - (height as f32); // 2:1 terminal character aspect correction
+
+    let angle_rad = (angle_idx % 12) as f32 * (std::f32::consts::PI / 6.0);
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+
+    (cx * cos_a + cy * sin_a) as i32
+}
+
+/// 12-Angle Directional Sweep Animation Engine (every 30 degrees):
 pub fn cell_color_at(
     cell: &AnimatedCell,
     smooth_progress: f32,
     art_width: usize,
     art_height: usize,
     no_color: bool,
-    _iteration: usize,
+    iteration: usize,
 ) -> Option<(char, AnsiColor)> {
     if no_color {
         return Some((cell.glyph, AnsiColor::LightGray));
     }
 
-    let max_span = (art_width + art_height * 3 + 30) as i32;
+    let max_span = ((art_width + art_height * 2 + 30) as f32 * 0.75) as i32;
 
-    let colors_0 = [
+    // Pick random 12-angle sweep directions per iteration
+    let dir_1 = (cell_hash(iteration as u64 ^ 0x3000, 0, 0) % 12) as usize;
+    let dir_2 = ((cell_hash(iteration as u64 ^ 0x4000, 0, 0) + 1) % 12) as usize;
+
+    // 12 standard initramfs-compatible ANSI colors
+    let initramfs_12_palette = [
         AnsiColor::DarkGray,
         AnsiColor::Red,
+        AnsiColor::BrightRed,
         AnsiColor::Yellow,
-        AnsiColor::Blue,
-        AnsiColor::Magenta,
+        AnsiColor::BrightYellow,
+        AnsiColor::Green,
+        AnsiColor::BrightGreen,
         AnsiColor::Cyan,
-        AnsiColor::BrightWhite,
+        AnsiColor::BrightCyan,
+        AnsiColor::Blue,
+        AnsiColor::BrightBlue,
+        AnsiColor::Magenta,
     ];
 
-    let colors_1 = [
-        AnsiColor::Cyan,
-        AnsiColor::Magenta,
-        AnsiColor::Blue,
-        AnsiColor::Yellow,
-        AnsiColor::Red,
-        AnsiColor::DarkGray,
-        AnsiColor::Reset, // Disappeared / Space ' '
-    ];
+    let shift_1 = (iteration * 5 + 1) % initramfs_12_palette.len();
+    let mut colors_0 = [AnsiColor::Reset; 7];
+    for i in 0..6 {
+        colors_0[i] = initramfs_12_palette[(i + shift_1) % initramfs_12_palette.len()];
+    }
+    colors_0[6] = AnsiColor::BrightWhite;
+
+    let shift_2 = (iteration * 5 + 7) % initramfs_12_palette.len();
+    let mut colors_1 = [AnsiColor::Reset; 7];
+    for i in 0..6 {
+        colors_1[i] = initramfs_12_palette[initramfs_12_palette.len() - 1 - (i + shift_2) % initramfs_12_palette.len()];
+    }
+    colors_1[6] = AnsiColor::Reset;
 
     if smooth_progress < 0.45 {
-        // Pass 1: Starts 100% EMPTY (f = -30 at sub_p = 0.0) -> pixels slowly appear
+        // Pass 1: Random 12-angle direction sweep in
         let sub_p = smooth_progress / 0.45;
-        let t = (sub_p * (max_span as f32 + 30.0)) as i32;
+        let t = (sub_p * (max_span as f32 * 2.0 + 30.0)) as i32;
 
-        let f = (cell.x as i32 + cell.y as i32 * 3) - max_span + t;
+        let pos = angle_effective_pos(cell.x, cell.y, art_width, art_height, dir_1);
+        let f = pos - max_span + t;
         let off = ((cell_hash(42 ^ (t as u64), cell.x, cell.y) % 15) + 1) as i32;
 
         for i in (0..=6).rev() {
@@ -147,16 +180,17 @@ pub fn cell_color_at(
                 return Some((cell.glyph, colors_0[i as usize]));
             }
         }
-        None // 100% empty black screen (0 pixels visible on frame 0)
+        None // 100% empty black screen
     } else if smooth_progress < 0.55 {
         // Hold Full Logo in BrightWhite
         Some((cell.glyph, AnsiColor::BrightWhite))
     } else if smooth_progress < 0.95 {
-        // Pass 2: Wave sweeps pixels out to empty space ' '
+        // Pass 2: Random 12-angle direction sweep out
         let sub_p = (smooth_progress - 0.55) / 0.40;
-        let t = (sub_p * (max_span as f32 + 30.0)) as i32;
+        let t = (sub_p * (max_span as f32 * 2.0 + 30.0)) as i32;
 
-        let f = (cell.x as i32 + cell.y as i32 * 3) - max_span + t;
+        let pos = angle_effective_pos(cell.x, cell.y, art_width, art_height, dir_2);
+        let f = pos - max_span + t;
         let off = ((cell_hash(42 ^ (t as u64), cell.x, cell.y) % 15) + 1) as i32;
 
         for i in (0..=6).rev() {

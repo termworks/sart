@@ -1,5 +1,10 @@
 SHELL := /bin/bash
 
+QEMU ?= qemu-system-x86_64
+TMP_ISO ?= /tmp/alpine-virt.iso
+TMP_QCOW2 ?= /tmp/bootart-disk.qcow2
+ISO_URL ?= https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-virt-3.20.0-x86_64.iso
+
 PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
 PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
 ifeq ($(PROJECT_NAME),)
@@ -17,10 +22,21 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h kill vm-kill apply install uninstall
 
 build:
 	@$(CARGO) build
+
+release-build:
+	@$(CARGO) build --release
+
+apply: release-build
+	@sudo ./target/release/bootart apply
+
+install: apply
+
+uninstall: release-build
+	@sudo ./target/release/bootart hook uninstall
 
 b: build
 
@@ -66,28 +82,46 @@ clean:
 
 verify: fmt-check check test check-all test-all clippy rustdoc
 
-vm-setup:
+vm-setup: release-build
 	@echo "==> Setting up QEMU VM environment in /tmp..."
 	@test -f $(TMP_ISO) || curl -L $(ISO_URL) -o $(TMP_ISO)
-	@test -f $(TMP_QCOW2) || qemu-img create -f qcow2 $(TMP_QCOW2) 2G
+	@test -f /tmp/vmlinuz-virt || xorriso -osirrox on -indev $(TMP_ISO) -extract /boot/vmlinuz-virt /tmp/vmlinuz-virt
+	@rm -rf /tmp/initrd_root
+	@mkdir -p /tmp/initrd_root/{bin,sbin,etc/bootart,proc,sys,dev,tmp}
+	@cp $(TOP_DIR)/target/release/bootart-init /tmp/initrd_root/bin/bootart-init
+	@cp $(TOP_DIR)/target/release/bootart-init /tmp/initrd_root/init
+	@chmod +x /tmp/initrd_root/bin/bootart-init /tmp/initrd_root/init
+	@cp $(TOP_DIR)/assets/logo.txt /tmp/initrd_root/etc/bootart/logo.txt
+	@cd /tmp/initrd_root && find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -9 > /tmp/bootart-initrd.cpio.gz
 
-vm-run: build vm-setup
-	@echo "==> Launching QEMU VM..."
-	@$(QEMU) -m 512M -smp 2 \
-		-drive file=$(TMP_QCOW2),if=virtio,format=qcow2 \
-		-cdrom $(TMP_ISO) \
-		-boot d \
-		-nographic
+vm-run: release-build vm-setup
+	@echo "==> Launching QEMU VM with custom bootart initramfs..."
+	@$(QEMU) -name bootart_vm,process=bootart_vm -m 512M -smp 2 \
+		-kernel /tmp/vmlinuz-virt \
+		-initrd /tmp/bootart-initrd.cpio.gz \
+		-nographic \
+		-append "console=ttyS0 quiet" \
+		-no-reboot
 
-vm-run-gui: build vm-setup
+vm-run-gui: release-build vm-setup
 	@echo "==> Launching QEMU VM with Graphical Display..."
-	@$(QEMU) -m 512M -smp 2 \
-		-drive file=$(TMP_QCOW2),if=virtio,format=qcow2 \
-		-cdrom $(TMP_ISO) \
-		-boot d
+	@$(QEMU) -name bootart_vm,process=bootart_vm -m 512M -smp 2 \
+		-kernel /tmp/vmlinuz-virt \
+		-initrd /tmp/bootart-initrd.cpio.gz \
+		-append "quiet" \
+		-no-reboot
 
 vm-clean:
-	@rm -f $(TMP_ISO) $(TMP_QCOW2)
+	@rm -f $(TMP_ISO) $(TMP_QCOW2) /tmp/vmlinuz-virt /tmp/bootart-initrd.cpio.gz
+	@rm -rf /tmp/initrd_root
+
+kill:
+	@echo "==> Killing project-specific QEMU VM and bootart instances..."
+	@pkill -9 -f "bootart-initrd.cpio.gz" 2>/dev/null || true
+	@pkill -9 -f "bootart_vm" 2>/dev/null || true
+	@pkill -9 -f "target/release/bootart" 2>/dev/null || true
+
+vm-kill: kill
 
 release:
 	@if [ -z "$(HAS_REL)" ]; then \

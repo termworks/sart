@@ -1,138 +1,109 @@
+use bootart::art::Art;
+use bootart::cli::{Cli, Command, HookAction};
+use bootart::renderer::{play_animation, render_final, RenderOptions};
+use bootart::terminal::StdoutTerminal;
+use bootart::{signals, DEFAULT_LOGO, SMALL_LOGO};
+use clap::Parser;
 use std::fs;
 use std::path::Path;
 use std::process::exit;
 
-use bootart::art::Art;
-use bootart::cli::{parse_args, Command};
-use bootart::renderer::{play_animation, render_final, RenderOptions};
-use bootart::signals;
-use bootart::terminal::StdoutTerminal;
-use bootart::{DEFAULT_LOGO, SMALL_LOGO};
-
 fn main() {
-    signals::setup_signal_handlers();
+    let cli = Cli::parse();
 
-    let command = match parse_args(std::env::args()) {
-        Ok(cmd) => cmd,
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            eprintln!("Run 'bootart --help' for usage information.");
-            exit(1);
-        }
-    };
+    let command = cli.command.unwrap_or_else(|| {
+        bootart::cli::Command::Play(bootart::cli::PlayArgs {
+            duration_ms: 2500,
+            fps: 30,
+            seed: 42,
+            no_color: false,
+            clear_first: true,
+            leave_final: true,
+            asset: None,
+            cols: None,
+            rows: None,
+        })
+    });
 
     match command {
-        Command::Help => {
-            print_help();
-            exit(0);
+        Command::Apply(args) => {
+            if let Err(e) = bootart::hook::install_hooks(args.asset.as_deref()) {
+                eprintln!("Error applying hooks: {}", e);
+                exit(1);
+            }
         }
-        Command::Version => {
-            println!("bootart version 0.1.0");
-            exit(0);
-        }
-        Command::Validate { asset } => {
-            let content = match load_asset_str(asset.as_deref()) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Validation failed: {}", e);
-                    exit(1);
-                }
-            };
-            match Art::parse(&content) {
-                Ok(art) => {
-                    println!(
-                        "Validation successful: {} columns x {} rows ({} visible lines)",
-                        art.width,
-                        art.height,
-                        art.lines.len()
-                    );
-                    exit(0);
-                }
-                Err(err) => {
-                    eprintln!("Validation failed: {}", err);
+        Command::Hook(args) => match args.action.unwrap_or(HookAction::Status) {
+            HookAction::Install | HookAction::Apply => {
+                if let Err(e) = bootart::hook::install_hooks(args.asset.as_deref()) {
+                    eprintln!("Error installing hooks: {}", e);
                     exit(1);
                 }
             }
-        }
-        Command::Play {
-            duration_ms,
-            fps,
-            seed,
-            no_color,
-            clear_first,
-            leave_final,
-            asset,
-            cols,
-            rows,
-        } => {
-            let (art, small_art) = match load_arts(asset.as_deref()) {
+            HookAction::Uninstall => {
+                if let Err(e) = bootart::hook::uninstall_hooks() {
+                    eprintln!("Error uninstalling hooks: {}", e);
+                    exit(1);
+                }
+            }
+            HookAction::Status => {
+                bootart::hook::status_hooks();
+            }
+        },
+        Command::Play(args) => {
+            let (art, small_art) = match load_arts(args.asset.as_deref()) {
                 Ok(res) => res,
                 Err(e) => {
                     eprintln!("Error loading logo asset: {}", e);
                     exit(1);
                 }
             };
-            let mut term = StdoutTerminal::with_override(cols, rows);
+            let mut term = StdoutTerminal::with_override(args.cols, args.rows);
             let options = RenderOptions {
-                duration_ms,
-                fps,
-                seed,
-                no_color,
-                clear_first,
-                leave_final,
+                duration_ms: args.duration_ms,
+                fps: args.fps,
+                seed: args.seed,
+                no_color: args.no_color,
+                clear_first: args.clear_first,
+                leave_final: args.leave_final,
             };
             if let Err(e) = play_animation(&mut term, &art, small_art.as_ref(), options, 0) {
                 eprintln!("Render error: {}", e);
                 exit(1);
             }
         }
-        Command::RenderFinal {
-            no_color,
-            asset,
-            cols,
-            rows,
-        } => {
-            let (art, small_art) = match load_arts(asset.as_deref()) {
+        Command::RenderFinal(args) => {
+            let (art, small_art) = match load_arts(args.asset.as_deref()) {
                 Ok(res) => res,
                 Err(e) => {
                     eprintln!("Error loading logo asset: {}", e);
                     exit(1);
                 }
             };
-            let mut term = StdoutTerminal::with_override(cols, rows);
-            if let Err(e) = render_final(&mut term, &art, small_art.as_ref(), no_color) {
+            let mut term = StdoutTerminal::with_override(args.cols, args.rows);
+            if let Err(e) = render_final(&mut term, &art, small_art.as_ref(), args.no_color) {
                 eprintln!("Render error: {}", e);
                 exit(1);
             }
         }
-        Command::Preview {
-            loop_infinitely,
-            duration_ms,
-            fps,
-            seed,
-            no_color,
-            asset,
-            cols,
-            rows,
-        } => {
-            let (art, small_art) = match load_arts(asset.as_deref()) {
+        Command::Preview(args) => {
+            let (art, small_art) = match load_arts(args.asset.as_deref()) {
                 Ok(res) => res,
                 Err(e) => {
                     eprintln!("Error loading logo asset: {}", e);
                     exit(1);
                 }
             };
-            let mut term = StdoutTerminal::with_override(cols, rows);
+            let mut term = StdoutTerminal::with_override(args.cols, args.rows);
             let options = RenderOptions {
-                duration_ms,
-                fps,
-                seed,
-                no_color,
+                duration_ms: args.duration_ms,
+                fps: args.fps,
+                seed: args.seed,
+                no_color: args.no_color,
                 clear_first: true,
                 leave_final: true,
             };
 
-            if loop_infinitely {
+            if args.loop_infinitely {
                 let mut iteration = 0;
                 while !signals::should_stop() {
                     if let Err(e) = play_animation(&mut term, &art, small_art.as_ref(), options, iteration) {
@@ -145,6 +116,35 @@ fn main() {
                 eprintln!("Render error: {}", e);
                 exit(1);
             }
+        }
+        Command::Validate(args) => {
+            let path = args.asset.as_deref();
+            let content = match load_asset_str(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Validation error: {}", e);
+                    exit(1);
+                }
+            };
+            match Art::parse(&content) {
+                Ok(art) => {
+                    println!("Logo asset is valid! Dimensions: {}x{}", art.width, art.height);
+                }
+                Err(err) => {
+                    eprintln!("Validation failed: {}", err);
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    if std::process::id() == 1 {
+        unsafe {
+            libc::reboot(libc::RB_POWER_OFF);
+            libc::reboot(libc::RB_HALT_SYSTEM);
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
 }
@@ -167,36 +167,4 @@ fn load_arts(path: Option<&Path>) -> Result<(Art, Option<Art>), String> {
     };
 
     Ok((art, small_art))
-}
-
-fn print_help() {
-    println!(
-        r#"bootart - Minimal Linux ASCII boot animation
-
-USAGE:
-    bootart <COMMAND> [OPTIONS]
-
-COMMANDS:
-    play            Run boot animation pass and exit
-    render-final    Render final static logo frame without animation
-    validate        Validate specified or embedded logo asset
-    preview         Run animation preview (supports interactive looping)
-
-PLAY / PREVIEW OPTIONS:
-    --duration-ms <ms>  Animation duration in milliseconds (default: 2500)
-    --fps <fps>         Target frames per second (default: 30)
-    --seed <seed>       Deterministic integer seed (default: 42)
-    --no-color          Disable ANSI color output
-    --clear-first       Clear terminal screen before starting animation
-    --leave-final       Keep final frame rendered after exit
-    --asset <path>      Override embedded ASCII logo file
-    --cols <cols>       Override detected terminal columns
-    --rows <rows>       Override detected terminal rows
-    --loop              Loop animation continuously (preview mode only)
-
-FLAGS:
-    -h, --help       Show this help message
-    -v, --version    Show version information
-"#
-    );
 }

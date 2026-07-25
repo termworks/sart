@@ -53,7 +53,7 @@ pub fn generate_frame_bytes(
 
     if is_first_frame {
         buf.extend_from_slice(b"\x1b[?25l"); // Hide cursor
-        buf.extend_from_slice(AnsiColor::Reset.escape_code().as_bytes());
+        AnsiColor::Reset.write_to_buf(&mut buf);
         if clear_first {
             buf.extend_from_slice(b"\x1b[2J"); // Clear screen
         }
@@ -91,7 +91,7 @@ pub fn generate_frame_bytes(
             };
 
             if active_color != Some(color) {
-                buf.extend_from_slice(color.escape_code().as_bytes());
+                color.write_to_buf(&mut buf);
                 active_color = Some(color);
             }
             let encoded = glyph.encode_utf8(&mut char_buf);
@@ -99,7 +99,7 @@ pub fn generate_frame_bytes(
         }
 
         if active_color != Some(AnsiColor::Reset) {
-            buf.extend_from_slice(AnsiColor::Reset.escape_code().as_bytes());
+            AnsiColor::Reset.write_to_buf(&mut buf);
             active_color = Some(AnsiColor::Reset);
         }
     }
@@ -109,7 +109,7 @@ pub fn generate_frame_bytes(
 
 pub fn build_exit_bytes(layout_info: &Layout, term_size: &TerminalSize) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(AnsiColor::Reset.escape_code().as_bytes());
+    AnsiColor::Reset.write_to_buf(&mut buf);
     buf.extend_from_slice(b"\x1b[?25h"); // Show cursor
 
     let final_y = if term_size.height > 0 {
