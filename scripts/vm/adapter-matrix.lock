@@ -1,0 +1,25 @@
+# bootart exact adapter-pair VM matrix, schema v1
+#
+# Fields (pipe-separated):
+# pair|initramfs_adapter|real_root_adapter|image_id|lane|timeout_seconds|network|root_storage|seed|oracle|status
+#
+# `oracle` is the exact line that a real guest serial transcript must contain
+# once, and only once, before the lane can report PASS.  Listing an oracle here
+# is not test evidence.  Every row remains blocked-unverified until the image
+# row is replaced atomically with a reviewed immutable URL and SHA-256 and an
+# adapter-specific runner is implemented.
+dracut-systemd|dracut-systemd|systemd|fedora-dracut-image-pending-x86_64|lifecycle|300|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_SYSTEMD_LIFECYCLE_PASS_V1|blocked-unverified
+dracut-systemd|dracut-systemd|systemd|fedora-dracut-image-pending-x86_64|install|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|blocked-unverified
+dracut-systemd|dracut-systemd|systemd|fedora-dracut-image-pending-x86_64|password|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_SYSTEMD_PASSWORD_PASS_V1|blocked-unverified
+dracut-classic|dracut-classic|openrc|dracut-classic-openrc-image-pending-x86_64|lifecycle|300|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_CLASSIC_LIFECYCLE_PASS_V1|blocked-unverified
+dracut-classic|dracut-classic|openrc|dracut-classic-openrc-image-pending-x86_64|install|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_CLASSIC_INSTALL_PASS_V1|blocked-unverified
+dracut-classic|dracut-classic|openrc|dracut-classic-openrc-image-pending-x86_64|password|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_DRACUT_CLASSIC_PASSWORD_PASS_V1|blocked-unverified
+initramfs-tools|initramfs-tools-busybox|systemd|debian-initramfs-tools-image-pending-x86_64|lifecycle|300|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_INITRAMFS_TOOLS_LIFECYCLE_PASS_V1|blocked-unverified
+initramfs-tools|initramfs-tools-busybox|systemd|debian-initramfs-tools-image-pending-x86_64|install|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_INITRAMFS_TOOLS_INSTALL_PASS_V1|blocked-unverified
+initramfs-tools|initramfs-tools-busybox|systemd|debian-initramfs-tools-image-pending-x86_64|password|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_INITRAMFS_TOOLS_PASSWORD_PASS_V1|blocked-unverified
+mkinitcpio|mkinitcpio-busybox|systemd|arch-mkinitcpio-image-pending-x86_64|lifecycle|300|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITCPIO_LIFECYCLE_PASS_V1|blocked-unverified
+mkinitcpio|mkinitcpio-busybox|systemd|arch-mkinitcpio-image-pending-x86_64|install|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITCPIO_INSTALL_PASS_V1|blocked-unverified
+mkinitcpio|mkinitcpio-busybox|systemd|arch-mkinitcpio-image-pending-x86_64|password|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITCPIO_PASSWORD_PASS_V1|blocked-unverified
+mkinitfs-openrc|mkinitfs-busybox|openrc|alpine-mkinitfs-openrc-image-pending-x86_64|lifecycle|300|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITFS_OPENRC_LIFECYCLE_PASS_V1|blocked-unverified
+mkinitfs-openrc|mkinitfs-busybox|openrc|alpine-mkinitfs-openrc-image-pending-x86_64|install|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITFS_OPENRC_INSTALL_PASS_V1|blocked-unverified
+mkinitfs-openrc|mkinitfs-busybox|openrc|alpine-mkinitfs-openrc-image-pending-x86_64|password|600|none|immutable-qcow2+private-overlay|read-only-private-seed|BOOTART_VM_MKINITFS_OPENRC_PASSWORD_PASS_V1|blocked-unverified

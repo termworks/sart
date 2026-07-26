@@ -1,0 +1,305 @@
+//! Initramfs/runtime and real-root supervisor integration contracts.
+//!
+//! Integration is deliberately data-only here: no code in this module writes
+//! host files, invokes an image generator, talks to D-Bus, or controls an init
+//! system.  Installer adapters may materialize the embedded resources only
+//! after their own validation and transaction gates are implemented.
+
+pub mod dracut;
+pub mod initramfs_tools;
+pub mod mkinitcpio;
+pub mod mkinitfs;
+pub mod openrc;
+pub mod systemd;
+
+use crate::embedded::TemplateId;
+
+macro_rules! define_adapter_ids {
+    ($($variant:ident),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum AdapterId {
+            $($variant),+
+        }
+
+        impl AdapterId {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+define_adapter_ids! {
+    DracutSystemd,
+    SystemdRealRoot,
+    DracutClassic,
+    InitramfsToolsBusybox,
+    MkinitcpioBusybox,
+    MkinitfsBusybox,
+    OpenRcRealRoot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdapterKind {
+    InitramfsRuntime,
+    RealRootSupervisor,
+}
+
+/// End-to-end support belongs only to an exact initramfs/real-root pair.
+/// Component metadata cannot carry or promote this status independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SupportStatus {
+    ExperimentalUnproven,
+    ProvenSupported,
+}
+
+/// Password brokers belong to an exact initramfs adapter, never to a generic
+/// "non-systemd" capability. Integration alone does not earn support; the
+/// adapter's encrypted-root VM gate still must pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PasswordBrokerStatus {
+    NotApplicable,
+    NotIntegrated,
+    IntegratedUnproven,
+}
+
+impl SupportStatus {
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::ProvenSupported)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdapterMetadata {
+    pub id: AdapterId,
+    pub name: &'static str,
+    pub kind: AdapterKind,
+    pub password_broker: PasswordBrokerStatus,
+    pub resources: &'static [TemplateId],
+    pub limitation: &'static str,
+}
+
+const DRACUT_SYSTEMD_RESOURCES: &[TemplateId] = &[
+    TemplateId::SystemdStartUnit,
+    TemplateId::SystemdShowUnit,
+    TemplateId::SystemdSwitchRootUnit,
+    TemplateId::DracutSystemdModuleSetup,
+];
+
+const SYSTEMD_REAL_ROOT_RESOURCES: &[TemplateId] =
+    &[TemplateId::SystemdQuitUnit, TemplateId::SystemdQuitWaitUnit];
+
+const DRACUT_CLASSIC_RESOURCES: &[TemplateId] = &[
+    TemplateId::DracutClassicModuleSetup,
+    TemplateId::DracutClassicStartHook,
+    TemplateId::DracutClassicAskpassPatchHook,
+    TemplateId::DracutClassicAskpassOverride,
+    TemplateId::DracutClassicPrePivotHook,
+];
+
+const INITRAMFS_TOOLS_RESOURCES: &[TemplateId] = &[
+    TemplateId::InitramfsToolsBuildHook,
+    TemplateId::InitramfsToolsAskpassWrapper,
+    TemplateId::InitramfsToolsEarlyHook,
+    TemplateId::InitramfsToolsBottomHook,
+];
+
+const MKINITCPIO_RESOURCES: &[TemplateId] = &[
+    TemplateId::MkinitcpioInstallHook,
+    TemplateId::MkinitcpioRuntimeHook,
+];
+
+const MKINITFS_RESOURCES: &[TemplateId] = &[
+    TemplateId::MkinitfsFeatureFiles,
+    TemplateId::MkinitfsRuntimeHook,
+    TemplateId::MkinitfsEarlyCallSnippet,
+    TemplateId::MkinitfsHandoffCallSnippet,
+];
+
+const OPENRC_RESOURCES: &[TemplateId] = &[
+    TemplateId::OpenRcSupervisorScript,
+    TemplateId::OpenRcQuitScript,
+];
+
+/// Component inventory only. A component can describe how far its wiring has
+/// progressed, but only the exact pair table in `install` owns support and its
+/// three proof gates.
+pub const ADAPTERS: &[AdapterMetadata] = &[
+    AdapterMetadata {
+        id: AdapterId::DracutSystemd,
+        name: "dracut-systemd-initramfs",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
+        resources: DRACUT_SYSTEMD_RESOURCES,
+        limitation: "systemd password agent is integrated with runtime-identity-gated real-root rebinding, but encrypted-root and switch-root QEMU proof is missing",
+    },
+    AdapterMetadata {
+        id: AdapterId::SystemdRealRoot,
+        name: "systemd-real-root",
+        kind: AdapterKind::RealRootSupervisor,
+        password_broker: PasswordBrokerStatus::NotApplicable,
+        resources: SYSTEMD_REAL_ROOT_RESOURCES,
+        limitation: "quit ordering and VT release are not yet proven in a real guest",
+    },
+    AdapterMetadata {
+        id: AdapterId::DracutClassic,
+        name: "dracut-classic-initramfs",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
+        resources: DRACUT_CLASSIC_RESOURCES,
+        limitation: "native broker uses a structurally guarded current-upstream anonymous-pipe override and conditional restore-before-TTY fallback, but exact upstream compatibility, console fallback/VT ownership, encrypted-root behavior, and switch-root continuity remain VM-unproven",
+    },
+    AdapterMetadata {
+        id: AdapterId::InitramfsToolsBusybox,
+        name: "initramfs-tools-busybox",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
+        resources: INITRAMFS_TOOLS_RESOURCES,
+        limitation: "native broker uses a structurally guarded cryptsetup-initramfs inherited-pipe wrapper with restore-before-console fallback; contract compatibility, cancellation/retry behavior, VT ownership, encrypted-root behavior, and guest lifecycle remain VM-unproven",
+    },
+    AdapterMetadata {
+        id: AdapterId::MkinitcpioBusybox,
+        name: "mkinitcpio-busybox",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::NotIntegrated,
+        resources: MKINITCPIO_RESOURCES,
+        limitation: "no mkinitcpio password broker is integrated; HOOKS ordering and lifecycle are unproven",
+    },
+    AdapterMetadata {
+        id: AdapterId::MkinitfsBusybox,
+        name: "mkinitfs-busybox",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::NotIntegrated,
+        resources: MKINITFS_RESOURCES,
+        limitation: "no mkinitfs password broker is integrated; stock mkinitfs hook insertion is unproven",
+    },
+    AdapterMetadata {
+        id: AdapterId::OpenRcRealRoot,
+        name: "openrc-real-root",
+        kind: AdapterKind::RealRootSupervisor,
+        password_broker: PasswordBrokerStatus::NotApplicable,
+        resources: OPENRC_RESOURCES,
+        limitation: "initramfs-daemon adoption, boot-complete ordering, and VT release are unproven",
+    },
+];
+
+pub fn adapter(id: AdapterId) -> &'static AdapterMetadata {
+    ADAPTERS
+        .iter()
+        .find(|adapter| adapter.id == id)
+        .expect("every AdapterId has static metadata")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedded::{ResourceId, resource};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn component_inventory_is_unique_and_has_no_support_authority() {
+        let mut names = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for metadata in ADAPTERS {
+            assert!(names.insert(metadata.name));
+            assert!(ids.insert(metadata.id));
+            assert!(!metadata.limitation.is_empty());
+            assert!(!metadata.resources.is_empty());
+        }
+        assert_eq!(names.len(), ADAPTERS.len());
+        assert_eq!(ids, AdapterId::ALL.iter().copied().collect::<BTreeSet<_>>());
+    }
+
+    #[test]
+    fn password_broker_status_is_exact_per_initramfs_adapter() {
+        for metadata in ADAPTERS {
+            match metadata.kind {
+                AdapterKind::InitramfsRuntime
+                    if matches!(
+                        metadata.id,
+                        AdapterId::DracutSystemd
+                            | AdapterId::DracutClassic
+                            | AdapterId::InitramfsToolsBusybox
+                    ) =>
+                {
+                    assert_eq!(
+                        metadata.password_broker,
+                        PasswordBrokerStatus::IntegratedUnproven
+                    );
+                    if metadata.id == AdapterId::DracutSystemd {
+                        assert!(metadata.limitation.contains("real-root rebinding"));
+                        assert!(metadata.limitation.contains("QEMU proof is missing"));
+                    } else if metadata.id == AdapterId::DracutClassic {
+                        assert!(metadata.limitation.contains("unproven"));
+                        assert!(metadata.limitation.contains("console fallback"));
+                        assert!(metadata.limitation.contains("encrypted-root"));
+                    } else {
+                        assert!(metadata.limitation.contains("inherited-pipe"));
+                        assert!(metadata.limitation.contains("console fallback"));
+                        assert!(metadata.limitation.contains("encrypted-root"));
+                        assert!(metadata.limitation.contains("VM-unproven"));
+                    }
+                }
+                AdapterKind::InitramfsRuntime => {
+                    assert_eq!(
+                        metadata.password_broker,
+                        PasswordBrokerStatus::NotIntegrated
+                    );
+                    assert!(metadata.limitation.contains("no "));
+                    assert!(metadata.limitation.contains("password"));
+                    assert!(metadata.limitation.contains("integrated"));
+                }
+                AdapterKind::RealRootSupervisor => assert_eq!(
+                    metadata.password_broker,
+                    PasswordBrokerStatus::NotApplicable
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn every_adapter_resource_is_embedded_and_core_calls_stay_init_neutral() {
+        let mut referenced = BTreeSet::new();
+        for metadata in ADAPTERS {
+            let mut mentions_product = false;
+            for &id in metadata.resources {
+                assert!(referenced.insert(id), "duplicate resource owner: {id:?}");
+                let contents = resource(ResourceId::Template(id))
+                    .expect("adapter metadata must reference embedded content");
+                mentions_product |= contents.contains("/usr/bin/bootart");
+                assert!(!contents.contains("systemctl"));
+                assert!(!contents.contains("libsystemd"));
+                assert!(!contents.contains("dbus-send"));
+                assert!(
+                    !contents
+                        .lines()
+                        .any(|line| { line.trim_start().starts_with("exec /usr/bin/bootart") })
+                );
+                assert!(!contents.contains("switch_root"));
+            }
+            assert!(mentions_product);
+        }
+        assert_eq!(
+            referenced,
+            TemplateId::ALL.iter().copied().collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn each_adapter_id_resolves_to_itself() {
+        for &id in AdapterId::ALL {
+            assert_eq!(adapter(id).id, id);
+        }
+    }
+
+    #[test]
+    fn real_root_resources_have_no_late_start_path() {
+        for adapter_id in [AdapterId::SystemdRealRoot, AdapterId::OpenRcRealRoot] {
+            for &id in adapter(adapter_id).resources {
+                let contents = resource(ResourceId::Template(id)).unwrap();
+                assert!(!contents.contains("daemon --mode"));
+                assert!(!contents.contains("--start /usr/bin/bootart"));
+                assert!(!contents.contains("bootart start"));
+                assert!(!contents.contains("supervise-daemon"));
+            }
+        }
+    }
+}

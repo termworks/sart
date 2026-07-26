@@ -1,0 +1,22 @@
+# bootart VM input lock, schema v2
+#
+# Fields (pipe-separated):
+# id|status|url|sha256|format|arch|filename|kernel_member|initramfs_member|download_bytes|max_virtual_bytes|max_run_bytes|max_file_bytes|max_log_bytes|max_evidence_bytes
+#
+# A row is fetchable only when status=verified and sha256 is exactly 64
+# lowercase hexadecimal characters. Verified rows also require independently
+# reviewed positive byte values for all six resource fields. Blocked rows use
+# UNRESOLVED for every resource field, so no guessed cap can become executable
+# policy. download_bytes is the exact immutable input length. For qcow2,
+# max_virtual_bytes caps reported guest geometry; for ISO it caps the locked
+# optical-medium length. max_run_bytes is the aggregate retained run budget,
+# while max_file_bytes, max_log_bytes, and max_evidence_bytes are narrower
+# artifact ceilings. ISO rows name kernel/initramfs members. Real-guest qcow2
+# rows use `-|-`; their immutable base is never attached directly, only through
+# a private overlay.
+alpine-virt-3.20.0-x86_64|blocked|https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-virt-3.20.0-x86_64.iso|BLOCKED_UNVERIFIED|iso|x86_64|alpine-virt-3.20.0-x86_64.iso|/boot/vmlinuz-virt|/boot/initramfs-virt|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+fedora-dracut-image-pending-x86_64|blocked|https://blocked.invalid/fedora-dracut-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|fedora-dracut-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+dracut-classic-openrc-image-pending-x86_64|blocked|https://blocked.invalid/dracut-classic-openrc-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|dracut-classic-openrc-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+debian-initramfs-tools-image-pending-x86_64|blocked|https://blocked.invalid/debian-initramfs-tools-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|debian-initramfs-tools-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+arch-mkinitcpio-image-pending-x86_64|blocked|https://blocked.invalid/arch-mkinitcpio-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|arch-mkinitcpio-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+alpine-mkinitfs-openrc-image-pending-x86_64|blocked|https://blocked.invalid/alpine-mkinitfs-openrc-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|alpine-mkinitfs-openrc-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED

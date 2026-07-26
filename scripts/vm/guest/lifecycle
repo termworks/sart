@@ -1,0 +1,63 @@
+#!/bin/busybox sh
+# TEST INFRASTRUCTURE ONLY. BusyBox init runs this as an ordinary sysinit child.
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+PASS_MARKER='BOOTART_VM_LIFECYCLE_PASS_V1'
+FAIL_MARKER='BOOTART_VM_LIFECYCLE_FAIL_V1'
+
+serial_write() {
+    # Start on a fresh line even if the renderer's last frame had no newline.
+    printf '\n%s\n' "$1" > /dev/ttyS0
+}
+
+fail() {
+    serial_write "$FAIL_MARKER:$1"
+    /bin/busybox poweroff -f >/dev/null 2>&1 || true
+    while :; do /bin/busybox sleep 60; done
+}
+
+/bin/busybox mount -t devtmpfs devtmpfs /dev || true
+/bin/busybox mount -t proc proc /proc || fail mount-proc
+/bin/busybox mount -t sysfs sysfs /sys || fail mount-sys
+
+# Keep the oracle byte-exact instead of allowing tty ONLCR to add CR bytes.
+/bin/busybox stty -F /dev/ttyS0 -opost >/dev/null 2>&1 || fail serial-stty
+
+[ "$$" -gt 1 ] || fail sysinit-script-became-pid1
+pid1_exe="$(/bin/busybox readlink /proc/1/exe 2>/dev/null || true)"
+case "$pid1_exe" in
+    */busybox) ;;
+    *bootart*) fail bootart-is-pid1 ;;
+    *) fail pid1-is-not-busybox-init ;;
+esac
+pid1_cmdline="$(/bin/busybox tr '\000' ' ' < /proc/1/cmdline 2>/dev/null || true)"
+case "$pid1_cmdline" in
+    *init*) ;;
+    *) fail pid1-is-not-init-applet ;;
+esac
+
+[ -x /opt/bootart/bootart ] || fail product-missing
+
+# Run the product as an ordinary child. This finite command is only a hardened
+# lifecycle smoke probe; later gates exercise daemon/switch-root/askpass.
+/opt/bootart/bootart play \
+    --duration-ms 1500 --fps 10 --seed 42 --no-color \
+    --cols 80 --rows 24 >/dev/ttyS0 2>&1 &
+bootart_pid=$!
+
+[ "$bootart_pid" -gt 1 ] || fail product-child-pid
+/bin/busybox sleep 1
+[ -e "/proc/$bootart_pid/exe" ] || fail product-exited-too-early
+child_exe="$(/bin/busybox readlink "/proc/$bootart_pid/exe" 2>/dev/null || true)"
+case "$child_exe" in
+    */bootart) ;;
+    *) fail wrong-child-executable ;;
+esac
+
+wait "$bootart_pid" || fail product-exit
+serial_write "$PASS_MARKER"
+/bin/busybox sync
+/bin/busybox poweroff -f >/dev/null 2>&1 || true
+while :; do /bin/busybox sleep 60; done

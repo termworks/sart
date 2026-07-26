@@ -69,11 +69,13 @@ pub struct AnimationMetadata {
     pub width: usize,
     pub height: usize,
     pub cells: Vec<AnimatedCell>,
+    cell_indices: Vec<Option<usize>>,
 }
 
 impl AnimationMetadata {
     pub fn new(art: &Art, seed: u64) -> Self {
         let mut cells = Vec::new();
+        let mut cell_indices = vec![None; art.width.saturating_mul(art.height)];
         for y in 0..art.height {
             for x in 0..art.width {
                 let glyph = art.get_cell(x, y);
@@ -81,6 +83,7 @@ impl AnimationMetadata {
                     continue;
                 }
 
+                let cell_index = cells.len();
                 cells.push(AnimatedCell {
                     x,
                     y,
@@ -88,6 +91,7 @@ impl AnimationMetadata {
                     reveal_threshold: 0.0,
                     color_phase: 0,
                 });
+                cell_indices[y * art.width + x] = Some(cell_index);
             }
         }
 
@@ -96,7 +100,22 @@ impl AnimationMetadata {
             width: art.width,
             height: art.height,
             cells,
+            cell_indices,
         }
+    }
+
+    /// Return animation metadata for a cell in constant time.
+    pub fn cell_at(&self, x: usize, y: usize) -> Option<&AnimatedCell> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let index = self
+            .cell_indices
+            .get(y * self.width + x)
+            .copied()
+            .flatten()?;
+        self.cells.get(index)
     }
 }
 
@@ -130,7 +149,10 @@ pub fn cell_color_at(
         return Some((cell.glyph, AnsiColor::LightGray));
     }
 
-    let max_span = ((art_width + art_height * 2 + 30) as f32 * 0.75) as i32;
+    let max_span = (art_width
+        .saturating_add(art_height.saturating_mul(2))
+        .saturating_add(30) as f32
+        * 0.75) as i32;
 
     // Pick random 12-angle sweep directions per iteration
     let dir_1 = (cell_hash(iteration as u64 ^ 0x3000, 0, 0) % 12) as usize;
@@ -152,17 +174,18 @@ pub fn cell_color_at(
         AnsiColor::Magenta,
     ];
 
-    let shift_1 = (iteration * 5 + 1) % initramfs_12_palette.len();
+    let shift_1 = iteration.wrapping_mul(5).wrapping_add(1) % initramfs_12_palette.len();
     let mut colors_0 = [AnsiColor::Reset; 7];
     for i in 0..6 {
         colors_0[i] = initramfs_12_palette[(i + shift_1) % initramfs_12_palette.len()];
     }
     colors_0[6] = AnsiColor::BrightWhite;
 
-    let shift_2 = (iteration * 5 + 7) % initramfs_12_palette.len();
+    let shift_2 = iteration.wrapping_mul(5).wrapping_add(7) % initramfs_12_palette.len();
     let mut colors_1 = [AnsiColor::Reset; 7];
     for i in 0..6 {
-        colors_1[i] = initramfs_12_palette[initramfs_12_palette.len() - 1 - (i + shift_2) % initramfs_12_palette.len()];
+        colors_1[i] = initramfs_12_palette
+            [initramfs_12_palette.len() - 1 - (i + shift_2) % initramfs_12_palette.len()];
     }
     colors_1[6] = AnsiColor::Reset;
 
@@ -239,5 +262,17 @@ mod tests {
         assert_eq!(smoothstep(0.0), 0.0);
         assert_eq!(smoothstep(1.0), 1.0);
         assert_eq!(smoothstep(0.5), 0.5);
+    }
+
+    #[test]
+    fn test_metadata_cell_lookup() {
+        let art = Art::parse("X X\n XX").unwrap();
+        let metadata = AnimationMetadata::new(&art, 42);
+
+        assert_eq!(metadata.cell_at(0, 0).map(|cell| cell.glyph), Some('X'));
+        assert!(metadata.cell_at(1, 0).is_none());
+        assert_eq!(metadata.cell_at(2, 1).map(|cell| cell.glyph), Some('X'));
+        assert!(metadata.cell_at(3, 0).is_none());
+        assert!(metadata.cell_at(0, 2).is_none());
     }
 }

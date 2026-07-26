@@ -23,3 +23,10 @@ __pycache__/
 compile_commands.json
 .complog
 .quickfix
+
+# These are product source/delivery files. Override broad personal/global
+# ignore patterns such as `install` and `PLAN.md` so a normal commit cannot
+# silently omit the implementation plan or transactional installer module.
+!/PLAN.md
+!/src/install/
+!/src/install/**

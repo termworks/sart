@@ -30,6 +30,8 @@ pub enum ValidationError {
     ContainsTab,
     ContainsNul,
     ContainsStandaloneCarriageReturn,
+    ContainsControl { codepoint: u32 },
+    ExceedsMaxBytes { length: usize, max: usize },
     ExceedsMaxWidth { width: usize, max: usize },
     ExceedsMaxHeight { height: usize, max: usize },
 }
@@ -38,17 +40,33 @@ impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ValidationError::Empty => write!(f, "art file is empty"),
-            ValidationError::NoVisibleCharacters => write!(f, "art contains no non-space visible characters"),
+            ValidationError::NoVisibleCharacters => {
+                write!(f, "art contains no non-space visible characters")
+            }
             ValidationError::ContainsTab => write!(f, "art contains tab characters"),
             ValidationError::ContainsNul => write!(f, "art contains NUL bytes"),
             ValidationError::ContainsStandaloneCarriageReturn => {
                 write!(f, "art contains un-normalized carriage return '\\r'")
             }
+            ValidationError::ContainsControl { codepoint } => {
+                write!(f, "art contains unsafe control character U+{codepoint:04X}")
+            }
+            ValidationError::ExceedsMaxBytes { length, max } => {
+                write!(f, "art is {length} bytes; maximum allowed is {max} bytes")
+            }
             ValidationError::ExceedsMaxWidth { width, max } => {
-                write!(f, "art width ({} cols) exceeds maximum allowed ({} cols)", width, max)
+                write!(
+                    f,
+                    "art width ({} cols) exceeds maximum allowed ({} cols)",
+                    width, max
+                )
             }
             ValidationError::ExceedsMaxHeight { height, max } => {
-                write!(f, "art height ({} rows) exceeds maximum allowed ({} rows)", height, max)
+                write!(
+                    f,
+                    "art height ({} rows) exceeds maximum allowed ({} rows)",
+                    height, max
+                )
             }
         }
     }
@@ -58,6 +76,7 @@ impl std::error::Error for ValidationError {}
 
 pub const MAX_ART_WIDTH: usize = 512;
 pub const MAX_ART_HEIGHT: usize = 256;
+pub const MAX_ART_BYTES: usize = 1024 * 1024;
 
 impl Art {
     pub fn parse(input: &str) -> Result<Self, ValidationError> {
@@ -72,6 +91,12 @@ impl Art {
         if input.is_empty() {
             return Err(ValidationError::Empty);
         }
+        if input.len() > MAX_ART_BYTES {
+            return Err(ValidationError::ExceedsMaxBytes {
+                length: input.len(),
+                max: MAX_ART_BYTES,
+            });
+        }
 
         // Normalize CRLF to LF
         let normalized = input.replace("\r\n", "\n");
@@ -85,6 +110,11 @@ impl Art {
             }
             if ch == '\t' {
                 return Err(ValidationError::ContainsTab);
+            }
+            if ch != '\n' && is_unsafe_art_character(ch) {
+                return Err(ValidationError::ContainsControl {
+                    codepoint: ch as u32,
+                });
             }
         }
 
@@ -129,10 +159,16 @@ impl Art {
         let width = max_len;
 
         if height > max_height {
-            return Err(ValidationError::ExceedsMaxHeight { height, max: max_height });
+            return Err(ValidationError::ExceedsMaxHeight {
+                height,
+                max: max_height,
+            });
         }
         if width > max_width {
-            return Err(ValidationError::ExceedsMaxWidth { width, max: max_width });
+            return Err(ValidationError::ExceedsMaxWidth {
+                width,
+                max: max_width,
+            });
         }
 
         Ok(Art {
@@ -158,6 +194,20 @@ impl Art {
         }
         ' '
     }
+}
+
+fn is_unsafe_art_character(value: char) -> bool {
+    value.is_control()
+        || matches!(
+            value,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 pub fn layout(art_size: Size, terminal_size: Size) -> Layout {
@@ -224,20 +274,55 @@ mod tests {
     #[test]
     fn test_parse_empty() {
         assert_eq!(Art::parse("").unwrap_err(), ValidationError::Empty);
-        assert_eq!(Art::parse("   \n  \n").unwrap_err(), ValidationError::NoVisibleCharacters);
+        assert_eq!(
+            Art::parse("   \n  \n").unwrap_err(),
+            ValidationError::NoVisibleCharacters
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_oversized_input_before_normalization() {
+        let input = "X".repeat(MAX_ART_BYTES + 1);
+        assert!(matches!(
+            Art::parse(&input),
+            Err(ValidationError::ExceedsMaxBytes { .. })
+        ));
     }
 
     #[test]
     fn test_parse_invalid_chars() {
-        assert_eq!(Art::parse("hello\tworld").unwrap_err(), ValidationError::ContainsTab);
-        assert_eq!(Art::parse("hello\0world").unwrap_err(), ValidationError::ContainsNul);
-        assert_eq!(Art::parse("hello\rworld").unwrap_err(), ValidationError::ContainsStandaloneCarriageReturn);
+        assert_eq!(
+            Art::parse("hello\tworld").unwrap_err(),
+            ValidationError::ContainsTab
+        );
+        assert_eq!(
+            Art::parse("hello\0world").unwrap_err(),
+            ValidationError::ContainsNul
+        );
+        assert_eq!(
+            Art::parse("hello\rworld").unwrap_err(),
+            ValidationError::ContainsStandaloneCarriageReturn
+        );
+        assert_eq!(
+            Art::parse("hello\u{1b}[2Jworld").unwrap_err(),
+            ValidationError::ContainsControl { codepoint: 0x1b }
+        );
+        assert_eq!(
+            Art::parse("left\u{202e}right").unwrap_err(),
+            ValidationError::ContainsControl { codepoint: 0x202e }
+        );
     }
 
     #[test]
     fn test_layout_fitting() {
-        let art_size = Size { width: 10, height: 4 };
-        let term_size = Size { width: 80, height: 24 };
+        let art_size = Size {
+            width: 10,
+            height: 4,
+        };
+        let term_size = Size {
+            width: 80,
+            height: 24,
+        };
         let l = layout(art_size, term_size);
 
         assert_eq!(l.visible_width, 10);

@@ -1,100 +1,139 @@
 {
-  description = "tounge Rust development shell";
+  description = "bootart Rust and isolated QEMU development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
     flake-utils.url = "github:numtide/flake-utils";
-    nixgl.url = "github:nix-community/nixGL";
   };
 
   outputs =
-    { nixpkgs, flake-utils, nixgl, ... }:
+    { nixpkgs, flake-utils, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        overlays = [
-          (final: prev: {
-            xorg = prev.xorg // {
-              libX11 = final.libx11;
-              libxcb = final.libxcb;
-              libxshmfence = final.libxshmfence;
-            };
-          })
+        pkgs = import nixpkgs { inherit system; };
+        lib = pkgs.lib;
+        cargoPackage = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package;
+        supportedLinux = builtins.elem system [
+          "x86_64-linux"
+          "aarch64-linux"
         ];
+        expectedElfArch =
+          if system == "x86_64-linux" then
+            "x86_64"
+          else if system == "aarch64-linux" then
+            "aarch64"
+          else
+            null;
+        bootartSource = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./Cargo.toml
+            ./Cargo.lock
+            ./LICENSE
+            ./README.md
+            ./src
+            # Cargo validates this explicitly declared, feature-gated test
+            # target while reading the manifest. It is never selected for the
+            # release build and cannot add a release payload.
+            ./tests/installer_tests.rs
+          ];
+        };
+        bootartStatic = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+          pname = cargoPackage.name;
+          version = cargoPackage.version;
+          src = bootartSource;
 
-        pkgs = import nixpkgs {
-          inherit system overlays;
-          config = {
-            allowUnfree = true;
-            nvidia.acceptLicense = true;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [
+            "--no-default-features"
+            "--bin"
+            "bootart"
+          ];
+
+          # The repository's Make verification runs tests before packaging.
+          # pkgsStatic is a cross package set even when CPU architectures match,
+          # so executing Cargo test binaries here would be toolchain-dependent.
+          doCheck = false;
+          strictDeps = true;
+
+          nativeBuildInputs = with pkgs.buildPackages; [
+            bash
+            binutils
+            coreutils
+            findutils
+            gnugrep
+            gnused
+          ];
+
+          # Inspect the final, stripped Nix output. Never use ldd here: ldd can
+          # execute an untrusted ELF on some systems.
+          postFixup = ''
+            READELF=${pkgs.buildPackages.binutils}/bin/readelf \
+              ${pkgs.buildPackages.bash}/bin/bash \
+              ${./scripts/artifact-inspect.sh} \
+              ${lib.escapeShellArg expectedElfArch} \
+              "$out/bin/bootart" "$out/bin"
+          '';
+
+          meta = {
+            description = "Self-contained Plymouth-style text boot splash";
+            license = lib.licenses.mit;
+            mainProgram = "bootart";
+            platforms = [
+              "x86_64-linux"
+              "aarch64-linux"
+            ];
           };
         };
-
-        nvidiaVersion = builtins.getEnv "NVIDIA_VERSION";
-        hasNvidia = nvidiaVersion != "";
-
-        nixglPkgs = import "${nixgl}/default.nix" ({
-          inherit pkgs;
-        } // pkgs.lib.optionalAttrs hasNvidia {
-          inherit nvidiaVersion;
-          nvidiaHash = null;
-        });
-
-        nixGLTarget =
-          if hasNvidia
-          then "${nixglPkgs.nixGLNvidia}/bin/nixGLNvidia-${nvidiaVersion}"
-          else "${nixglPkgs.nixGLIntel}/bin/nixGLIntel";
-        nixVulkanTarget =
-          if hasNvidia
-          then "${nixglPkgs.nixVulkanNvidia}/bin/nixVulkanNvidia-${nvidiaVersion}"
-          else "${nixglPkgs.nixVulkanIntel}/bin/nixVulkanIntel";
-
-        nixGLAlias = pkgs.runCommand "nixGL" { } ''
-          mkdir -p $out/bin
-          ln -s ${nixGLTarget} $out/bin/nixGL
-        '';
-        nixVulkanAlias = pkgs.runCommand "nixVulkan" { } ''
-          mkdir -p $out/bin
-          ln -s ${nixVulkanTarget} $out/bin/nixVulkan
-        '';
-
-        guiLibs = with pkgs; [
-          alsa-lib
-          udev
-          vulkan-loader
-          libxkbcommon
-          wayland
-          libx11
-          libxcursor
-          libxi
-          libxrandr
-        ];
       in
-      {
+      (lib.optionalAttrs supportedLinux {
+        packages.bootart-static = bootartStatic;
+        packages.default = bootartStatic;
+        checks.bootart-static = bootartStatic;
+      })
+      // {
         devShells.default = pkgs.mkShell {
-          packages = [
-            pkgs.rustc
-            pkgs.cargo
-            pkgs.rustfmt
-            pkgs.clippy
-            pkgs.rust-analyzer
-            pkgs.git-cliff
-            pkgs.clang
-            pkgs.mold
-            pkgs.pkg-config
+          packages = with pkgs; [
+            rustc
+            cargo
+            rustfmt
+            clippy
+            rust-analyzer
+            gnumake
+            pkg-config
+            clang
+            mold
+            git-cliff
 
-            nixGLAlias
-            nixVulkanAlias
-            nixglPkgs.nixGLIntel
-            nixglPkgs.nixVulkanIntel
-          ] ++ pkgs.lib.optionals hasNvidia [
-            nixglPkgs.nixGLNvidia
-            nixglPkgs.nixVulkanNvidia
-          ] ++ guiLibs;
+            # Artifact and initramfs inspection.
+            binutils
+            diffutils
+            file
+            cpio
+            gzip
+            xz
+            zstd
+            xorriso
+            squashfsTools
 
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath guiLibs;
-          WGPU_VALIDATION = "0";
-          WGPU_DEBUG = "0";
+            # Disposable VM harness.
+            qemu
+            qemu-utils
+            curl
+            cacert
+            jq
+            socat
+            util-linux
+            busybox
+            coreutils
+            findutils
+            gnugrep
+            gnused
+            gawk
+          ];
+
+          BOOTART_VM_ROOT = "${toString ./.}/target/vm";
         };
       }
     );

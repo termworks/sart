@@ -1,0 +1,3 @@
+::sysinit:/opt/bootart-vm/lifecycle
+::shutdown:/bin/busybox umount -a -r
+::restart:/bin/busybox init
