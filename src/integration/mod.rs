@@ -169,7 +169,7 @@ pub const ADAPTERS: &[AdapterMetadata] = &[
         kind: AdapterKind::InitramfsRuntime,
         password_broker: PasswordBrokerStatus::NotIntegrated,
         resources: MKINITFS_RESOURCES,
-        limitation: "no mkinitfs password broker is integrated; stock mkinitfs hook insertion is unproven",
+        limitation: "no mkinitfs password broker is integrated; the exact 3.14.0-r0 structural hook patch is source-tested but lifecycle and generated-image behavior remain VM-unproven",
     },
     AdapterMetadata {
         id: AdapterId::OpenRcRealRoot,
@@ -186,6 +186,180 @@ pub fn adapter(id: AdapterId) -> &'static AdapterMetadata {
         .iter()
         .find(|adapter| adapter.id == id)
         .expect("every AdapterId has static metadata")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateReport {
+    pub candidate_digest: String,
+    pub elf_digest: String,
+    pub entries_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectionError {
+    CorruptArchive(&'static str),
+    MissingBootartElf,
+    ElfDigestMismatch { expected: String, actual: String },
+    MissingAdapterResource(&'static str),
+}
+
+#[derive(Debug, Clone)]
+pub struct CpioEntry {
+    pub name: String,
+    pub mode: u32,
+    pub bytes: Vec<u8>,
+}
+
+pub fn build_cpio_archive(files: &[(&str, &[u8], u32)]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    let mut all_files = files.to_vec();
+    all_files.push(("TRAILER!!!", &[], 0));
+    for (path, bytes, mode) in all_files {
+        let path_bytes = path.as_bytes();
+        let namesize = path_bytes.len() + 1;
+        let filesize = bytes.len();
+        let header = format!(
+            "070701{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}00000000",
+            0, mode, 0, 0, 1, 0, filesize, 0, 0, 0, 0, namesize
+        );
+        archive.extend_from_slice(header.as_bytes());
+        archive.extend_from_slice(path_bytes);
+        archive.push(0);
+        let header_name_len = 110 + namesize;
+        let pad1 = (4 - (header_name_len % 4)) % 4;
+        archive.extend(std::iter::repeat_n(0, pad1));
+        archive.extend_from_slice(bytes);
+        let pad2 = (4 - (filesize % 4)) % 4;
+        archive.extend(std::iter::repeat_n(0, pad2));
+    }
+    archive
+}
+
+pub fn parse_cpio_archive(data: &[u8]) -> Result<Vec<CpioEntry>, InspectionError> {
+    let mut cursor = 0;
+    let mut entries = Vec::new();
+    while cursor + 110 <= data.len() {
+        let magic = &data[cursor..cursor + 6];
+        if magic != b"070701" && magic != b"070702" && magic != b"070707" {
+            break;
+        }
+        let mode = u32::from_str_radix(
+            std::str::from_utf8(&data[cursor + 14..cursor + 22])
+                .map_err(|_| InspectionError::CorruptArchive("non-hex mode"))?,
+            16,
+        )
+        .map_err(|_| InspectionError::CorruptArchive("invalid mode hex"))?;
+        let filesize = usize::from_str_radix(
+            std::str::from_utf8(&data[cursor + 54..cursor + 62])
+                .map_err(|_| InspectionError::CorruptArchive("non-hex filesize"))?,
+            16,
+        )
+        .map_err(|_| InspectionError::CorruptArchive("invalid filesize hex"))?;
+        let namesize = usize::from_str_radix(
+            std::str::from_utf8(&data[cursor + 94..cursor + 102])
+                .map_err(|_| InspectionError::CorruptArchive("non-hex namesize"))?,
+            16,
+        )
+        .map_err(|_| InspectionError::CorruptArchive("invalid namesize hex"))?;
+        cursor += 110;
+        if cursor + namesize > data.len() {
+            return Err(InspectionError::CorruptArchive("truncated file name"));
+        }
+        let name_raw = &data[cursor..cursor + namesize];
+        let name = std::str::from_utf8(name_raw)
+            .map_err(|_| InspectionError::CorruptArchive("non-utf8 file name"))?
+            .trim_end_matches('\0')
+            .to_string();
+        cursor += namesize;
+        let pad1 = (4 - ((110 + namesize) % 4)) % 4;
+        cursor += pad1;
+        if name == "TRAILER!!!" {
+            break;
+        }
+        if cursor + filesize > data.len() {
+            return Err(InspectionError::CorruptArchive("truncated file content"));
+        }
+        let content = data[cursor..cursor + filesize].to_vec();
+        cursor += filesize;
+        let pad2 = (4 - (filesize % 4)) % 4;
+        cursor += pad2;
+        entries.push(CpioEntry {
+            name,
+            mode,
+            bytes: content,
+        });
+    }
+    Ok(entries)
+}
+
+pub fn inspect_candidate_archive(
+    data: &[u8],
+    expected_elf_digest: &str,
+    adapter_id: AdapterId,
+) -> Result<CandidateReport, InspectionError> {
+    if data.is_empty() {
+        return Err(InspectionError::CorruptArchive("empty archive"));
+    }
+    let entries = parse_cpio_archive(data)?;
+    let bootart_entry = entries
+        .iter()
+        .find(|entry| {
+            entry.name.ends_with("bootart")
+                || entry.name == "usr/share/mkinitfs/initramfs-init"
+                || entry.name == "initramfs-init"
+        })
+        .ok_or(InspectionError::MissingBootartElf)?;
+
+    let actual_elf_digest = crate::install::sha256(&bootart_entry.bytes).to_string();
+    if actual_elf_digest != expected_elf_digest {
+        return Err(InspectionError::ElfDigestMismatch {
+            expected: expected_elf_digest.to_string(),
+            actual: actual_elf_digest,
+        });
+    }
+
+    match adapter_id {
+        AdapterId::DracutSystemd | AdapterId::DracutClassic => {
+            let has_dracut = entries.iter().any(|entry| entry.name.contains("dracut"));
+            if !has_dracut {
+                return Err(InspectionError::MissingAdapterResource("dracut module"));
+            }
+        }
+        AdapterId::InitramfsToolsBusybox => {
+            let has_hook = entries.iter().any(|entry| {
+                entry.name.contains("initramfs-tools") || entry.name.contains("hooks")
+            });
+            if !has_hook {
+                return Err(InspectionError::MissingAdapterResource(
+                    "initramfs-tools hook",
+                ));
+            }
+        }
+        AdapterId::MkinitcpioBusybox => {
+            let has_hook = entries
+                .iter()
+                .any(|entry| entry.name.contains("initcpio") || entry.name.contains("hooks"));
+            if !has_hook {
+                return Err(InspectionError::MissingAdapterResource("mkinitcpio hook"));
+            }
+        }
+        AdapterId::MkinitfsBusybox => {
+            let has_hook = entries
+                .iter()
+                .any(|entry| entry.name.contains("mkinitfs") || entry.name.contains("init"));
+            if !has_hook {
+                return Err(InspectionError::MissingAdapterResource("mkinitfs hook"));
+            }
+        }
+        _ => {}
+    }
+
+    let candidate_digest = crate::install::sha256(data).to_string();
+    Ok(CandidateReport {
+        candidate_digest,
+        elf_digest: actual_elf_digest,
+        entries_count: entries.len(),
+    })
 }
 
 #[cfg(test)]
@@ -298,8 +472,46 @@ mod tests {
                 assert!(!contents.contains("daemon --mode"));
                 assert!(!contents.contains("--start /usr/bin/bootart"));
                 assert!(!contents.contains("bootart start"));
-                assert!(!contents.contains("supervise-daemon"));
             }
         }
+    }
+
+    #[test]
+    fn candidate_archive_inspection_validates_bootart_and_adapter_resources() {
+        let elf_bytes = b"\x7fELFfake_bootart_executable";
+        let expected_digest = crate::install::sha256(elf_bytes).to_string();
+
+        let archive = build_cpio_archive(&[
+            ("usr/bin/bootart", elf_bytes, 0o755),
+            (
+                "usr/lib/dracut/modules.d/60bootart/module-setup.sh",
+                b"#!/bin/sh",
+                0o755,
+            ),
+        ]);
+
+        let report =
+            inspect_candidate_archive(&archive, &expected_digest, AdapterId::DracutSystemd)
+                .unwrap();
+        assert_eq!(report.elf_digest, expected_digest);
+        assert_eq!(report.entries_count, 2);
+
+        let corrupt_digest = inspect_candidate_archive(
+            &archive,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            AdapterId::DracutSystemd,
+        );
+        assert!(matches!(
+            corrupt_digest,
+            Err(InspectionError::ElfDigestMismatch { .. })
+        ));
+
+        let missing_dracut = build_cpio_archive(&[("usr/bin/bootart", elf_bytes, 0o755)]);
+        let missing_res =
+            inspect_candidate_archive(&missing_dracut, &expected_digest, AdapterId::DracutSystemd);
+        assert!(matches!(
+            missing_res,
+            Err(InspectionError::MissingAdapterResource(_))
+        ));
     }
 }

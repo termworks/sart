@@ -9,7 +9,7 @@ umask 077
     exit 2
 }
 repo_root=$1
-policy="$repo_root/vm/scripts/check-runner-policy.sh"
+policy="$repo_root/scripts/vm/scripts/check-runner-policy.sh"
 [[ -f "$policy" && ! -L "$policy" ]] || {
     printf 'runner policy is missing or symlinked\n' >&2
     exit 2
@@ -28,13 +28,13 @@ trap cleanup EXIT HUP INT TERM
 new_fixture() {
     local name=$1 root
     root="$tmp/$name"
-    mkdir -p -- "$root/vm/runners/example"
+    mkdir -p -- "$root/scripts/vm/runners/example"
     printf '%s\n' "$root"
 }
 
 write_runner() {
     local root=$1 body=$2 runner
-    runner="$root/vm/runners/example/lifecycle.sh"
+    runner="$root/scripts/vm/runners/example/lifecycle.sh"
     printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n%s\n' "$body" > "$runner"
     chmod 0700 -- "$runner"
     printf '%s\n' "$runner"
@@ -101,7 +101,7 @@ write_runner "$fixture" 'touch "$3/serial.overflow"' >/dev/null
 expect_rejected "$fixture" forged-serial-overflow
 
 fixture="$(new_fixture symlinked-runner)"
-ln -s -- /dev/null "$fixture/vm/runners/example/lifecycle.sh"
+ln -s -- /dev/null "$fixture/scripts/vm/runners/example/lifecycle.sh"
 expect_rejected "$fixture" symlinked-runner
 
 printf 'bootart-vm: runner policy rejection fixtures PASS (runners not executed)\n'

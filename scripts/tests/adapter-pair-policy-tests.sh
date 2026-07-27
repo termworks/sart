@@ -22,14 +22,14 @@ trap cleanup EXIT HUP INT TERM
 
 write_valid_fixture() {
     rm -rf -- "$fixture/repo"
-    mkdir -p -- "$fixture/repo/vm" "$fixture/repo/src/install"
+    mkdir -p -- "$fixture/repo/scripts/vm" "$fixture/repo/src/install"
     cat > "$fixture/repo/Makefile" <<'EOF'
-VM_ADAPTER_PAIRS := alpha-pair beta$()pair
+override VM_ADAPTER_PAIRS := alpha-pair beta$()pair
 EOF
-    cat > "$fixture/repo/vm/Makefile" <<'EOF'
-ADAPTER_PAIRS := alpha-pair beta$()pair
+    cat > "$fixture/repo/scripts/vm/Makefile" <<'EOF'
+override ADAPTER_PAIRS := alpha-pair beta$()pair
 EOF
-    cat > "$fixture/repo/vm/adapter-matrix.lock" <<'EOF'
+    cat > "$fixture/repo/scripts/vm/adapter-matrix.lock" <<'EOF'
 alpha-pair|a|b|image|lifecycle|1|none|overlay|seed|ORACLE|blocked-unverified
 alpha-pair|a|b|image|install|1|none|overlay|seed|ORACLE|blocked-unverified
 alpha-pair|a|b|image|password|1|none|overlay|seed|ORACLE|blocked-unverified
@@ -71,12 +71,35 @@ write_valid_fixture
 bash "$policy" "$fixture/repo" >/dev/null
 
 write_valid_fixture
-sed -i 's/ alpha-pair//' "$fixture/repo/vm/Makefile"
+sed -i 's/^override VM_ADAPTER_PAIRS/VM_ADAPTER_PAIRS/' "$fixture/repo/Makefile"
+expect_rejected make-pair-command-line-override
+
+write_valid_fixture
+printf '%s\n' 'override VM_ADAPTER_PAIRS += injected-pair' >> "$fixture/repo/Makefile"
+expect_rejected duplicate-make-pair-assignment
+
+write_valid_fixture
+printf '%s\n' 'override ADAPTER_PAIRS ::= injected-pair' \
+    >> "$fixture/repo/scripts/vm/Makefile"
+expect_rejected alternate-operator-make-pair-assignment
+
+write_valid_fixture
+sed -i 's/ alpha-pair//' "$fixture/repo/scripts/vm/Makefile"
 expect_rejected make-drift
 
 write_valid_fixture
-sed -i '/alpha-pair|.*password/d' "$fixture/repo/vm/adapter-matrix.lock"
+sed -i '/alpha-pair|.*password/d' "$fixture/repo/scripts/vm/adapter-matrix.lock"
 expect_rejected missing-matrix-lane
+
+write_valid_fixture
+sed -i 's/alpha-pair|a|b|image|password|/alpha-pair|a|b|image|lifecycle|/' \
+    "$fixture/repo/scripts/vm/adapter-matrix.lock"
+expect_rejected duplicate-matrix-lane
+
+write_valid_fixture
+sed -i 's/alpha-pair|a|b|image|password|/alpha-pair|a|b|image|unknown|/' \
+    "$fixture/repo/scripts/vm/adapter-matrix.lock"
+expect_rejected unknown-matrix-lane
 
 write_valid_fixture
 sed -i '/vm-test-password-alpha-pair/d' "$fixture/repo/src/install/mod.rs"

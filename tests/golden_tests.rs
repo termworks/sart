@@ -1,5 +1,6 @@
 use bootart::animation::AnimationMetadata;
 use bootart::art::{Art, Size, layout};
+use bootart::embedded::{ArtId, art};
 use bootart::renderer::{FrameOptions, generate_frame_bytes};
 use bootart::terminal::TerminalSize;
 use bootart::{DEFAULT_LOGO, SMALL_LOGO};
@@ -7,15 +8,11 @@ use std::fs;
 use std::path::Path;
 
 #[test]
-fn literal_art_matches_reviewable_non_product_fixtures() {
-    assert_eq!(
-        DEFAULT_LOGO.as_bytes(),
-        include_str!("../assets/logo.txt").as_bytes()
-    );
-    assert_eq!(
-        SMALL_LOGO.as_bytes(),
-        include_str!("../assets/logo-small.txt").as_bytes()
-    );
+fn literal_art_is_self_contained_and_typed() {
+    assert_eq!(DEFAULT_LOGO, art(ArtId::Default));
+    assert_eq!(SMALL_LOGO, art(ArtId::Small));
+    Art::parse(DEFAULT_LOGO).expect("embedded default art must remain valid");
+    Art::parse(SMALL_LOGO).expect("embedded compact art must remain valid");
 }
 
 #[test]

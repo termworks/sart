@@ -16,6 +16,10 @@ wrapper=$repo_root/scripts/guest-install-readonly.sh
     printf 'guest installer wrapper is missing or symlinked\n' >&2
     exit 2
 }
+if grep -Fq -- '--bootart-elf' "$wrapper"; then
+    printf 'guest installer wrapper must not expose an alternate executable payload\n' >&2
+    exit 1
+fi
 
 tmp_parent=${TMPDIR:-/tmp}
 tmp=$(mktemp -d "$tmp_parent/bootart-guest-guard-tests.XXXXXXXXXX")
@@ -42,19 +46,23 @@ expect_rejected() {
     fi
 }
 
+with_artifact_lock() {
+    bash "$repo_root/scripts/artifact-lock.sh" "$repo_root" "$@"
+}
+
 expect_rejected missing-root 'ROOT is required' \
-    env -u BOOTART_GUEST_ROOT bash "$wrapper" "$repo_root" plan
+    with_artifact_lock env -u BOOTART_GUEST_ROOT bash "$wrapper" "$repo_root" plan
 expect_rejected host-root 'ROOT=/ is categorically forbidden' \
-    env BOOTART_GUEST_ROOT=/ bash "$wrapper" "$repo_root" status
+    with_artifact_lock env BOOTART_GUEST_ROOT=/ bash "$wrapper" "$repo_root" status
 expect_rejected relative-root 'ROOT must be an absolute alternate-root path' \
-    env BOOTART_GUEST_ROOT=relative bash "$wrapper" "$repo_root" status
+    with_artifact_lock env BOOTART_GUEST_ROOT=relative bash "$wrapper" "$repo_root" status
 expect_rejected invalid-pair 'unsupported exact adapter pair' \
-    env BOOTART_GUEST_ROOT="$tmp/root" \
+    with_artifact_lock env BOOTART_GUEST_ROOT="$tmp/root" \
         BOOTART_GUEST_INITRAMFS_ADAPTER=dracut-systemd \
         BOOTART_GUEST_REAL_ROOT_ADAPTER=openrc \
         bash "$wrapper" "$repo_root" plan
 expect_rejected invalid-format 'PLAN_FORMAT must be exactly human or json' \
-    env BOOTART_GUEST_ROOT="$tmp/root" \
+    with_artifact_lock env BOOTART_GUEST_ROOT="$tmp/root" \
         BOOTART_GUEST_INITRAMFS_ADAPTER=dracut-systemd \
         BOOTART_GUEST_REAL_ROOT_ADAPTER=systemd \
         BOOTART_GUEST_PLAN_FORMAT=yaml \

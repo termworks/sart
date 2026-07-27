@@ -19,13 +19,28 @@ requested_runner=${2:-}
 physical_root="$(cd -- "$repo_root" && pwd -P)" || die 'cannot resolve repository root'
 [[ "$physical_root" == "$repo_root" ]] || die 'repository root must be canonical'
 
-runner_root="$repo_root/vm/runners"
+runner_root="$repo_root/scripts/vm/runners"
 if [[ ! -e "$runner_root" ]]; then
     [[ -z "$requested_runner" ]] || die 'requested runner tree does not exist'
     printf 'bootart-vm: runner source policy PASS (no runners present)\n'
     exit 0
 fi
-[[ -d "$runner_root" && ! -L "$runner_root" ]] || die 'runner tree must be a real directory'
+
+require_safe_runner_directory() {
+    local directory=$1 mode
+    [[ -d "$directory" && ! -L "$directory" ]] ||
+        die "runner ancestor must be a real directory: $directory"
+    [[ -O "$directory" ]] || die "runner ancestor is not owned by the current user: $directory"
+    mode="$(stat -c '%a' -- "$directory")" || die "cannot inspect runner ancestor mode: $directory"
+    (( (8#$mode & 0022) == 0 )) ||
+        die "runner ancestor is group/world writable: $directory"
+}
+
+for directory in \
+    "$repo_root" "$repo_root/scripts" "$repo_root/scripts/vm" "$runner_root"
+do
+    require_safe_runner_directory "$directory"
+done
 if unsafe_link="$(find "$runner_root" -xdev -type l -print -quit)" && [[ -n "$unsafe_link" ]]; then
     die "symlinked runner source is forbidden: $unsafe_link"
 fi
@@ -36,7 +51,7 @@ if [[ -n "$requested_runner" ]]; then
        "$requested_runner" != *$'\r'* ]] || die 'runner path must be absolute and single-line'
     relative=${requested_runner#"$runner_root"/}
     [[ "$relative" != "$requested_runner" && "$relative" == */*.sh && "$relative" != */*/* ]] ||
-        die 'runner must be exactly vm/runners/PAIR/LANE.sh'
+        die 'runner must be exactly scripts/vm/runners/PAIR/LANE.sh'
     [[ -f "$requested_runner" && ! -L "$requested_runner" ]] ||
         die 'requested runner must be a regular non-symlink file'
     runner_physical="$(readlink -f -- "$requested_runner")" || die 'cannot resolve requested runner'
@@ -52,6 +67,7 @@ violations=0
 indirect_pattern='(^|[^[:alnum:]_.-])(exec|ev''al|command|env|nohup|setsid|xargs)([^[:alnum:]_.-]|$)'
 mutation_pattern='(^|[^[:alnum:]_.-])(cp|mv|install|rm|unlink|ln|mkdir|rmdir|touch|truncate|chmod|chown|chgrp|tee|d''d|tar|rsync)([^[:alnum:]_.-]|$)'
 for runner in "${runners[@]}"; do
+    require_safe_runner_directory "${runner%/*}"
     [[ -f "$runner" && ! -L "$runner" ]] || die "runner source is missing or unsafe: $runner"
     [[ -O "$runner" ]] || die "runner source is not owned by the current user: $runner"
     mode="$(stat -c '%a' -- "$runner")" || die "cannot inspect runner mode: $runner"
@@ -92,7 +108,7 @@ for runner in "${runners[@]}"; do
 
                 # These records are created and authenticated only by the
                 # common wrapper. Runners have no reason even to name them.
-                if (text ~ /(lane[.]result|qemu[.]args|qemu[.]policy[.]sha256|qemu[.](pid|starttime|exe)|qmp[.]log|serial[.]overflow|secret-scan[.]matches|runner-bin)/) {
+                if (text ~ /(lane[.]result|qemu[.]args|qemu[.]policy[.]sha256|qemu[.](pid|starttime|exe|identity)|qmp[.]log|serial[.]overflow|secret-scan[.]matches|runner-bin)/) {
                     report("common-wrapper-owned record reference is forbidden")
                     next
                 }

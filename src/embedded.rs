@@ -328,7 +328,7 @@ pub const fn template_resource(id: TemplateId) -> TemplateResource {
         TemplateId::MkinitfsHandoffCallSnippet => (
             TemplateMaterialization::ManagedSnippet {
                 target: "/usr/share/mkinitfs/initramfs-init",
-                insertion_point: "post-sysroot-mount-before-mount-move",
+                insertion_point: "post-initramfs-mount-move-before-switch-root",
             },
             mkinitfs::HANDOFF_CALL_SNIPPET,
         ),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TEST INFRASTRUCTURE ONLY. Shared safety primitives for vm/* scripts.
+# TEST INFRASTRUCTURE ONLY. Shared safety primitives for scripts/vm/* scripts.
 
 set -Eeuo pipefail
 umask 077
@@ -56,6 +56,36 @@ vm_resolve_qemu_img() {
     [[ -f "$resolved" && -x "$resolved" && ! -L "$resolved" ]] ||
         vm_die "configured qemu-img is not a canonical executable file: $resolved"
     printf '%s\n' "$resolved"
+}
+
+# Stable identity for an already-canonical executable path. Device/inode
+# catches the normal package-manager replacement model (rename a new file over
+# the old path) without trusting the pathname again at launch time.
+vm_executable_identity() {
+    local path=$1 identity
+    [[ "$path" == /* && -f "$path" && -x "$path" && ! -L "$path" ]] ||
+        vm_die "executable identity input is not a canonical executable file: $path"
+    identity="$(stat -Lc '%d:%i' -- "$path")" ||
+        vm_die "cannot inspect executable identity: $path"
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] ||
+        vm_die "invalid executable identity: $path"
+    printf '%s\n' "$identity"
+}
+
+vm_assert_executable_identity() {
+    local path=$1 expected=$2 label=$3 actual
+    [[ "$expected" =~ ^[0-9]+:[0-9]+$ ]] || vm_die "$label has an invalid pinned identity"
+    actual="$(vm_executable_identity "$path")"
+    [[ "$actual" == "$expected" ]] ||
+        vm_die "$label changed device/inode after validation: $path"
+}
+
+vm_pid_executable_identity() {
+    local pid=$1 identity
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -e "/proc/$pid/exe" ]] || return 1
+    identity="$(stat -Lc '%d:%i' -- "/proc/$pid/exe")" || return 1
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    printf '%s\n' "$identity"
 }
 
 vm_resolve_prlimit() {
@@ -229,6 +259,59 @@ vm_assert_owned() {
     uid="$(id -u)"
     [[ "$(vm_stat_uid "$path")" == "$uid" ]] || \
         vm_die "path is not owned by uid $uid: $path"
+}
+
+# Guest source bytes become executable as PID 1 or early-boot helpers inside a
+# disposable VM. At the actual preparation boundary, every reviewed path from
+# the repository root through the three source files must therefore be owned by
+# this uid and immutable to group/other users. Ordinary read-only policy lanes
+# intentionally do not call this helper, so a common umask-002 checkout can
+# still report why the ready VM lane would refuse it without preparing a guest.
+vm_assert_guest_source_tree() {
+    local repo_root=$1 guest_root expected actual path mode entry
+    guest_root=$repo_root/scripts/vm/guest
+
+    for path in \
+        "$repo_root" \
+        "$repo_root/scripts" \
+        "$repo_root/scripts/vm" \
+        "$guest_root"
+    do
+        [[ -d "$path" && ! -L "$path" ]] ||
+            vm_die "VM guest source ancestor is missing or symlinked: $path"
+        vm_assert_owned "$path"
+        mode="$(vm_stat_mode "$path")" ||
+            vm_die "cannot inspect VM guest source ancestor mode: $path"
+        (( (8#$mode & 0022) == 0 )) ||
+            vm_die "VM guest source ancestor is group/world-writable: $path"
+    done
+
+    actual="$(find "$guest_root" -xdev -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" ||
+        vm_die 'cannot enumerate VM guest source tree'
+    expected=$'init\ninittab\nlifecycle'
+    [[ "$actual" == "$expected" ]] ||
+        vm_die 'VM guest source tree has an unexpected layout'
+
+    for entry in init inittab lifecycle; do
+        path=$guest_root/$entry
+        [[ -f "$path" && ! -L "$path" ]] ||
+            vm_die "VM guest source is missing or symlinked: $path"
+        vm_assert_owned "$path"
+        mode="$(vm_stat_mode "$path")" ||
+            vm_die "cannot inspect VM guest source mode: $path"
+        (( (8#$mode & 0022) == 0 )) ||
+            vm_die "VM guest source is group/world-writable: $path"
+    done
+}
+
+vm_sha256_file() {
+    local path=$1 output digest
+    [[ -f "$path" && ! -L "$path" ]] ||
+        vm_die "cannot hash non-regular or symlinked file: $path"
+    output="$(sha256sum -- "$path")" || vm_die "cannot hash file: $path"
+    digest=${output%%[[:space:]]*}
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || vm_die "invalid SHA-256 for file: $path"
+    printf '%s\n' "$digest"
 }
 
 vm_assert_private_dir() {
@@ -480,22 +563,32 @@ vm_pid_starttime() {
     rest="${stat_line##*) }"
     read -r -a fields <<< "$rest"
     [[ ${#fields[@]} -ge 20 ]] || return 1
-    printf '%s\n' "${fields[19]}"
+    printf '%s\n' "${fields[19]}" 2>/dev/null || true
 }
 
 vm_pid_matches_run() {
-    local run_dir=$1 pid start expected_start expected_exe actual_exe
+    local run_dir=$1 pid start expected_start expected_exe expected_identity actual_exe actual_identity
     [[ -f "$run_dir/qemu.pid" && -f "$run_dir/qemu.starttime" && \
-       -f "$run_dir/qemu.exe" ]] || return 1
+       -f "$run_dir/qemu.exe" && -f "$run_dir/qemu.identity" && \
+       ! -L "$run_dir/qemu.pid" && ! -L "$run_dir/qemu.starttime" && \
+       ! -L "$run_dir/qemu.exe" && ! -L "$run_dir/qemu.identity" ]] || return 1
     pid="$(cat -- "$run_dir/qemu.pid")"
     expected_start="$(cat -- "$run_dir/qemu.starttime")"
     expected_exe="$(cat -- "$run_dir/qemu.exe")"
+    expected_identity="$(cat -- "$run_dir/qemu.identity")"
+    [[ "$expected_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || return 1
     [[ "$(vm_stat_uid "/proc/$pid")" == "$(id -u)" ]] || return 1
     start="$(vm_pid_starttime "$pid")" || return 1
     [[ "$start" == "$expected_start" ]] || return 1
     actual_exe="$(readlink "/proc/$pid/exe")" || return 1
-    [[ "$actual_exe" == "$expected_exe" ]] || return 1
+    # Linux appends " (deleted)" when an atomic package replacement unlinks
+    # the running inode. The pinned device/inode remains authoritative and
+    # still lets cleanup identify that exact direct child safely.
+    [[ "$actual_exe" == "$expected_exe" || \
+       "$actual_exe" == "$expected_exe (deleted)" ]] || return 1
+    actual_identity="$(vm_pid_executable_identity "$pid")" || return 1
+    [[ "$actual_identity" == "$expected_identity" ]] || return 1
     return 0
 }
 

@@ -16,7 +16,7 @@ repo_root=$1
 
 foreground_option='--fore''ground'
 if grep -R -n -E -- "timeout[^#]*${foreground_option}" \
-    "$repo_root/vm/Makefile" "$repo_root/vm/scripts" >/dev/null; then
+    "$repo_root/scripts/vm/Makefile" "$repo_root/scripts/vm/scripts" >/dev/null; then
     printf 'bootart-vm: foreground timeout would not contain descendant processes\n' >&2
     exit 1
 fi
@@ -37,7 +37,7 @@ awk '
         if (!seen["lifecycle"] || !seen["adapter-lifecycle"] ||
             !seen["adapter-install"] || !seen["adapter-password"]) exit 1
     }
-' "$repo_root/vm/Makefile" || {
+' "$repo_root/scripts/vm/Makefile" || {
     printf 'bootart-vm: one or more VM host entry recipes lost process-group timeout containment\n' >&2
     exit 1
 }
@@ -50,12 +50,13 @@ descendant_start=
 
 same_live_process() {
     local pid=$1 expected_start=$2 stat_line rest
-    local -a fields
-    [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/stat" ]] || return 1
-    stat_line="$(cat -- "/proc/$pid/stat")" || return 1
+    local -a fields=()
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected_start" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/stat" ]] || return 1
+    stat_line="$(cat -- "/proc/$pid/stat" 2>/dev/null)" || return 1
+    [[ -n "$stat_line" ]] || return 1
     rest="${stat_line##*) }"
     read -r -a fields <<<"$rest"
-    [[ ${#fields[@]} -ge 20 && "${fields[19]}" == "$expected_start" && \
+    [[ ${#fields[@]} -ge 20 && -n "${fields[19]:-}" && "${fields[19]}" == "$expected_start" && \
        "${fields[0]}" != Z ]]
 }
 
@@ -81,15 +82,11 @@ record=$1
 # Keep both the monitored shell and its descendant alive after TERM. GNU
 # timeout must deliver its later KILL to the entire child process group.
 trap '' TERM
-(
-    trap '' TERM
-    stat_line="$(cat -- "/proc/$BASHPID/stat")"
-    rest="${stat_line##*) }"
-    read -r -a fields <<<"$rest"
-    printf '%s %s\n' "$BASHPID" "${fields[19]}" >"$record"
-    while :; do sleep 30; done
-) &
-wait "$!"
+stat_line="$(cat -- "/proc/$$/stat")"
+rest="${stat_line##*) }"
+read -r -a fields <<<"$rest"
+printf '%s %s\n' "$$" "${fields[19]}" >"$record"
+while :; do sleep 30; done
 EOF
 chmod 0700 -- "$worker"
 
@@ -117,11 +114,12 @@ read -r descendant_pid descendant_start <"$record"
     exit 1
 }
 
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+for _ in $(seq 1 30); do
     same_live_process "$descendant_pid" "$descendant_start" || break
-    sleep 0.05
+    sleep 0.1
 done
 if same_live_process "$descendant_pid" "$descendant_start"; then
+    ps -p "$descendant_pid" -o pid,ppid,pgid,stat,cmd >&2 || true
     printf 'bootart-vm: timeout left a live descendant outside containment\n' >&2
     exit 1
 fi

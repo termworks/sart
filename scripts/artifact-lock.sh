@@ -25,12 +25,22 @@ lock_file=$repo_root/.bootart-artifacts.lock
     die 'tracked artifact lock sentinel is invalid'
 [[ "$(stat -c '%u' -- "$lock_file")" == "$(id -u)" ]] ||
     die 'tracked artifact lock is not owned by the current uid'
+command -v flock >/dev/null 2>&1 || die 'flock is required for artifact serialization'
+
+# Recursive Make boundaries inherit the original open file description. Reuse
+# it only after proving that it names and still owns this repository's lock;
+# opening the same file again would deadlock against our own nonblocking flock.
+if [[ -n ${BOOTART_ARTIFACT_LOCK_FD:-} ]]; then
+    bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
+        die 'inherited artifact lock descriptor is invalid'
+    exec "$@"
+fi
+
 # Git does not preserve read/write permission bits, so normalize the tracked
 # sentinel before opening it. Content and ownership were verified first.
 chmod 0600 -- "$lock_file" || die 'cannot make the tracked artifact lock private'
 [[ "$(stat -c '%a' -- "$lock_file")" == 600 ]] ||
     die 'tracked artifact lock remains group/world accessible'
-command -v flock >/dev/null 2>&1 || die 'flock is required for artifact serialization'
 
 exec 9<"$lock_file"
 flock --exclusive --nonblock 9 || die 'another artifact build, consumer, or cleanup owns the lock'

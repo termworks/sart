@@ -17,6 +17,8 @@ bootart_bin=$7
 
 vm_validate_state "$repo_root" "$vm_root"
 vm_validate_run "$vm_root" "$run_dir"
+bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
+    vm_die 'guest preparation requires the repository artifact lock'
 [[ "$image" == "$vm_root/cache/images/"* && -f "$image" && ! -L "$image" ]] || \
     vm_die 'base image must be a regular file in the private image cache'
 vm_assert_owned "$image"
@@ -32,6 +34,14 @@ bootart_physical="$(readlink -f -- "$bootart_bin")" || \
 vm_assert_owned "$bootart_physical"
 READELF="$(command -v readelf)" bash "$repo_root/scripts/artifact-inspect.sh" \
     x86_64 "$bootart_physical"
+
+guest_source=$repo_root/scripts/vm/guest
+vm_assert_guest_source_tree "$repo_root"
+declare -A guest_source_sha=()
+for source in init inittab lifecycle; do
+    guest_source_sha[$source]="$(vm_sha256_file "$guest_source/$source")"
+done
+bootart_source_sha="$(vm_sha256_file "$bootart_physical")"
 
 kernel="$run_dir/kernel"
 base_initrd="$run_dir/base-initramfs"
@@ -66,11 +76,31 @@ grep -Eq -- '^(\./)?bin/busybox$' "$run_dir/initramfs.members" || \
     vm_die 'locked Alpine initramfs has no bin/busybox'
 
 install -d -m 0755 -- "$root/etc" "$root/opt/bootart" "$root/opt/bootart-vm"
-install -m 0755 -- "$repo_root/vm/guest/init" "$root/init"
-install -m 0644 -- "$repo_root/vm/guest/inittab" "$root/etc/inittab"
-install -m 0755 -- "$repo_root/vm/guest/lifecycle" "$root/opt/bootart-vm/lifecycle"
+install -m 0755 -- "$guest_source/init" "$root/init"
+install -m 0644 -- "$guest_source/inittab" "$root/etc/inittab"
+install -m 0755 -- "$guest_source/lifecycle" "$root/opt/bootart-vm/lifecycle"
 install -m 0755 -- "$bootart_physical" "$root/opt/bootart/bootart"
 [[ ! "$root/init" -ef "$root/opt/bootart/bootart" ]] || vm_die 'bootart must never be /init'
+
+# Pin both sides of every copy. A source replacement during `install` must not
+# smuggle different PID-1/early-boot bytes into the evidence archive and then
+# restore the checked-in file before preparation finishes.
+for source in init inittab lifecycle; do
+    case "$source" in
+        init) destination=$root/init ;;
+        inittab) destination=$root/etc/inittab ;;
+        lifecycle) destination=$root/opt/bootart-vm/lifecycle ;;
+    esac
+    [[ "$(vm_sha256_file "$guest_source/$source")" == "${guest_source_sha[$source]}" ]] ||
+        vm_die "VM guest source changed while being copied: $guest_source/$source"
+    [[ "$(vm_sha256_file "$destination")" == "${guest_source_sha[$source]}" ]] ||
+        vm_die "VM guest copy does not match pinned source: $destination"
+done
+[[ "$(vm_sha256_file "$bootart_physical")" == "$bootart_source_sha" ]] ||
+    vm_die 'bootart source changed while being copied'
+[[ "$(vm_sha256_file "$root/opt/bootart/bootart")" == "$bootart_source_sha" ]] ||
+    vm_die 'bootart guest copy does not match pinned source'
+vm_assert_guest_source_tree "$repo_root"
 
 # Linux initramfs accepts concatenated newc archives. Recompressing the locked
 # base bytes followed by our locally-created overlay avoids all host extraction

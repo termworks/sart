@@ -273,15 +273,20 @@ fn run_with_backend<B: DisplayBackend>(
     drop(runtime);
 
     if let Some(deferred) = exit.deferred_reply {
+        let DeferredReply {
+            sender,
+            response: deferred_response,
+            completion,
+        } = deferred;
         let response = match &restore_result {
-            Ok(()) => deferred.response,
+            Ok(()) => deferred_response,
             Err(error) => Frame::error(
-                deferred.response.request_id(),
+                deferred_response.request_id(),
                 format!("display restoration failed: {error}"),
             )
-            .unwrap_or(deferred.response),
+            .unwrap_or(deferred_response),
         };
-        let _ = deferred.sender.send(response);
+        deliver_deferred_reply(sender, completion, response, config.connection_timeout);
     }
 
     match (exit.error, restore_result) {
@@ -572,6 +577,7 @@ struct PendingRequest {
     request: Frame,
     peer_uid: u32,
     reply: SyncSender<Frame>,
+    completion: Receiver<()>,
 }
 
 fn connection_worker(
@@ -590,10 +596,12 @@ fn connection_worker(
     let request = Frame::read_exact_message(&mut stream).map_err(ConnectionError::Protocol)?;
     let request_id = request.request_id();
     let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+    let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
     let pending = PendingRequest {
         request,
         peer_uid: credentials.uid,
         reply: reply_sender,
+        completion: completion_receiver,
     };
 
     match sender.try_send(pending) {
@@ -616,9 +624,11 @@ fn connection_worker(
     if response.request_id() != request_id {
         return Err(ConnectionError::MismatchedResponse);
     }
-    response
+    let write_result = response
         .write_to(&mut stream)
-        .map_err(ConnectionError::Protocol)
+        .map_err(ConnectionError::Protocol);
+    let _ = completion_sender.send(());
+    write_result
 }
 
 fn process_requests(
@@ -695,6 +705,7 @@ fn process_requests(
                 DeferredReply {
                     sender: pending.reply,
                     response: outcome.response,
+                    completion: pending.completion,
                 },
             )));
         }
@@ -704,6 +715,7 @@ fn process_requests(
                 Some(DeferredReply {
                     sender: pending.reply,
                     response: outcome.response,
+                    completion: pending.completion,
                 }),
             )));
         }
@@ -715,6 +727,22 @@ fn process_requests(
 struct DeferredReply {
     sender: SyncSender<Frame>,
     response: Frame,
+    completion: Receiver<()>,
+}
+
+fn deliver_deferred_reply(
+    sender: SyncSender<Frame>,
+    completion: Receiver<()>,
+    response: Frame,
+    timeout: Duration,
+) {
+    if sender.send(response).is_ok() {
+        // A detached worker owns the accepted socket. Do not let the main
+        // process return (and terminate all threads) until that worker has
+        // finished its bounded response write; otherwise quit ACKs race
+        // process exit and clients intermittently observe an empty frame.
+        let _ = completion.recv_timeout(timeout);
+    }
 }
 
 struct LoopExit {
@@ -1093,6 +1121,7 @@ mod tests {
                 request: Frame::empty(Opcode::NativeReady, 71).unwrap(),
                 peer_uid: 2000,
                 reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
         let mut state = SplashState::default();
@@ -1304,6 +1333,7 @@ mod tests {
                 request: Frame::text(Opcode::UpdateRootFs, 18, "/sysroot").unwrap(),
                 peer_uid: 1000,
                 reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
         let mut state = SplashState::default();
@@ -1349,6 +1379,7 @@ mod tests {
                 request: Frame::text(Opcode::UpdateRootFs, 73, "/sysroot").unwrap(),
                 peer_uid: 1000,
                 reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
         let (later_reply, later_reply_receiver) = mpsc::sync_channel(1);
@@ -1357,6 +1388,7 @@ mod tests {
                 request: Frame::empty(Opcode::Ping, 74).unwrap(),
                 peer_uid: 1000,
                 reply: later_reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
 
@@ -1424,6 +1456,7 @@ mod tests {
                 request: Frame::text(Opcode::UpdateRootFs, 19, "/sysroot").unwrap(),
                 peer_uid: 1000,
                 reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
         let (later_reply, later_reply_receiver) = mpsc::sync_channel(1);
@@ -1432,6 +1465,7 @@ mod tests {
                 request: Frame::empty(Opcode::Ping, 20).unwrap(),
                 peer_uid: 1000,
                 reply: later_reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
 
@@ -1505,6 +1539,7 @@ mod tests {
                 request: Frame::quit(17, true).unwrap(),
                 peer_uid: 1000,
                 reply,
+                completion: mpsc::sync_channel(1).1,
             })
             .unwrap();
         let mut state = SplashState::default();
@@ -1530,5 +1565,44 @@ mod tests {
         let deferred = exit.deferred_reply.unwrap();
         deferred.sender.send(deferred.response).unwrap();
         assert_eq!(reply_receiver.recv().unwrap().opcode(), Opcode::Ack);
+    }
+
+    #[test]
+    fn deferred_reply_waits_until_the_socket_worker_finishes_writing() {
+        let (reply, reply_receiver) = mpsc::sync_channel(1);
+        let (completion, completion_receiver) = mpsc::sync_channel(1);
+        let (returned, returned_receiver) = mpsc::sync_channel(1);
+        let deferred = DeferredReply {
+            sender: reply,
+            response: Frame::ack(91),
+            completion: completion_receiver,
+        };
+
+        let worker = std::thread::spawn(move || {
+            deliver_deferred_reply(
+                deferred.sender,
+                deferred.completion,
+                Frame::ack(91),
+                Duration::from_secs(1),
+            );
+            returned.send(()).unwrap();
+        });
+
+        assert_eq!(
+            reply_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .opcode(),
+            Opcode::Ack
+        );
+        assert!(matches!(
+            returned_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        completion.send(()).unwrap();
+        returned_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        worker.join().unwrap();
     }
 }

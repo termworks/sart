@@ -118,14 +118,16 @@
             squashfsTools
 
             # Disposable VM harness.
-            qemu
+            # Headless, host-CPU QEMU has no GTK makeCWrapper. The PID that
+            # Make records therefore becomes the exact validated QEMU ELF
+            # instead of immediately execing an unpinned hidden executable.
+            qemu_test
             qemu-utils
             curl
             cacert
             jq
             socat
             util-linux
-            busybox
             coreutils
             findutils
             gnugrep

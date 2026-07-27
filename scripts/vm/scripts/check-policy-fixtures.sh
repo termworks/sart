@@ -9,13 +9,13 @@ source "$SCRIPT_DIR/lib.sh"
 repo_root=$1
 vm_check_layout "$repo_root" "$repo_root/target/vm"
 
-fixture="$(mktemp -d /tmp/bootart-vm-policy.XXXXXXXXXX)" ||
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/bootart-vm-policy.XXXXXXXXXX")" ||
     vm_die 'cannot allocate VM policy fixture root'
 marker="$fixture/.bootart-policy-fixture"
 : > "$marker"
 cleanup() {
     trap - EXIT
-    if [[ "$fixture" == /tmp/bootart-vm-policy.* && -d "$fixture" && ! -L "$fixture" && \
+    if [[ "$fixture" == "${TMPDIR:-/tmp}"/bootart-vm-policy.* && -d "$fixture" && ! -L "$fixture" && \
           -f "$marker" && ! -L "$marker" ]]; then
         chmod -R u+w -- "$fixture" 2>/dev/null || true
         rm -rf -- "$fixture"
@@ -75,10 +75,11 @@ chmod 0600 -- "$overlay"
 
 export PATH="$mock_bin:$PATH"
 export BOOTART_FIXTURE_BASE="$base_image"
+export QEMU_IMG="$mock_bin/qemu-img"
 qemu="$(readlink -f -- "$mock_bin/qemu-system-x86_64")"
 other_qemu="$(readlink -f -- "$mock_bin/not-the-configured-qemu")"
-adapter_checker="$repo_root/vm/scripts/check-adapter-command.sh"
-generic_checker="$repo_root/vm/scripts/check-command.sh"
+adapter_checker="$repo_root/scripts/vm/scripts/check-adapter-command.sh"
+generic_checker="$repo_root/scripts/vm/scripts/check-command.sh"
 
 reset_generated_paths() {
     rm -f -- "$run_dir/qemu.policy.sha256" "$run_dir/serial.log" \
@@ -99,7 +100,6 @@ write_adapter_args() {
             "$executable" \
             -nodefaults \
             -no-user-config \
-            -no-reboot \
             -machine 'q35,accel=tcg' \
             -cpu max \
             -smp 2 \
@@ -136,6 +136,10 @@ QEMU="$qemu" bash "$adapter_checker" \
     "$base_image" "$overlay" >/dev/null
 [[ -f "$run_dir/qemu.policy.sha256" && ! -L "$run_dir/qemu.policy.sha256" ]] ||
     vm_die 'adapter policy did not publish a regular digest'
+
+write_adapter_args "$qemu" none \
+    "file=$overlay,format=qcow2,if=virtio,cache=none,aio=threads" -no-reboot
+expect_adapter_rejected no-reboot
 
 write_adapter_args "$other_qemu" none \
     "file=$overlay,format=qcow2,if=virtio,cache=none,aio=threads"
@@ -231,7 +235,7 @@ expect_generic_rejected network-forwarding
 write_generic_args "$qemu" none -daemonize
 expect_generic_rejected daemonize
 
-wrapper="$repo_root/vm/scripts/run-adapter-lane.sh"
+wrapper="$repo_root/scripts/vm/scripts/run-adapter-lane.sh"
 runner_policy_line="$(grep -nF 'bash "$SCRIPT_DIR/check-runner-policy.sh"' "$wrapper" | head -n 1 | cut -d: -f1)"
 prepare_line="$(grep -nF '"$runner" prepare' "$wrapper" | head -n 1 | cut -d: -f1)"
 policy_line="$(grep -nF 'bash "$SCRIPT_DIR/check-adapter-command.sh"' "$wrapper" | head -n 1 | cut -d: -f1)"
@@ -253,6 +257,127 @@ grep -F 'unset QEMU QEMU_IMG' "$wrapper" >/dev/null ||
     vm_die 'password driver must expose only its fd number through the clean runner environment'
 grep -F '"${runner_env[@]}" "$runner_bin/bash" "$runner" prepare \' "$wrapper" >/dev/null ||
     vm_die 'prepare must cross the clean runner environment'
+
+# Adapter evidence must reject diagnostic-suffixed FAIL markers. PASS is
+# staged under every final byte gate and atomically published only as the
+# wrapper's last operation.
+grep -F 'bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$run_dir/serial.log" "$oracle"' \
+    "$wrapper" >/dev/null ||
+    vm_die 'adapter wrapper does not use the ordered exact-oracle checker'
+pass_function="$(sed -n '/^publish_pass_result()/,/^}/p' "$wrapper")"
+for required in \
+    'vm_assert_file_size_at_most "$temporary" "$max_evidence_bytes"' \
+    'vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"' \
+    'vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"' \
+    'mv -T -- "$temporary" "$result_file"'
+do
+    grep -F -- "$required" <<< "$pass_function" >/dev/null ||
+        vm_die "staged PASS publication guard is missing: $required"
+done
+pass_cap_line="$(grep -nF 'vm_assert_run_bytes_at_most' <<< "$pass_function" | cut -d: -f1)"
+pass_publish_line="$(grep -nF 'mv -T -- "$temporary" "$result_file"' <<< "$pass_function" | cut -d: -f1)"
+[[ "$pass_cap_line" =~ ^[1-9][0-9]*$ && "$pass_publish_line" =~ ^[1-9][0-9]*$ && \
+   "$pass_cap_line" -lt "$pass_publish_line" ]] ||
+    vm_die 'PASS must be published only after its aggregate resource gate'
+[[ "$(tail -n 1 -- "$wrapper")" == publish_pass_result ]] ||
+    vm_die 'PASS publication must be the adapter wrapper final operation'
+for required in \
+    'purge_secret_artifacts_and_emit_failure()' \
+    '! -path "$run_dir/.bootart-vm-run" -delete' \
+    'emit_result FAIL synthetic-secret-retained' \
+    'purge_secret_artifacts_and_emit_failure'
+do
+    grep -F -- "$required" "$wrapper" >/dev/null ||
+        vm_die "secret-retention guard is missing: $required"
+done
+for required in \
+    'seed_size="$(vm_stat_size "$seed")"' \
+    'seed_digest="$(sha256sum "$seed"' \
+    'vm_assert_file_size_exact "$seed" "$seed_size"' \
+    'private seed changed during adapter drive'
+do
+    grep -F -- "$required" "$wrapper" >/dev/null ||
+        vm_die "private seed integrity guard is missing: $required"
+done
+
+adapter_oracle_checker="$repo_root/scripts/vm/scripts/check-adapter-oracle.sh"
+adapter_serial="$fixture/adapter-serial.log"
+adapter_pass='BOOTART_VM_MKINITFS_OPENRC_LIFECYCLE_PASS_V1'
+adapter_prefix=${adapter_pass%_PASS_V1}
+adapter_provisioned=${adapter_prefix}_PROVISIONED_V1
+adapter_early=${adapter_prefix}_EARLY_V1
+adapter_fail=${adapter_prefix}_FAIL_V1
+
+expect_adapter_oracle_rejected() {
+    local label=$1
+    if bash "$adapter_oracle_checker" "$adapter_serial" "$adapter_pass" \
+        >/dev/null 2>&1; then
+        vm_die "ordered adapter oracle accepted forbidden fixture: $label"
+    fi
+}
+
+printf '%s\n%s\n%s\n' "$adapter_provisioned" "$adapter_early" "$adapter_pass" \
+    > "$adapter_serial"
+chmod 0600 -- "$adapter_serial"
+bash "$adapter_oracle_checker" "$adapter_serial" "$adapter_pass"
+printf '%s\n%s\n' "$adapter_provisioned" "$adapter_pass" > "$adapter_serial"
+expect_adapter_oracle_rejected missing-early
+printf '%s\n%s\n%s\n' "$adapter_early" "$adapter_provisioned" "$adapter_pass" \
+    > "$adapter_serial"
+expect_adapter_oracle_rejected wrong-stage-order
+printf '%s\n%s\n%s\n%s\n' \
+    "$adapter_provisioned" "$adapter_early" "$adapter_early" "$adapter_pass" \
+    > "$adapter_serial"
+expect_adapter_oracle_rejected duplicate-early
+printf '%s\n%s\n%s\n%s: diagnostic\n' \
+    "$adapter_provisioned" "$adapter_early" "$adapter_pass" "$adapter_fail" \
+    > "$adapter_serial"
+expect_adapter_oracle_rejected suffixed-fail
+
+adapter_oracle_call='if ! bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$run_dir/serial.log" "$oracle"; then'
+[[ "$(grep -Fxc -- "$adapter_oracle_call" "$wrapper")" -eq 1 ]] ||
+    vm_die 'adapter wrapper must perform exactly one ordered serial-oracle check'
+
+lifecycle_oracle_checker="$repo_root/scripts/vm/scripts/check-lifecycle-oracle.sh"
+lifecycle_runner="$repo_root/scripts/vm/scripts/run-lifecycle.sh"
+lifecycle_serial="$fixture/lifecycle-serial.log"
+lifecycle_pass='BOOTART_VM_LIFECYCLE_PASS_V1'
+lifecycle_fail='BOOTART_VM_LIFECYCLE_FAIL_V1'
+
+expect_lifecycle_oracle_rejected() {
+    local label=$1
+    if bash "$lifecycle_oracle_checker" "$lifecycle_serial" \
+        "$lifecycle_pass" "$lifecycle_fail" >/dev/null 2>&1; then
+        vm_die "final lifecycle oracle accepted forbidden fixture: $label"
+    fi
+}
+
+printf 'guest boot\n%s\nguest halted\n' "$lifecycle_pass" > "$lifecycle_serial"
+chmod 0600 -- "$lifecycle_serial"
+bash "$lifecycle_oracle_checker" "$lifecycle_serial" \
+    "$lifecycle_pass" "$lifecycle_fail"
+printf 'guest booted without an oracle\n' > "$lifecycle_serial"
+expect_lifecycle_oracle_rejected missing-pass
+printf '%s: diagnostic instead of exact oracle\n' "$lifecycle_pass" > "$lifecycle_serial"
+expect_lifecycle_oracle_rejected suffixed-only-pass
+printf '%s\n%s: duplicate diagnostic\n' "$lifecycle_pass" "$lifecycle_pass" \
+    > "$lifecycle_serial"
+expect_lifecycle_oracle_rejected suffixed-duplicate-pass
+printf '%s\n%s: late diagnostic\n' "$lifecycle_pass" "$lifecycle_fail" \
+    > "$lifecycle_serial"
+expect_lifecycle_oracle_rejected suffixed-fail
+
+final_oracle_call='bash "$SCRIPT_DIR/check-lifecycle-oracle.sh" "$serial" "$pass_marker" "$fail_marker"'
+[[ "$(grep -Fxc -- "$final_oracle_call" "$lifecycle_runner")" -eq 1 ]] ||
+    vm_die 'lifecycle runner must perform exactly one final serial-oracle check'
+final_wait_line="$(grep -nF 'wait "$qemu_pid" 2>/dev/null || true' "$lifecycle_runner" | tail -n 1 | cut -d: -f1)"
+final_oracle_line="$(grep -nF -- "$final_oracle_call" "$lifecycle_runner" | cut -d: -f1)"
+host_pass_line="$(grep -nF "printf 'bootart-vm: lifecycle smoke PASS; artifacts retained: %s\\n' \"\$run_dir\"" "$lifecycle_runner" | cut -d: -f1)"
+for line in "$final_wait_line" "$final_oracle_line" "$host_pass_line"; do
+    [[ "$line" =~ ^[1-9][0-9]*$ ]] || vm_die 'lifecycle final-oracle ordering guard is missing'
+done
+(( final_wait_line < final_oracle_line && final_oracle_line + 1 == host_pass_line )) ||
+    vm_die 'lifecycle final oracle must run after QEMU flush and immediately before host PASS'
 
 bash "$SCRIPT_DIR/check-resource-policy-fixtures.sh" "$repo_root"
 printf 'bootart-vm: semantic QEMU policy fixtures PASS (QEMU not executed)\n'

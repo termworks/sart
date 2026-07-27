@@ -104,6 +104,9 @@ expect_failure make_missing_inherited_lock 'artifact lock descriptor was not inh
     make --no-print-directory -C "$repo_root" _assert-artifact-lock
 bash "$repo_root/scripts/artifact-lock.sh" "$repo_root" \
     make --no-print-directory -C "$repo_root" _assert-artifact-lock >/dev/null
+bash "$repo_root/scripts/artifact-lock.sh" "$repo_root" \
+    bash "$repo_root/scripts/artifact-lock.sh" "$repo_root" \
+    bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null
 
 reset_fixtures
 run_gate >/dev/null

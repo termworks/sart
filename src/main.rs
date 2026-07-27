@@ -6,8 +6,8 @@ use bootart::cli::{
 use bootart::display::Dimensions;
 use bootart::display::text_vt::TextVtConfig;
 use bootart::install::{
-    AdapterRequest, AdapterSelection, AlternateRoot, FileStatusState, InstallError, Installer,
-    MAX_INSTALL_FILE_BYTES, NoAdapterDiscovery, SupportPolicy, build_install_plan,
+    AdapterRequest, AdapterSelection, FileStatusState, ImageVerificationStatus, InstallError,
+    Installer, ManifestInventoryStatus, NoAdapterDiscovery, SupportPolicy, build_self_install_plan,
 };
 use bootart::password::{
     NATIVE_ASKPASS_CANCELLED_EXIT_CODE, NATIVE_ASKPASS_TRANSPORT_EXIT_CODE,
@@ -61,6 +61,16 @@ fn run_bootart() {
     });
 
     match command {
+        Command::EarlyBootEnabled(args) => {
+            // Runtime hooks need a silent same-ELF decision before acquiring a
+            // VT or intercepting a password path. Unreadable cmdline state is
+            // a nonzero result so the stock boot path remains untouched.
+            exit(if bootart::cmdline::early_boot_enabled_at(&args.cmdline) {
+                0
+            } else {
+                1
+            });
+        }
         Command::Daemon(args) => {
             let config = DaemonConfig {
                 runtime: RuntimePaths::new(args.runtime_dir),
@@ -171,6 +181,50 @@ fn run_bootart() {
             run_control(runtime, Frame::empty(Opcode::Ping, next_request_id()))
         }
         Command::Install(args) => run_install(args.action),
+        Command::HostPlan(args) => {
+            let result = (|| -> Result<String, String> {
+                let installer = Installer::production("/").map_err(|e| e.to_string())?;
+                let status = installer.status().map_err(|e| e.to_string())?;
+                if args.json {
+                    Ok(format!(
+                        "{{\"root\":\"/\",\"installed\":{},\"policy\":\"production\"}}\n",
+                        status.installed
+                    ))
+                } else {
+                    Ok(format!(
+                        "bootart host plan\nroot: /\ninstalled: {}\npolicy: production (read-only inspection)\n",
+                        status.installed
+                    ))
+                }
+            })();
+            match result {
+                Ok(out) => print!("{out}"),
+                Err(err) => {
+                    eprintln!("Host plan error: {err}");
+                    exit(1);
+                }
+            }
+        }
+        Command::HostApply(args) => {
+            if !args.confirm_host_apply {
+                eprintln!(
+                    "host-apply requires explicit human confirmation via --confirm-host-apply"
+                );
+                exit(1);
+            }
+            eprintln!("Installer error: {}", InstallError::MutationLocked);
+            exit(1);
+        }
+        Command::HostUninstall(args) => {
+            if !args.confirm_host_uninstall {
+                eprintln!(
+                    "host-uninstall requires explicit human confirmation via --confirm-host-uninstall"
+                );
+                exit(1);
+            }
+            eprintln!("Installer error: {}", InstallError::MutationLocked);
+            exit(1);
+        }
         Command::NativeReady(runtime) => {
             // The classic-initramfs adapter needs a silent, bounded capability
             // check. A generic ping is insufficient because the daemon can be
@@ -320,6 +374,30 @@ fn run_install(action: InstallAction) {
                 args.root.display(),
                 status.installed
             );
+            match status.provenance {
+                Some(provenance) => output.push_str(&format!(
+                    "provenance: installed-plan-version={} current-plan-version={} installed-resource-set-version={} current-resource-set-version={} version-current={}\n",
+                    provenance.installed_plan_version,
+                    provenance.current_plan_version,
+                    provenance.installed_resource_set_version,
+                    provenance.current_resource_set_version,
+                    provenance.is_version_current(),
+                )),
+                None => output.push_str("provenance: not-installed\n"),
+            }
+            output.push_str(match status.inventory {
+                ManifestInventoryStatus::NotInstalled => "inventory: not-installed\n",
+                ManifestInventoryStatus::Complete => "inventory: complete\n",
+                ManifestInventoryStatus::Partial => "inventory: partial\n",
+            });
+            match status.image_verification {
+                ImageVerificationStatus::NotInstalled => {
+                    output.push_str("image-verification: not-installed\n")
+                }
+                ImageVerificationStatus::Unresolved { blocker } => output.push_str(&format!(
+                    "image-verification: unresolved blocker={blocker}\n"
+                )),
+            }
             for file in status.files {
                 let state = match file.state {
                     FileStatusState::Exact => "exact".to_owned(),
@@ -336,6 +414,12 @@ fn run_install(action: InstallAction) {
                     } => format!(
                         "content-and-mode-modified actual-sha256={actual_digest} actual-mode={actual_mode:04o}"
                     ),
+                    FileStatusState::SymlinkTargetModified { actual } => {
+                        format!("symlink-target-modified actual-target={actual}")
+                    }
+                    FileStatusState::TypeModified { actual_kind } => {
+                        format!("type-modified actual-kind={actual_kind:?}")
+                    }
                 };
                 output.push_str(&format!(
                     "  {} expected-mode={:04o} expected-sha256={} state={}\n",
@@ -363,43 +447,24 @@ fn run_install(action: InstallAction) {
 }
 
 fn render_install_plan(args: InstallPlanArgs) -> Result<String, String> {
-    let root =
-        AlternateRoot::production(&args.selection.root).map_err(|error| error.to_string())?;
+    let installer =
+        Installer::production(&args.selection.root).map_err(|error| error.to_string())?;
     let selection = AdapterSelection::resolve(
-        &root,
+        installer.root(),
         AdapterRequest::Explicit(args.selection.initramfs_adapter.into()),
         AdapterRequest::Explicit(args.selection.real_root_adapter.into()),
         SupportPolicy::AllowExplicitExperimental,
         &NoAdapterDiscovery,
     )
     .map_err(|error| error.to_string())?;
-    let elf = read_bounded_file(
-        &args.selection.bootart_elf,
-        MAX_INSTALL_FILE_BYTES,
-        "bootart ELF",
-    )?;
-    let plan = build_install_plan(&root, selection, &elf).map_err(|error| error.to_string())?;
+    let plan = build_self_install_plan(installer.root(), selection)
+        .and_then(|plan| installer.preflight_fresh_install_plan(plan))
+        .map_err(|error| error.to_string())?;
     Ok(if args.json {
         format!("{}\n", plan.render_machine_json())
     } else {
         plan.render_human()
     })
-}
-
-fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, String> {
-    let file =
-        File::open(path).map_err(|error| format!("failed to open {label} {path:?}: {error}"))?;
-    let initial_capacity = usize::try_from(maximum.min(64 * 1024)).unwrap_or(64 * 1024);
-    let mut bytes = Vec::with_capacity(initial_capacity);
-    file.take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("failed to read {label} {path:?}: {error}"))?;
-    if bytes.len() as u64 > maximum {
-        return Err(format!(
-            "{label} {path:?} exceeds the {maximum}-byte safety limit"
-        ));
-    }
-    Ok(bytes)
 }
 
 fn run_control(

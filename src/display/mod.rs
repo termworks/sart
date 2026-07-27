@@ -12,6 +12,8 @@ use std::time::Duration;
 pub mod buffer;
 
 #[cfg(target_os = "linux")]
+pub mod drm_kms;
+#[cfg(target_os = "linux")]
 pub mod text_vt;
 
 /// Hard allocation bound for one logical frame.

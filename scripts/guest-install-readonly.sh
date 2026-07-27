@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Make-only launcher for the read-only alternate-root installer surface. This
 # repository tool is never installed or embedded; the only product executable
-# it invokes is the verified static bootart ELF that it also supplies as the
-# proposed payload.
+# it invokes is the verified static bootart ELF, which supplies itself as the
+# proposed payload through its already-opened running-executable identity.
 
 set -Eeuo pipefail
 umask 077
@@ -85,9 +85,6 @@ READELF="$readelf_path" bash "$repo_root/scripts/artifact-gate.sh" "$static_arch
     "$generation/initramfs/usr/bin/bootart" >&2
 
 bootart=$generation/release/bootart
-if [[ "$action" == plan ]]; then
-    arguments+=(--bootart-elf "$bootart")
-fi
 printf 'bootart-guest-install: READ ONLY; alternate root %s; mutation remains locked\n' \
     "$guest_root" >&2
 # Root inspection can still encounter a wedged filesystem. Keep this

@@ -164,14 +164,17 @@ struct VtStat {
     state: u16,
 }
 
-const VT_OPENQRY: libc::c_ulong = 0x5600;
-const VT_GETSTATE: libc::c_ulong = 0x5603;
-const VT_ACTIVATE: libc::c_ulong = 0x5606;
-const VT_DISALLOCATE: libc::c_ulong = 0x5608;
-const KDSETMODE: libc::c_ulong = 0x4B3A;
-const KDGETMODE: libc::c_ulong = 0x4B3B;
-const KDGKBMODE: libc::c_ulong = 0x4B44;
-const KDSKBMODE: libc::c_ulong = 0x4B45;
+// libc intentionally models ioctl's request type differently for glibc
+// (`c_ulong`) and musl (`c_int`).  Use that target-specific ABI type rather
+// than baking the host libc's representation into the static build.
+const VT_OPENQRY: libc::Ioctl = 0x5600;
+const VT_GETSTATE: libc::Ioctl = 0x5603;
+const VT_ACTIVATE: libc::Ioctl = 0x5606;
+const VT_DISALLOCATE: libc::Ioctl = 0x5608;
+const KDSETMODE: libc::Ioctl = 0x4B3A;
+const KDGETMODE: libc::Ioctl = 0x4B3B;
+const KDGKBMODE: libc::Ioctl = 0x4B44;
+const KDSKBMODE: libc::Ioctl = 0x4B45;
 
 fn ioctl_failed(result: libc::c_int) -> io::Result<()> {
     if result == -1 {

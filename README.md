@@ -31,7 +31,9 @@ a helper executable PID 1, could power off the guest, and exposed automatic
 `sudo`/initramfs mutation. Those paths are not supported or safe to restore.
 The default/release installer can render only a `PREVIEW ONLY` plan;
 `apply`, `recover`, and `uninstall` return `MutationLocked` before filesystem
-access. Transaction fault tests compile only with the non-default
+access. Planning performs bounded, read-only inspection of the explicitly
+named alternate root, but it never materializes an integration file or runs a
+generator. Transaction fault tests compile only with the non-default
 `installer-test-seams` feature through the dedicated Make target.
 
 The target architecture and its required disposable-QEMU gates are tracked in
@@ -42,17 +44,31 @@ The target architecture and its required disposable-QEMU gates are tracked in
 - do not use `bootart` for an encrypted root;
 - use only the repository's non-mutating Make targets.
 
-Every real-guest image row is currently blocked. The image lock and harness
-also still lack the complete enforced download-size, virtual-size, free-space,
-overlay-growth, and retained-log/evidence caps required before any row may be
-marked ready. Release publication is intentionally locked: the current local
-readiness gate is `make release-readiness`. It verifies source, creates a fresh
-one-ELF package whose last-published manifest pins the immutable generation and
-ELF/archive digests, then holds the publication lock while every exact-pair VM
-lane receives that generation's exact ELF path. `make release` and the manual,
-zero-permission GitHub workflow remain intentionally non-publishing even if
-readiness eventually passes: an exact tagged-tree validation flow must exist
-before any tag or publication mutation is allowed.
+Every exact-pair lane is currently blocked. The Alpine 3.24.1
+mkinitfs/OpenRC qcow2 now has an authenticated immutable URL, exact SHA-256,
+download length, virtual geometry, and retained-artifact caps, so its three
+lanes correctly report `BLOCKED_UNIMPLEMENTED` rather than
+`BLOCKED_UNVERIFIED`; no runner or adapter oracle exists yet. The other four
+exact-pair images remain unverified placeholders. The separate generic Alpine
+lifecycle ISO has passed the PID-1/ordinary-child smoke lane; neither fact is
+adapter-pair evidence. The schema-v2 image lock and harness guard exact
+download size, virtual size, free space,
+per-file/overlay growth, aggregate retained-run size, and retained
+log/evidence size. Each unverified row deliberately records `UNRESOLVED` for
+all six resource values, so none may be marked ready. Exact cloud-image lanes
+must provision and rebuild only their disposable overlay, then reboot within
+the same bounded QEMU process. Host PASS requires ordered provisioning,
+early-initramfs, and final serial oracles; a real-root cloud-init smoke alone
+cannot be promoted as adapter evidence.
+
+Release publication is intentionally locked: after source verification,
+`make release-readiness` holds the tracked repository-root
+`.bootart-artifacts.lock` across fresh immutable-generation build, one-ELF
+package/manifest validation, and every exact-pair VM lane. The manifest pins
+the generation and ELF/archive digests, and each lane receives that
+generation's exact ELF path. `make release` and the manual, zero-permission
+GitHub workflow remain non-publishing until exact tagged-tree validation
+exists.
 
 ## Current safe commands
 
@@ -62,6 +78,16 @@ make check
 make test-unit
 make verify
 ```
+
+The Make boundary pins repository/artifact/VM paths, rejects
+`-i`/`--ignore-errors`, normalizes documented caller values as literal
+environment data, and runs inert quote and Make-function injection fixtures.
+This is not a sandbox for hostile Make itself: `--eval`, `--assume-old`,
+arbitrary variable names, `PATH`, toolchain programs, and configured `QEMU` or
+`QEMU_IMG` executables are trusted invocation inputs. Do not use those control
+surfaces when claiming a guard result; canonical path plus device/inode pinning
+proves which executable object ran, not that a caller-selected program is
+benign or authentically packaged.
 
 ### Read-only guest installer inspection
 
@@ -83,15 +109,41 @@ pairs are `dracut-systemd` + `systemd`, `initramfs-tools-busybox` + `systemd`,
 `mkinitcpio-busybox` + `systemd`, `dracut-classic` + `openrc`, and
 `mkinitfs-busybox` + `openrc`. These names describe unproven foundations, not
 supported installations. The plan is always `PREVIEW ONLY`, reports
-`actionable=false`, and does not write the alternate root. Schema v3 includes
-root-owned payload/link metadata, required directories, backup path templates,
-candidate and untouched-known-good roles, inspection requirements, and reverse
-rollback records in its deterministic identity. Absolute generator/argv,
-candidate path, known-good image/entry, hashes, and inspector contracts are not
-embedded yet, so the preview marks them `unresolved` with exact-adapter
-blockers instead of guessing distro paths. Each pair also reports its own
-lifecycle, installer/image, and encrypted-root proof gates. Status only reads
-the manifest already under `ROOT`, so it does not accept adapter variables.
+`actionable=false`, and performs no content or namespace writes. Before a plan
+is rendered, a fresh-install preflight holds an advisory lock on the opened
+root inode, rechecks its device/inode identity, and rejects pending recovery
+state, every existing Bootart manifest, payload/real-root-link/legacy-helper
+collisions, unsafe or symlinked components, missing or unsafe bounded shared
+targets, and failure of a per-destination-filesystem known-byte space lower
+bound. It records payload and real-root activation preimages as `absent`.
+Here, `fresh` means those owned destinations are absent, not that the guest
+tree is empty; for example, the mkinitfs adapter expects its stock shared file
+to exist. The flock coordinates Bootart operations, not arbitrary external
+writers, and reads may follow the mounted filesystem's atime policy.
+
+Schema v3 also includes required directories, backup path templates, candidate
+and untouched-known-good roles, inspection requirements, and reverse rollback
+records in its deterministic identity. Shared-file preimages, generated-image
+destinations, full allocation/inode/writability capacity, absolute
+generator/argv, candidate path, known-good image/entry, hashes, and inspector
+contracts are not embedded or proved yet, so the preview keeps them
+`uninspected` or `unresolved` with exact-adapter blockers instead of guessing
+distro paths. Each pair also reports its own lifecycle, installer/image, and
+encrypted-root proof gates. Status only reads the manifest already under
+`ROOT`, so it does not accept adapter variables. It holds the same
+alternate-root flock as planning and mutation, requires canonical manifest
+plan/resource-set provenance, reports whether those two versions match the
+current installer contract, and reports generated-image verification as
+explicitly `unresolved` rather than inferring success from installed file
+hashes. A separate inventory result is `complete` for a full committed ledger
+or `partial` for the strict selected-pair subset retained when uninstall
+preserves locally modified files. Version-current provenance is not an
+executable-identity or inventory-completeness comparison; installed file
+hashes remain a separate status result.
+The executable being planned is always the running `bootart` itself, opened
+through `/proc/self/exe`; neither the CLI nor the Make wrapper accepts an
+alternate payload path. Embedded units, hooks, service scripts, and default art
+are Rust string literals in that same ELF.
 
 `ROOT=/` and implicit adapter detection are forbidden. The
 `guest-install-apply`, `guest-install-recover`, and `guest-install-uninstall`
@@ -109,7 +161,11 @@ current-upstream-shaped override. Initramfs-tools now has an integrated but
 unproven guarded cryptsetup-initramfs askpass bridge over its framework-owned
 inherited anonymous pipe; cancellation consumes one bounded upstream attempt
 because cryptroot exposes no cancel result. Mkinitcpio and mkinitfs are not
-connected yet. No password
+connected to password prompting yet. Mkinitfs lifecycle insertion now has an
+exact, source-tested 3.14.0-r0 structural patch, and read-only installer
+preflight rejects a guest script whose version, anchors, or existing managed
+content drift. The patch is still not materialized, no candidate image is
+generated, and no exact VM lifecycle oracle has passed. No password
 lane has passed an encrypted-root QEMU gate. Before chroot the systemd
 coordinator closes its stale absolute request namespace; afterward it attempts
 a paced, five-second-bounded rebind only after the original runtime-entry
@@ -117,6 +173,13 @@ identities prove that `/run` is visible in the real root. Classic dracut permits
 console fallback only when no daemon owns the display or after a deferred quit
 ACK proves restoration. Both handoffs remain VM-unproven, so encrypted-root use
 remains unsupported and the original console fallback must remain available.
+
+Every non-systemd runtime start and the two currently wired native askpass
+paths first invoke the hidden `early-boot-enabled` mode of the same ELF. It
+uses the shared exact kernel-token parser; an unreadable command line or an
+exact `bootart=0`/`rd.bootart=0` token prevents VT acquisition and preserves
+the stock password path. Build-time hooks do not inspect the build host's
+kernel command line, and handoff/cleanup commands remain available.
 
 On the text backend, a lone `ESC` read from the Bootart-owned splash VT reveals
 the original boot console. Bootart deliberately does not read that console, so
@@ -133,6 +196,20 @@ is no product `/init`, second executable, runtime plug-in, or PID-1 mode. If no
 optional art override is configured, embedded art is used; an explicitly
 configured override that is unreadable or invalid fails loudly instead of
 silently falling back.
+
+The shared text engine now renders distinct deterministic boot, shutdown,
+reboot, update, and upgrade labels, including bounded tiny-display forms, while
+secret-prompt presentation suppresses those normal overlays. This is
+source/fake-backend coverage only; graphical rendering, shutdown-mode adapter
+wiring, and real-guest handoff remain unproven.
+
+That is a **one-file transport contract**, not a claim that Linux needs no
+runtime files or platform facilities. Copying `bootart` carries every Bootart
+product payload. A future unlocked installer will materialize the embedded
+unit/hook/configuration text, create runtime sockets and state, and invoke the
+guest's own initramfs tooling. Today those mutation and generator steps remain
+locked and every exact adapter pair remains unproven, so copying the ELF alone
+does not yet turn a machine into an integrated Bootart boot.
 
 ## Current implementation state
 

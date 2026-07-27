@@ -35,6 +35,13 @@ bootart
 
 The same file provides daemon, client, preview, validation, installation, and removal commands. Generated systemd units, initramfs hook scripts, manifests, sockets, and optional configuration are data files, not additional product binaries.
 
+This is a one-file **transport** guarantee, not a claim that an integrated boot
+uses no runtime data or operating-system facilities. Copying the ELF carries
+all Bootart-owned payloads; installation later materializes embedded text and
+uses the guest's init/initramfs mechanisms. Until mutation, generator, and
+exact-pair VM gates are unlocked, copying the ELF alone is not a supported
+installation procedure.
+
 The release artifact must be a static, architecture-correct ELF. The installed real-root copy and every initramfs copy must have the same SHA-256 as that artifact; no dynamically linked fallback is supported.
 
 ### 2.2 “Embedded”
@@ -138,7 +145,7 @@ These are migration inputs, not behavior to preserve.
 src/
   main.rs                         thin CLI dispatch; never contains PID-1 logic
   cli.rs                          all one-binary subcommands
-  embedded.rs                     embedded art, units, hooks, and defaults
+  embedded.rs                     embedded art/defaults plus typed resource registry
   splash/
     mod.rs                        public splash API and shared types
     state.rs                      lifecycle state machine
@@ -228,7 +235,9 @@ Rules:
 /run/bootart/control.sock         root-owned Unix socket, mode 0600
 /run/bootart/daemon.lock          prevents concurrent display owners
 /run/bootart/state                optional non-secret diagnostic state
-/var/lib/bootart/install.manifest installer ownership/rollback ledger
+/var/lib/bootart/install/manifest.v1 installer ownership/rollback ledger
+/.bootart-installer-journal.v1     durable transaction/recovery journal
+/.bootart-installer-journal.v1.new durable bootstrap temporary
 ```
 
 The daemon must verify peer credentials (`SO_PEERCRED` on Linux) and accept mutating control commands only from root. Protocol messages have a fixed version, explicit length limit, UTF-8 validation where applicable, and no unbounded allocation.
@@ -261,6 +270,17 @@ Required invariants:
 - switch-root changes filesystem context but not display ownership or protocol state;
 - a real-root client must reject an incompatible daemon protocol version with a clear, fail-open response.
 
+**Current disable guard:** systemd units retain exact kernel-command-line
+conditions. Every non-systemd runtime-start template and each currently wired
+native askpass interception also calls the hidden `early-boot-enabled`
+subcommand in the same ELF before acquiring a VT, creating a startup guard, or
+patching/using the Bootart password path. That command uses the shared exact
+token parser and returns nonzero on an unreadable command line, so adapters
+leave the stock boot/password path untouched rather than guessing. Image-build
+hooks never inspect the build host's command line, and cleanup/root-handoff
+paths remain callable. This is source-tested but still lacks every named
+disable-token VM gate.
+
 ### 5.5 Rendering and display ownership
 
 The renderer must become time/state driven rather than a fixed function that owns its own sleep loop:
@@ -291,6 +311,13 @@ by a kernel VT switch to the reserved/configured splash VT or by the same ELF
 through `bootart details hide`. The backend observes the active VT through
 `VT_GETSTATE` and resumes only when its splash VT is active. This interaction
 has source and fake-backend coverage but remains VM-unproven.
+
+The same text engine now renders distinct deterministic labels/colors for all
+five `Mode` values. Mode is the lowest-priority normal overlay, remains
+distinguishable in a bounded 3x1 scene, and is suppressed by the separate
+secret-prompt branch. Runtime `SetMode` changes the next frame in the same
+engine. This is not a graphical backend or proof of shutdown/reboot adapter
+wiring; those Phase 9 gates remain open.
 
 ### 5.6 Initramfs and switch-root lifecycle
 
@@ -325,7 +352,7 @@ confer `SupportStatus`:
 | `dracut-classic-initramfs` | classic shell/non-systemd dracut initramfs | embedded module setup, early start, guarded current-upstream askpass override, and pre-pivot hooks | `IntegratedUnproven`; dedicated credential socket, same-ELF client, and inherited anonymous credential pipe | exact upstream compatibility, fallback/VT interaction, encrypted-root behavior, and switch-root continuity remain QEMU-unproven |
 | `initramfs-tools-busybox` | initramfs-tools/BusyBox initramfs | embedded build, init-top, init-bottom, and guarded cryptsetup askpass hooks | `IntegratedUnproven`; inherited anonymous pipe and guarded stock fallback; cancellation consumes one bounded upstream attempt because cryptroot has no cancel code | contract compatibility, fallback/VT interaction, encrypted-root behavior, and lifecycle remain QEMU-unproven |
 | `mkinitcpio-busybox` | mkinitcpio/BusyBox initramfs | embedded install/runtime-hook foundation, not yet fully wired | `NotIntegrated` | hook ordering, lifecycle, and native password path remain unproven |
-| `mkinitfs-busybox` | Alpine mkinitfs/BusyBox initramfs | embedded feature/runtime-hook foundation, not yet fully wired | `NotIntegrated` | stock hook insertion, lifecycle, and native password path remain unproven |
+| `mkinitfs-busybox` | Alpine mkinitfs/BusyBox initramfs | embedded feature/runtime hook plus an exact, idempotent 3.14.0-r0 structural source patch | `NotIntegrated` | patch execution, candidate-image inspection, lifecycle, and native password path remain unproven |
 | `openrc-real-root` | OpenRC real-root supervisor | embedded boot-runlevel adoption and default-runlevel bounded-quit scripts | `NotApplicable` | daemon adoption, boot-complete ordering, and VT release remain QEMU-unproven |
 
 Proof ownership is pair-specific, never inherited from either component:
@@ -408,7 +435,28 @@ The plan must also identify an untouched known-good boot image/entry. Installati
 
 If multiple adapters are detected, detection is unknown, required tooling is missing, a destination is a symlink, or an existing file is not owned by a prior manifest, planning fails without writing anything. The user may choose an adapter explicitly; the program must not guess through priority ordering.
 
-**Current implementation guard:** schema v3 renders every category above as deterministic review data and remains explicitly `PREVIEW ONLY`, `actionable=false`, and `mutation=locked`. It records root-owned payloads and links with uninspected prior state, required directory paths, transaction-scoped backup templates, ordered inspections, and reverse rollback requirements. Because no adapter embeds an exact absolute generator/argv, candidate-image layout, current known-good image/entry, or archive-inspector contract, those values are explicitly `unresolved` with adapter-specific blockers; the plan never guesses distro paths. Activation links, shared-file snippets, and all safety records are non-executable. The alternate-root seam exercises only its existing whole-file transaction machinery and does not interpret these records. Default/release `apply`, `recover`, and `uninstall` still return `MutationLocked` before filesystem access. Only `make test-installer-root` enables the non-default `installer-test-seams` feature for disposable alternate-root fault tests. The lock remains until a fresh plan resolves and inspects every required value and all three gates owned by that exact adapter pair pass.
+**Current implementation guard:** plan schema v3 renders every category above as deterministic review data and remains explicitly `PREVIEW ONLY`, `actionable=false`, and `mutation=locked`. Production planning opens `/proc/self/exe` once and uses that same bounded regular-file descriptor as the executable payload; the CLI and Make wrapper have no alternate-payload argument. Synthetic ELF bytes exist only behind the non-default installer test seam.
+
+Production planning now performs a partial, fresh-install, read-only preflight. It holds an advisory flock on the opened alternate-root inode, verifies the stored device/inode identity again before returning, and issues no content or namespace mutations; ordinary reads may still follow filesystem atime policy. It rejects a bootstrap temporary or recovery journal, every existing manifest (there is no idempotent update-plan path yet), any payload/real-root activation/legacy-helper collision, unsafe or symlinked path components, a missing/unsafe/hard-linked/oversized managed shared target, and failure of a conservative known-byte lower bound grouped by the nearest existing parent filesystem. The flock serializes cooperating Bootart processes; it is not a sandbox against arbitrary external writers.
+
+After that inspection, payload and real-root activation previous states—and their planned backup hashes—are recorded as `absent`. Generated-initramfs activation states, managed-shared-file preimages, and required-directory creation states remain `uninspected`. The capacity check is only a rejection lower bound: mount writability, inode availability, allocation rounding, shared-file backup space, and candidate-image capacity remain unresolved. No adapter yet embeds an exact absolute generator/argv, candidate-image layout, current known-good image/entry, or archive-inspector contract, so those values remain explicitly `unresolved` with adapter-specific blockers; the plan never guesses distro paths. Activation links, shared-file snippets, generators, and safety records remain non-executable. The alternate-root seam exercises only its existing whole-file transaction machinery and does not interpret those preview records.
+
+Default/release `apply`, `recover`, and `uninstall` still return `MutationLocked` before filesystem access. Only `make test-installer-root` enables the non-default `installer-test-seams` feature for disposable alternate-root fault tests. The **production mutation lock** remains until a fresh plan resolves and inspects every required value and all three gates owned by that exact adapter pair pass.
+
+Status now holds the alternate-root transaction flock for its whole inspection.
+Manifest schema 2 canonically requires both the committing plan version and
+embedded resource-set version; missing, duplicate, malformed, or noncanonical
+records are corruption, while well-formed older versions are reported as stale
+even when every recorded file hash is exact. Each manifest also has a canonical
+inventory state. For current versions, `complete` requires the full ordered
+selected-pair file inventory, including exactly one mode-0755
+`/usr/bin/bootart`; `partial` is reserved for the strict ordered subset retained
+when uninstall preserves modified owned files. Both reject foreign resources,
+and status reports the distinction explicitly. The reported provenance field
+is `version-current`, not a comparison with the running ELF identity or a claim
+of inventory completeness. Status reports image verification separately as
+`unresolved`; it does not infer a valid initramfs from materialized payload
+paths. Idempotent test-seam apply likewise refuses stale or partial provenance.
 
 The canonical read-only wrappers are `make guest-install-plan ROOT=...
 INITRAMFS_ADAPTER=... REAL_ROOT_ADAPTER=...` and `make guest-install-status
@@ -505,12 +553,19 @@ Every automated guest test must:
 - provision through a read-only seed image and enable QEMU sandbox restrictions where supported.
 
 Those byte, virtual-size, free-space, overlay-growth, and retained-evidence
-limits are a hard readiness condition. The current image-lock schema does not
-record them and the fetch/run paths do not enforce the complete set, so no
-matrix row may change to ready or supported until the schema, validators, and
-negative fixtures make every cap explicit.
+limits are a hard readiness condition. `scripts/vm/images.lock` schema v2 now
+records one exact download length and five reviewed maxima:
+`max_virtual_bytes`, `max_run_bytes`, `max_file_bytes`, `max_log_bytes`, and
+`max_evidence_bytes`. Validators, fetch/lifecycle/adapter paths, and negative
+fixtures guard all six fields. Every checked-in blocked row deliberately uses
+`UNRESOLVED` for all six, so no matrix row may become ready until maintainers
+supply independently reviewed positive values.
 
-The current Alpine-kernel `/init` smoke recipe is removed. Tests boot a real init system, and guest PID 1 is asserted not to be `bootart`.
+The former Bootart-as-`/init` smoke design is removed. The test-only guest
+`/init` immediately `exec`s BusyBox init, and every future executable guest
+lane must assert that a real init remains PID 1 and `bootart` is only its
+child. All current rows remain blocked, so this is source structure rather
+than observed VM evidence.
 
 ### 7.3 Required guest matrix
 
@@ -571,7 +626,9 @@ Tasks:
 - change the VM recipe so it never installs `bootart` as `/init`;
 - disable/remove automatic-sudo Make targets;
 - temporarily hide host-mutating CLI actions until the new planner/transaction exists;
-- create `src/embedded.rs` as the single source for embedded strings;
+- create `src/embedded.rs` as the exhaustive typed registry for embedded
+  resources while keeping adapter template literals in their integration
+  modules;
 - preserve manual `play`, `preview`, `render-final`, and `validate` behavior;
 - add `make assert-one-binary`;
 - make the artifact gate reject `PT_INTERP`, `DT_NEEDED`, wrong architecture, mismatched real-root/initramfs hashes, or a second Cargo binary;
@@ -684,27 +741,105 @@ Exit gate:
 - QEMU arguments contain no host raw device or writable share;
 - cleanup removes only the validated owned run directory/overlay.
 
-**Current source-only harness state:** `vm/adapter-matrix.lock` now declares
+**Current harness state:** `scripts/vm/adapter-matrix.lock` now declares
 separate lifecycle, installation, and password lanes for each of the five exact
 adapter pairs, with fixed inner deadlines, a bounded Make wrapper, networking
 disabled, an immutable-qcow2/private-overlay contract, a private read-only seed,
 and unique byte-exact serial oracles. A deny-by-default real-guest QEMU argv
 checker permits only that overlay and seed and records a digest for post-run
-verification. Adapter code has separate prepare/drive phases; common harness
-code validates argv and owns the QEMU launch between them. Semantic temporary
+verification. The locked interface reserves separate prepare/drive phases for
+future adapter runners; common harness code validates argv and owns the QEMU
+launch between them. Semantic temporary
 fixtures exercise both command checkers without executing QEMU. A static
 runner policy, clean environment, private allowlisted `PATH`, and source hash
-checks are defense-in-depth against accidental or unreviewed runner drift;
-they are not an operating-system sandbox against hostile code running as the
-same host UID. These are scaffolding and policy evidence only. Every real-guest
-image row remains the literal `BLOCKED_UNVERIFIED`, every matrix row remains
-`blocked-unverified`, no adapter runner exists, and no serial oracle has been
-observed. The named adapter targets therefore exit nonzero before state
-creation, product resolution, download, or QEMU; Phase 4 and every adapter
-remain unproven. The image lock also lacks enforced download-size,
-virtual-size, free-space, overlay-growth, and retained-log/evidence caps; that
-resource-boundary gap is an additional blocker before any row can become
-ready.
+checks are defense-in-depth against accidental or unreviewed runner drift.
+Ready lanes additionally require every repository-to-runner directory ancestor
+and the runner file to be owned by the invoking UID and not group/world
+writable, closing other-UID pathname replacement between the policy check and
+both runner phases. They are not an operating-system sandbox against hostile
+code running as the same host UID. These are scaffolding and policy evidence
+only. The generic Alpine 3.20.0 ISO row is now pinned to its authenticated
+upstream SHA-256 and exact 63,963,136-byte length with reviewed run/file/log/
+evidence caps. On 2026-07-26,
+`make vm-test-lifecycle-alpine` reached exactly one
+`BOOTART_VM_LIFECYCLE_PASS_V1` under the pinned headless QEMU: BusyBox init
+remained PID 1 and the same static `bootart` ELF ran as an ordinary child.
+The retained command had `-nic none`, no host raw device, and no writable host
+share. This proves only the generic hardened lifecycle foundation; it does not
+exercise an installed adapter, switch-root, password handling, or any exact
+pair.
+
+The official Alpine 3.24.1 BIOS cloud-init qcow2 for the mkinitfs/OpenRC pair
+is now pinned to its immutable upstream URL, independently verified SHA-256,
+exact 183,697,408-byte download length, 209,715,200-byte virtual geometry, and
+reviewed run/file/log/evidence caps. Its three matrix rows therefore moved to
+`blocked-unimplemented`; this is provenance and resource-policy progress only,
+not adapter evidence. The other four exact-pair images and 12 lanes remain
+literal `BLOCKED_UNVERIFIED`/`blocked-unverified`. No adapter runner exists and
+no adapter serial oracle has been observed. Every named adapter target still
+exits nonzero before state
+creation, product resolution, download, or QEMU. The generic Phase 4 harness
+exit gate is satisfied; every exact adapter-pair lane remains incomplete.
+Resource policy fails closed: each still-unverified
+row sets all six values to `UNRESOLVED`, and reviewed values remain a
+row-readiness prerequisite.
+The adapter-matrix schema now keeps image provenance separate from lane
+implementation: after an image becomes verified, any lane without its exact
+policy-clean runner must move to `blocked-unimplemented`, not
+`ready-unproven`. Both blocked states stop before artifact, product, VM-state,
+or QEMU handling. A lane may become `ready-unproven` only when the immutable
+image and exact executable runner are both present; readiness is still not
+support evidence.
+
+The blocked-lane checker now supplies inert marker executables for the product,
+QEMU, and QEMU_IMG and compares a bounded deterministic recursive manifest of
+any pre-existing VM state; fixtures prove marker invocation and nested state
+changes fail. Ready adapter evidence rejects diagnostic-suffixed FAIL markers,
+revalidates the private seed after the driver, purges every retained run
+artifact before recording a nonsecret secret-leak FAIL, and publishes PASS only
+after all final byte gates as its last durable operation. The generic lifecycle
+lane rechecks the fully flushed transcript immediately before host PASS. Actual
+guest preparation rejects group/world-writable source files and ancestors and
+pins/rechecks both source and copied hashes. Configured QEMU tools are still
+trusted inputs, but ready lanes now pin their canonical device/inode identity:
+QEMU is checked immediately before launch and against `/proc/PID/exe`, while
+QEMU_IMG is checked around each image operation. This closes ordinary atomic
+package replacement, not hostile same-inode content modification or package
+authenticity; configured-tool trust remains explicit.
+
+The runner handoff now also has a satisfiable seed immutability boundary: a
+policy-clean runner creates `seed.img` as mode 0600 under the inherited private
+umask, then common code validates ownership/type and alone seals it to 0400
+before hashing, argument construction, or launch. Runner policy continues to
+forbid `chmod`, so adapter code cannot claim that seal itself.
+
+Exact-lane QEMU policy now deliberately rejects `-no-reboot`. The immutable
+cloud image is a provisioning input, not early-initramfs evidence: one bounded
+QEMU process must be able to complete its guest-owned provisioning boot and
+reboot the same disposable overlay into the rebuilt initramfs. Final evidence
+must contain exactly one ordered `..._PROVISIONED_V1`, `..._EARLY_V1`, and
+`..._PASS_V1` line, with no `..._FAIL_V1` occurrence. This does not make the
+Alpine rows ready: the reviewed runner and actual early-initramfs oracle
+producer are still absent.
+
+The mkinitfs integration now has a fail-closed structural patch for the exact
+Alpine 3.24 `mkinitfs` 3.14.0-r0 `initramfs-init` shape. It inserts early start
+after cmdline/default-init processing and inserts handoff only after the
+initramfs mount-move loop has moved `/run` beneath `$sysroot`; handing off
+before that loop would make the daemon's runtime namespace disappear at
+`switch_root`. The patch is unique-anchor checked, exact-content idempotent,
+and rejects partial, version-drifted, or edited managed state. Read-only
+installer preflight now exercises that contract against the selected guest
+file without materializing it. Transactional snippet writes, candidate image
+generation/inspection, and VM proof remain open.
+
+Password-lane preparation also needs an explicit per-run encrypted-root secret
+contract. The current harness creates its synthetic secret only after QEMU has
+started, which cannot unlock a prebuilt image encrypted earlier with an unknown
+key. A future runner must either build the encrypted disposable layer with a
+fresh private secret before launch or use another reviewed deterministic test
+contract. A fixed hidden image password, argv/environment secret, or retained
+secret fixture is forbidden.
 
 ### Phase 5 — Integrate early systemd start, switch-root, and quit
 
@@ -852,19 +987,21 @@ Tasks:
 - add `host-plan` first; add `host-apply`/`host-uninstall` only after an explicit human review of all release gates;
 - do not change project version/release metadata unless explicitly requested.
 
-**Current publication lock:** the non-parallel `make release-readiness` lane
-runs `make verify`, then `release-package` builds a fresh verified immutable
-one-ELF generation and publishes the archive/checksum followed by an atomic
-commit manifest pinning the generation plus ELF/archive SHA-256 values. The
-readiness recipe then holds `.publish.lock`, validates that manifest, and runs
-every exact-pair VM lane with `BOOTART_BIN` fixed to that exact generation;
-neither `current` nor a later generation can change the ELF under test. Because
-every pair is still blocked/unproven, readiness cannot pass. Even after it can,
-`make release` remains deliberately locked because tagging after validation
-would mutate into a tree that was not the one validated. The manual GitHub
-workflow has zero permissions, exits with a publication-locked failure, and
-uploads nothing until an exact tagged-tree validation/publication design is in
-place.
+**Current artifact/publication lock:** `make release-readiness` completes
+`make verify`, then opens the tracked repository-root
+`.bootart-artifacts.lock` through `scripts/artifact-lock.sh`. One exclusive
+inherited flock remains held while the locked recipe builds and verifies a
+fresh immutable one-ELF generation, atomically publishes the archive/checksum
+and commit manifest pinning the generation plus ELF/archive SHA-256 values,
+resolves that committed generation, and runs every exact-pair VM lane with
+`BOOTART_BIN` fixed to its exact ELF. The lock lives outside `target/`, and
+artifact build/check/package, read-only guest inspection, readiness, and
+cleanup operations use the same lock. Because every pair is still
+blocked/unproven, readiness cannot pass. Even after it can, `make release`
+remains deliberately locked because tagging after validation would mutate into
+a tree that was not validated. The manual GitHub workflow has zero
+permissions, exits with a publication-locked failure, and uploads nothing
+until an exact tagged-tree validation/publication design exists.
 
 Exit gate:
 
@@ -886,11 +1023,11 @@ Phase 0
 
 | Phase | Deliverable | Status |
 |---:|---|---|
-| 0 | remove PID-1/two-binary design and lock host mutation | IN PROGRESS |
-| 1 | state machine and bounded protocol | IN PROGRESS |
-| 2 | foreground daemon and same-binary client | IN PROGRESS |
-| 3 | persistent text VT splash and restoration | IN PROGRESS |
-| 4 | hardened real-guest QEMU harness | IN PROGRESS |
+| 0 | remove PID-1/two-binary design and lock host mutation | DONE |
+| 1 | state machine and bounded protocol | DONE |
+| 2 | foreground daemon and same-binary client | DONE |
+| 3 | persistent text VT splash and restoration | DONE |
+| 4 | hardened real-guest QEMU harness | DONE |
 | 5 | systemd start/switch-root/quit lifecycle | IN PROGRESS |
 | 6 | transactional installer core | IN PROGRESS |
 | 7 | distro adapter matrix | IN PROGRESS |
@@ -961,6 +1098,7 @@ Stop implementation and report rather than improvising if any of these occur:
 | DRM prevents display-manager handoff | text-first lifecycle, bounded spike, modeset restoration tests |
 | One-binary constraint regresses | `make assert-one-binary` in local and CI gates |
 | False-green tests | missing golden files fail; explicit update target; VM PASS/FAIL oracle |
+| Make input bypass | pin structural paths/lists, normalize documented values as literal environment data, reject ignore-errors and checked-in error suppression, and run inert injection fixtures |
 
 ## 13. Upstream behavioral references
 
@@ -986,6 +1124,10 @@ Use these as behavioral references, not as repository instructions or compatibil
 - Read this entire plan before changing code.
 - Use `apply_patch` or built-in edit tools; do not use Python to edit files.
 - Use Make targets for every relevant build, format, test, VM, and release action.
+- Treat `--eval`, `--assume-old`, arbitrary Make variables, `PATH`, toolchain
+  programs, and configured `QEMU`/`QEMU_IMG` executables as trusted invocation
+  inputs; the policy rejects `-i`/`--ignore-errors` but cannot sandbox Make or
+  a caller-selected executable.
 - Never run the current host `apply`, `install`, or `uninstall` path.
 - Keep each phase independently reviewable and update the status ledger when its exit gate passes.
 - Do not change version/release metadata unless the user explicitly asks.

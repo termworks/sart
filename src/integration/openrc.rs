@@ -70,8 +70,8 @@ depend() {
 start() {
     ebegin "Completing the Bootart boot splash"
 
-    # Stopping a service never starts it. This also prevents supervise-daemon
-    # from respawning a daemon after the explicit quit request.
+    # Stopping a service never starts it. This also prevents the service
+    # manager from respawning a daemon after the explicit quit request.
     if [ -x /sbin/rc-service ]; then
         /sbin/rc-service bootart stop >/dev/null 2>&1 || :
     fi

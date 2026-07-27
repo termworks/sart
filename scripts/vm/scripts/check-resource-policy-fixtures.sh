@@ -9,15 +9,15 @@ source "$SCRIPT_DIR/lib.sh"
 [[ $# -eq 1 ]] || vm_die 'usage: check-resource-policy-fixtures.sh REPO_ROOT'
 repo_root=$1
 vm_check_layout "$repo_root" "$repo_root/target/vm"
-vm_validate_lock "$repo_root/vm/images.lock"
+vm_validate_lock "$repo_root/scripts/vm/images.lock"
 
-tmp="$(mktemp -d /tmp/bootart-resource-policy.XXXXXXXXXX)" ||
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootart-resource-policy.XXXXXXXXXX")" ||
     vm_die 'cannot allocate resource policy fixture root'
 marker="$tmp/.bootart-resource-policy"
 : > "$marker"
 cleanup() {
     trap - EXIT HUP INT TERM
-    if [[ "$tmp" == /tmp/bootart-resource-policy.* && -d "$tmp" && ! -L "$tmp" && \
+    if [[ "$tmp" == "${TMPDIR:-/tmp}"/bootart-resource-policy.* && -d "$tmp" && ! -L "$tmp" && \
           -f "$marker" && ! -L "$marker" ]]; then
         chmod -R u+w -- "$tmp" 2>/dev/null || true
         rm -rf -- "$tmp"
@@ -91,6 +91,47 @@ if (vm_assert_file_size_at_most "$sample" 3 sample) >/dev/null 2>&1; then
 fi
 vm_require_free_bytes "$tmp" 1
 
+# Canonical path alone is insufficient when a package manager atomically
+# replaces an executable. Device/inode pinning must reject that replacement,
+# and PID ownership records must bind the launched process to the same inode.
+identity_a="$tmp/identity-a"
+identity_b="$tmp/identity-b"
+printf '#!/bin/sh\nexit 0\n' > "$identity_a"
+printf '#!/bin/sh\nexit 0\n# replacement\n' > "$identity_b"
+chmod 0500 -- "$identity_a" "$identity_b"
+pinned_identity="$(vm_executable_identity "$identity_a")"
+vm_assert_executable_identity "$identity_a" "$pinned_identity" 'identity fixture'
+mv -f -- "$identity_b" "$identity_a"
+if (vm_assert_executable_identity "$identity_a" "$pinned_identity" 'identity fixture') \
+    >/dev/null 2>&1; then
+    vm_die 'executable identity helper accepted an inode replacement'
+fi
+
+(
+    fixture="$tmp/pid-evidence"
+    mkdir -- "$fixture"
+    chmod 0700 -- "$fixture"
+    sleep_command="$(command -v sleep)"
+    sleep_executable="$(readlink -f -- "$sleep_command")"
+    sleep_identity="$(vm_executable_identity "$sleep_executable")"
+    # Preserve argv[0] for Nix coreutils multicall symlinks while recording
+    # the canonical /proc/PID/exe target and its inode.
+    "$sleep_command" 30 &
+    fixture_pid=$!
+    trap 'kill "$fixture_pid" 2>/dev/null || true; wait "$fixture_pid" 2>/dev/null || true' EXIT
+    printf '%s\n' "$fixture_pid" > "$fixture/qemu.pid"
+    vm_pid_starttime "$fixture_pid" > "$fixture/qemu.starttime"
+    printf '%s\n' "$sleep_executable" > "$fixture/qemu.exe"
+    printf '%s\n' "$sleep_identity" > "$fixture/qemu.identity"
+    chmod 0600 -- "$fixture"/qemu.*
+    vm_pid_matches_run "$fixture" ||
+        vm_die 'PID ownership record rejected the exact executable inode'
+    printf '0:0\n' > "$fixture/qemu.identity"
+    if vm_pid_matches_run "$fixture"; then
+        vm_die 'PID ownership record accepted a mismatched executable inode'
+    fi
+)
+
 captured="$tmp/captured.log"
 overflow="$tmp/captured.overflow"
 : > "$captured"
@@ -120,6 +161,27 @@ fi
 [[ -f "$limited" && ! -L "$limited" ]] ||
     vm_die 'file-size-limit fixture did not retain bounded failure evidence'
 vm_assert_file_size_at_most "$limited" 1024 'file-size-limit fixture output'
+
+# The wrapper must not leave prlimit supervising the real process. The PID
+# returned to a lifecycle lane is the one recorded and later killed, so it has
+# to become the exact requested executable after the limit is applied.
+sleep_command="$(command -v sleep)"
+sleep_executable="$(readlink -f -- "$sleep_command")"
+bash "$SCRIPT_DIR/run-with-file-limit.sh" 1024 "$sleep_command" 30 &
+limited_pid=$!
+limited_exec_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if [[ "$(readlink "/proc/$limited_pid/exe" 2>/dev/null || true)" == "$sleep_executable" ]]; then
+        limited_exec_ready=1
+        break
+    fi
+    kill -0 "$limited_pid" 2>/dev/null || break
+    sleep 0.05
+done
+kill "$limited_pid" 2>/dev/null || true
+wait "$limited_pid" 2>/dev/null || true
+[[ $limited_exec_ready -eq 1 ]] ||
+    vm_die 'file-size wrapper PID did not become the requested executable'
 
 untrusted_prlimit="$tmp/untrusted-bin"
 mkdir -- "$untrusted_prlimit"
@@ -151,6 +213,16 @@ set -e
 
 mock_bin="$tmp/bin"
 mkdir -- "$mock_bin"
+ambient_qemu_img="$tmp/ambient-qemu-img"
+ambient_qemu_img_marker="$tmp/ambient-qemu-img.called"
+cat > "$ambient_qemu_img" <<'EOF'
+#!/bin/sh
+printf invoked > "$BOOTART_FIXTURE_AMBIENT_QEMU_IMG_MARKER"
+exit 99
+EOF
+chmod 0500 -- "$ambient_qemu_img"
+export BOOTART_FIXTURE_AMBIENT_QEMU_IMG_MARKER="$ambient_qemu_img_marker"
+export QEMU_IMG="$ambient_qemu_img"
 cat > "$mock_bin/qemu-img" <<'EOF'
 #!/bin/sh
 printf '{"format":"qcow2","virtual-size":%s}\n' "${BOOTART_FIXTURE_VIRTUAL:-8192}"
@@ -158,12 +230,15 @@ EOF
 chmod 0500 -- "$mock_bin/qemu-img"
 image="$tmp/image.qcow2"
 : > "$image"
-virtual="$(PATH="$mock_bin:$PATH" vm_assert_qcow2_virtual_size "$image" 8192)"
+virtual="$(PATH="$mock_bin:$PATH" QEMU_IMG="$mock_bin/qemu-img" \
+    vm_assert_qcow2_virtual_size "$image" 8192)"
 [[ "$virtual" == 8192 ]] || vm_die 'qcow2 virtual-size helper returned the wrong value'
-if (PATH="$mock_bin:$PATH" vm_assert_qcow2_virtual_size "$image" 4096) >/dev/null 2>&1; then
+if (PATH="$mock_bin:$PATH" QEMU_IMG="$mock_bin/qemu-img" \
+    vm_assert_qcow2_virtual_size "$image" 4096) >/dev/null 2>&1; then
     vm_die 'qcow2 virtual-size helper accepted an oversized disk'
 fi
-if (PATH="$mock_bin:$PATH" vm_assert_qcow2_virtual_size "$image" 8192 4096) \
+if (PATH="$mock_bin:$PATH" QEMU_IMG="$mock_bin/qemu-img" \
+    vm_assert_qcow2_virtual_size "$image" 8192 4096) \
     >/dev/null 2>&1; then
     vm_die 'qcow2 virtual-size helper accepted an unexpected geometry change'
 fi
@@ -171,13 +246,16 @@ for oversized_virtual in \
     1125899906842625 9223372036854775808 18446744073709551616 \
     999999999999999999999999999999999999999999
 do
-    if (PATH="$mock_bin:$PATH" BOOTART_FIXTURE_VIRTUAL="$oversized_virtual" \
+    if (PATH="$mock_bin:$PATH" QEMU_IMG="$mock_bin/qemu-img" \
+        BOOTART_FIXTURE_VIRTUAL="$oversized_virtual" \
         vm_assert_qcow2_virtual_size "$image" 8192) >/dev/null 2>&1; then
         vm_die "qcow2 virtual-size helper accepted an extreme value: $oversized_virtual"
     fi
 done
+[[ ! -e "$ambient_qemu_img_marker" ]] ||
+    vm_die 'resource fixture executed inherited QEMU_IMG instead of its exact per-call mock'
 
-fetcher="$repo_root/vm/scripts/fetch-image.sh"
+fetcher="$repo_root/scripts/vm/scripts/fetch-image.sh"
 for required in \
     '--connect-timeout 15' '--max-time 900' '--max-filesize "$download_bytes"' \
     'vm_require_free_bytes "$image_dir" "$download_bytes"' \
@@ -276,11 +354,13 @@ if PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$payload" \
 fi
 [[ ! -e "$curl_record" ]] || vm_die 'wrong-size cache entry unexpectedly reached curl'
 
-adapter="$repo_root/vm/scripts/run-adapter-lane.sh"
+adapter="$repo_root/scripts/vm/scripts/run-adapter-lane.sh"
 for required in \
     'vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"' \
     'vm_assert_qcow2_virtual_size "$image" "$max_virtual_bytes"' \
     'run-with-file-limit.sh" "$max_file_bytes"' \
+    'runner-produced seed.img must have mode 0600 before common sealing' \
+    'chmod 0400 -- "$seed"' \
     'capture-bounded-stream.sh" "$max_log_bytes"' \
     'vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"' \
     'vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"' \
@@ -292,7 +372,7 @@ done
 [[ "$(grep -Fc '>/dev/null 2>&1' "$adapter")" -ge 3 ]] ||
     vm_die 'adapter prepare/qemu diagnostics are not all bounded or discarded'
 
-lifecycle="$repo_root/vm/scripts/run-lifecycle.sh"
+lifecycle="$repo_root/scripts/vm/scripts/run-lifecycle.sh"
 for required in \
     'vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"' \
     'run-with-file-limit.sh" "$max_file_bytes"' \
@@ -308,5 +388,56 @@ grep -F '>/dev/null 2>&1 &' "$lifecycle" >/dev/null ||
     vm_die 'lifecycle QEMU diagnostics are not discarded'
 grep -F 'ulimit -c 0' "$lifecycle" >/dev/null ||
     vm_die 'lifecycle core-dump guard is missing'
+
+# Guest bytes become PID 1 and early-boot helpers only in the disposable VM.
+# The real preparation boundary must reject group-writable ancestors/files and
+# pin both the source and copied bytes, while ordinary read-only checks remain
+# usable in a normal umask-002 checkout.
+guest_repo="$tmp/guest-source-repo"
+guest_tree="$guest_repo/scripts/vm/guest"
+mkdir -p -- "$guest_tree"
+chmod 0700 -- "$guest_repo" "$guest_repo/scripts" "$guest_repo/scripts/vm" "$guest_tree"
+printf '#!/bin/sh\n' > "$guest_tree/init"
+printf '::sysinit:/bin/true\n' > "$guest_tree/inittab"
+printf '#!/bin/sh\n' > "$guest_tree/lifecycle"
+chmod 0500 -- "$guest_tree/init" "$guest_tree/lifecycle"
+chmod 0400 -- "$guest_tree/inittab"
+vm_assert_guest_source_tree "$guest_repo"
+chmod 0770 -- "$guest_repo/scripts"
+if (vm_assert_guest_source_tree "$guest_repo") >/dev/null 2>&1; then
+    vm_die 'guest source helper accepted a group-writable ancestor'
+fi
+chmod 0700 -- "$guest_repo/scripts"
+chmod 0660 -- "$guest_tree/init"
+if (vm_assert_guest_source_tree "$guest_repo") >/dev/null 2>&1; then
+    vm_die 'guest source helper accepted a group-writable source file'
+fi
+chmod 0500 -- "$guest_tree/init"
+vm_assert_guest_source_tree "$guest_repo"
+
+preparer="$repo_root/scripts/vm/scripts/prepare-smoke.sh"
+for required in \
+    'vm_assert_guest_source_tree "$repo_root"' \
+    'guest_source_sha[$source]="$(vm_sha256_file "$guest_source/$source")"' \
+    'bootart_source_sha="$(vm_sha256_file "$bootart_physical")"' \
+    'VM guest source changed while being copied' \
+    'VM guest copy does not match pinned source' \
+    'bootart guest copy does not match pinned source'
+do
+    grep -F -- "$required" "$preparer" >/dev/null ||
+        vm_die "guest preparation integrity guard is missing: $required"
+done
+strict_first="$(grep -nF 'vm_assert_guest_source_tree "$repo_root"' "$preparer" | head -n 1 | cut -d: -f1)"
+pin_first="$(grep -nF 'guest_source_sha[$source]=' "$preparer" | head -n 1 | cut -d: -f1)"
+install_first="$(grep -nF 'install -m 0755 -- "$guest_source/init"' "$preparer" | cut -d: -f1)"
+recheck_first="$(grep -nF 'VM guest source changed while being copied' "$preparer" | cut -d: -f1)"
+strict_last="$(grep -nF 'vm_assert_guest_source_tree "$repo_root"' "$preparer" | tail -n 1 | cut -d: -f1)"
+archive_line="$(grep -nF '    gzip -dc -- "$base_initrd"' "$preparer" | cut -d: -f1)"
+for line in "$strict_first" "$pin_first" "$install_first" "$recheck_first" "$strict_last" "$archive_line"; do
+    [[ "$line" =~ ^[1-9][0-9]*$ ]] || vm_die 'guest-source copy ordering guard is incomplete'
+done
+(( strict_first < pin_first && pin_first < install_first && install_first < recheck_first && \
+   recheck_first < strict_last && strict_last < archive_line )) ||
+    vm_die 'guest sources must be validated, pinned, copied, rechecked, then archived'
 
 printf 'bootart-vm: resource lock/limit fixtures PASS (no network, runner, product, or QEMU)\n'

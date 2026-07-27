@@ -121,8 +121,12 @@ if [ "$#" -ne 1 ] || [ ! -x "$bootart_console" ]; then
     exit 1
 fi
 
-if [ -x /usr/bin/bootart ] && \
-   /usr/bin/bootart native-ready >/dev/null 2>&1; then
+if [ ! -x /usr/bin/bootart ] || \
+   ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1; then
+    exec "$bootart_console" "$bootart_prompt"
+fi
+
+if /usr/bin/bootart native-ready >/dev/null 2>&1; then
     /usr/bin/bootart native-askpass \
         --adapter initramfs-tools-busybox \
         --prompt "$bootart_prompt" \
@@ -180,7 +184,8 @@ case "${1:-}" in
         ;;
 esac
 
-if [ ! -x /usr/bin/bootart ]; then
+if [ ! -x /usr/bin/bootart ] || \
+   ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1; then
     exit 0
 fi
 
@@ -318,6 +323,39 @@ mod tests {
         assert!(!ASKPASS_WRAPPER.contains("passfifo"));
         assert!(!ASKPASS_WRAPPER.contains("control.sock\" \"$bootart_prompt"));
         assert!(!ASKPASS_WRAPPER.contains("password="));
+    }
+
+    #[test]
+    fn runtime_disable_predicate_precedes_console_interception_and_daemon_start() {
+        let wrapper_predicate = ASKPASS_WRAPPER
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("askpass predicate");
+        let direct_console = ASKPASS_WRAPPER[wrapper_predicate..]
+            .find("exec \"$bootart_console\"")
+            .expect("disabled stock-console path")
+            + wrapper_predicate;
+        let readiness = ASKPASS_WRAPPER
+            .find("/usr/bin/bootart native-ready")
+            .expect("native readiness probe");
+        let native_client = ASKPASS_WRAPPER
+            .find("/usr/bin/bootart native-askpass")
+            .expect("native askpass client");
+        assert!(wrapper_predicate < direct_console && direct_console < readiness);
+        assert!(readiness < native_client);
+
+        let early_predicate = EARLY_HOOK
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("early-hook predicate");
+        let startup_guard = EARLY_HOOK
+            .find("bootart_guard=/run/.bootart-ift-starting")
+            .expect("startup guard");
+        let daemon = EARLY_HOOK
+            .find("/usr/bin/bootart daemon")
+            .expect("daemon start");
+        assert!(early_predicate < startup_guard && startup_guard < daemon);
+
+        assert!(!BUILD_HOOK.contains("early-boot-enabled"));
+        assert!(!BOTTOM_HOOK.contains("early-boot-enabled"));
     }
 
     #[test]

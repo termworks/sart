@@ -20,25 +20,57 @@ physical_root="$(cd -- "$repo_root" && pwd -P)" || die 'cannot resolve repositor
     die 'repository root must be canonical and have no symlinked parent'
 
 surfaces=("$repo_root/Makefile")
-[[ -f "$repo_root/vm/Makefile" ]] && surfaces+=("$repo_root/vm/Makefile")
+vm_root="$repo_root/scripts/vm"
+[[ ! -e "$vm_root" || -d "$vm_root" ]] || \
+    die "VM source root is unsafe: $vm_root"
+[[ ! -L "$vm_root" ]] || die "VM source root is symlinked: $vm_root"
+if [[ -d "$vm_root" ]]; then
+    [[ -f "$vm_root/Makefile" && ! -L "$vm_root/Makefile" ]] || \
+        die "VM Makefile is missing or symlinked: $vm_root/Makefile"
+    surfaces+=("$vm_root/Makefile")
+    while IFS= read -r -d '' entry; do
+        name=${entry##*/}
+        case "$name" in
+            Makefile|README.md|images.lock|adapter-matrix.lock)
+                [[ -f "$entry" && ! -L "$entry" ]] || \
+                    die "VM data surface is unsafe: $entry"
+                ;;
+            guest|scripts|runners)
+                [[ -d "$entry" && ! -L "$entry" ]] || \
+                    die "VM source tree is unsafe: $entry"
+                ;;
+            *)
+                die "unexpected top-level VM source surface: $entry"
+                ;;
+        esac
+    done < <(find "$vm_root" -xdev -mindepth 1 -maxdepth 1 -print0)
+fi
 [[ -f "$repo_root/flake.nix" ]] && surfaces+=("$repo_root/flake.nix")
 [[ -f "$repo_root/.envrc" ]] && surfaces+=("$repo_root/.envrc")
 
 for tree in \
     "$repo_root/scripts" \
-    "$repo_root/vm/scripts" \
-    "$repo_root/vm/runners" \
+    "$vm_root/scripts" \
+    "$vm_root/runners" \
     "$repo_root/.github/workflows"
 do
     [[ ! -e "$tree" || -d "$tree" ]] || die "command-surface tree is unsafe: $tree"
     [[ ! -L "$tree" ]] || die "command-surface tree is symlinked: $tree"
     [[ -d "$tree" ]] || continue
-    if unsafe_link="$(find "$tree" -xdev -type l -print -quit)" && [[ -n "$unsafe_link" ]]; then
+    find_args=("$tree" -xdev)
+    if [[ "$tree" == "$repo_root/scripts" && -e "$vm_root" ]]; then
+        # scripts/vm contains both host-side orchestration and inert guest
+        # payload/documentation. Prune it here, then admit only its reviewed
+        # host-executed Makefile, scripts, and runners through the explicit
+        # surfaces above.
+        find_args+=(\( -path "$vm_root" -o -path "$vm_root/*" \) -prune -o)
+    fi
+    if unsafe_link="$(find "${find_args[@]}" -type l -print -quit)" && [[ -n "$unsafe_link" ]]; then
         die "symlinked command surface is forbidden: $unsafe_link"
     fi
     while IFS= read -r -d '' surface; do
         surfaces+=("$surface")
-    done < <(find "$tree" -xdev -type f -print0)
+    done < <(find "${find_args[@]}" -type f -print0)
 done
 
 for surface in "${surfaces[@]}"; do
@@ -78,25 +110,37 @@ for surface in "${surfaces[@]}"; do
         ' "$surface"
     )
 
-    # Raw host block-device paths are never valid inputs to this project.
+    # Host command surfaces need only inert character endpoints. Reject every
+    # concrete /dev name except the narrow read/sink allowlist instead of
+    # trying to enumerate Linux block-device families (nbd/rbd/zd and future
+    # names must fail closed too). Split fixture spellings such as /dev/"sda"
+    # are data for a second policy and do not name a device in this surface.
     while IFS= read -r match; do
         [[ -z "$match" ]] && continue
         printf '%s\n' "$match" >&2
         violations=1
     done < <(
         awk -v file="$surface" '
-            $0 !~ /^[[:space:]]*#/ &&
-            $0 ~ /\/dev\/(sd[a-z]|vd[a-z]|xvd[a-z]|nvme[0-9]|mmcblk[0-9]|mapper\/|disk\/|loop[0-9]|loop-control|dm-[0-9]|md[0-9]|zvol\/)/ {
-                printf "%s:%d:%s\n", file, NR, $0
+            $0 !~ /^[[:space:]]*#/ {
+                text = $0
+                # These are the only concrete device endpoints used by
+                # reviewed host-side scripts: discard input, zero/random
+                # fixture input, and no raw storage or terminal endpoint.
+                gsub(/\/dev\/(null|zero|urandom)([^[:alnum:]_.-]|$)/,
+                     "SAFE_DEVICE_ENDPOINT", text)
+                if (text ~ /\/dev\/[[:alnum:]_.-]+/) {
+                    printf "%s:%d:%s\n", file, NR, $0
+                }
             }
         ' "$surface"
     )
 
-    # Host-executed surfaces may mutate private repository/VM paths, including
-    # a guest tree such as "$root/etc". They may never name a literal host
-    # boot/configuration/software root as the destination of a mutating command
-    # or output redirection. Strip only an explicit, narrow set of guest/staging
-    # root variables before looking for an absolute destination.
+    # Host-executed surfaces may mutate only paths rooted in reviewed variables
+    # whose producers separately validate repository target/, VM state, or a
+    # private fixture/temp directory. A literal absolute destination is never
+    # needed: reject all of them, rather than maintaining a short denylist of
+    # /boot, /etc, and /usr. HOME and tilde destinations are likewise forbidden.
+    # Safe /dev sinks/sources are removed before the absolute-path check.
     while IFS= read -r match; do
         [[ -z "$match" ]] && continue
         printf '%s\n' "$match" >&2
@@ -105,12 +149,36 @@ for surface in "${surfaces[@]}"; do
         awk -v file="$surface" -v mutation="$mutation_pattern" '
             $0 !~ /^[[:space:]]*#/ {
                 text = $0
-                guest_root = "[\"\047]?[$][{]?(root|guest_root|target_root|stage|generation|fixture|tmp)[}]?[\"\047]?/(boot|etc|usr)"
-                gsub(guest_root, "GUEST_ROOT_PATH", text)
-                sensitive = "(^|[^[:alnum:]_$}./-])/(boot|etc|usr)(/|[^[:alnum:]_.-]|$)"
-                redirected = "(^|[^<])>>?[[:space:]]*[\"\047]?/(boot|etc|usr)(/|[^[:alnum:]_.-]|$)"
-                sed_in_place = "(^|[^[:alnum:]_.-])sed([^[:alnum:]_.-]|$).*([[:space:]]-i|-i[.])"
-                if ((text ~ mutation || text ~ sed_in_place) && text ~ sensitive || text ~ redirected) {
+                sed_argument = continued_sed
+                continued_sed = 0
+                gsub(/\/dev\/(null|zero|urandom)([^[:alnum:]_.-]|$)/,
+                     "SAFE_DEVICE_ENDPOINT", text)
+                # A slash following a quoted validated root is concatenation,
+                # not a literal absolute path (for example "$root"/child).
+                safe_root = "[\"\047]?[$][$]?[{]?(repo_root|vm_root|run_dir|root|guest_root|target_root|stage|generation|fixture|tmp|tmp_parent|outputs|pointer_stage)[}]?[\"\047]?/"
+                gsub(safe_root, "SAFE_VALIDATED_ROOT/", text)
+                private_tmp = "[\"\047]?[$][{]TMPDIR:-/tmp[}][\"\047]?/"
+                gsub(private_tmp, "SAFE_PRIVATE_TMP/", text)
+                sed_in_place = "(^|[^[:alnum:]_.-])sed([^[:alnum:]_.-]|$).*[-]i([[:space:].]|$)"
+                mutates = (text ~ mutation && text !~ sed_in_place)
+                absolute_literal = "(^|[[:space:]\"\047=(:,;|&])/[[:alnum:]_.~+-]"
+                root_literal = "(^|[[:space:]\"\047=(:,;|&])/([[:space:]\"\047;|&)]|$)"
+                home_reference = "[$](HOME|[{]HOME[}])"
+                tilde_reference = "(^|[[:space:]\"\047=(:,;|&])[~]/"
+                absolute_redirect = "(^|[^<])>>?[[:space:]]*[\"\047]?/([[:alnum:]_.~+-]|[\"\047]?[[:space:];|&)]|$)"
+                home_redirect = "(^|[^<])>>?[[:space:]]*[\"\047]?([$](HOME|[{]HOME[}])|[~](/|[\"\047]?[[:space:];|&)]|$))"
+                final_absolute = "[[:space:]][\"\047]?/([[:alnum:]_.~+-][^[:space:]\"\047;|&]*|[\"\047]?)[\"\047]?[[:space:]]*(\\\\)?$"
+                continued = (text ~ /\\[[:space:]]*$/)
+                if ((sed_argument && continued) ||
+                    (text ~ sed_in_place && continued)) continued_sed = 1
+                if ((mutates &&
+                     (text ~ absolute_literal || text ~ root_literal ||
+                      text ~ home_reference || text ~ tilde_reference)) ||
+                    (text ~ sed_in_place && !continued && text ~ final_absolute) ||
+                    (sed_argument &&
+                     (text ~ absolute_literal || text ~ root_literal ||
+                      text ~ home_reference || text ~ tilde_reference)) ||
+                    text ~ absolute_redirect || text ~ home_redirect) {
                     printf "%s:%d:%s\n", file, NR, $0
                 }
             }

@@ -17,8 +17,8 @@ repo_root=${1%/}
     die 'repository root must be canonical'
 
 root_make=$repo_root/Makefile
-vm_make=$repo_root/vm/Makefile
-matrix=$repo_root/vm/adapter-matrix.lock
+vm_make=$repo_root/scripts/vm/Makefile
+matrix=$repo_root/scripts/vm/adapter-matrix.lock
 rust_registry=$repo_root/src/install/mod.rs
 for source in "$root_make" "$vm_make" "$matrix" "$rust_registry"; do
     [[ -f "$source" && ! -L "$source" ]] || die "required source is missing or symlinked: $source"
@@ -27,9 +27,25 @@ done
 make_pairs() {
     local file=$1 variable=$2 assignment
     assignment=$(awk -v variable="$variable" '
-        $1 == variable && $2 == ":=" { sub(/^[^:]*:=[[:space:]]*/, ""); print; found++ }
-        END { if (found != 1) exit 3 }
-    ' "$file") || die "$file must define $variable exactly once with :="
+        function any_assignment(text, prefix, op) {
+            prefix = "^[[:space:]]*((override|export|private)[[:space:]]+)*"
+            op = "[[:space:]]*(:::=|::=|:=|[+]=|[?]=|!=|=)"
+            if (text ~ (prefix variable op)) return 1
+            prefix = "^[^=]+:[[:space:]]*((override|export|private)[[:space:]]+)*"
+            if (text ~ (prefix variable op)) return 1
+            prefix = "^[[:space:]]*(override[[:space:]]+)?(define|undefine)[[:space:]]+"
+            return text ~ (prefix variable "([[:space:]]|$)")
+        }
+        substr($0, 1, 1) != "\t" && $0 !~ /^[[:space:]]*#/ && any_assignment($0) {
+            assignments++
+        }
+        $1 == "override" && $2 == variable && $3 == ":=" {
+            sub(/^[[:space:]]*override[[:space:]]+[^:]*:=[[:space:]]*/, "")
+            print
+            found++
+        }
+        END { if (found != 1 || assignments != 1) exit 3 }
+    ' "$file") || die "$file must define $variable exactly once with override :="
     # `$()` is an intentionally empty Make expansion used to keep generator
     # command policy scanners from mistaking an adapter identifier for a host
     # executable. It must be the only expansion in this data-only assignment.
@@ -49,11 +65,24 @@ vm_pairs=$(make_pairs "$vm_make" ADAPTER_PAIRS)
     die 'root and VM Make adapter-pair sets differ'
 
 matrix_pairs=$(awk -F '|' '
-    $0 !~ /^#/ && NF { print $1; rows[$1]++ }
-    END {
-        for (pair in rows) if (rows[pair] != 3) exit 3
+    $0 !~ /^#/ && NF {
+        pair = $1
+        lane = $5
+        if (lane != "lifecycle" && lane != "install" && lane != "password") exit 3
+        rows[pair]++
+        pair_lanes[pair SUBSEP lane]++
+        print pair
     }
-' "$matrix" | sort -u) || die 'every matrix pair must own exactly three rows'
+    END {
+        for (pair in rows) {
+            if (rows[pair] != 3 ||
+                pair_lanes[pair SUBSEP "lifecycle"] != 1 ||
+                pair_lanes[pair SUBSEP "install"] != 1 ||
+                pair_lanes[pair SUBSEP "password"] != 1) exit 3
+        }
+    }
+' "$matrix" | sort -u) ||
+    die 'every matrix pair must own exactly one lifecycle, install, and password row'
 [[ "$root_pairs" == "$matrix_pairs" ]] ||
     die 'Make and adapter-matrix pair sets differ'
 

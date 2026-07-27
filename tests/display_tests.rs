@@ -144,7 +144,6 @@ mod linux_text_vt {
     #[derive(Debug)]
     struct FakeState {
         calls: Vec<Call>,
-        original_vt: u16,
         free_vt: u16,
         active_vt: u16,
         dimensions: Dimensions,
@@ -159,7 +158,6 @@ mod linux_text_vt {
         fn default() -> Self {
             Self {
                 calls: Vec::new(),
-                original_vt: 1,
                 free_vt: 7,
                 active_vt: 1,
                 dimensions: Dimensions::new(3, 2).unwrap(),

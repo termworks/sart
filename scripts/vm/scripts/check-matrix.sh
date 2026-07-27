@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TEST INFRASTRUCTURE ONLY. Read-only adapter matrix and blocked-state oracle.
+# TEST INFRASTRUCTURE ONLY. Read-only adapter matrix and readiness-state oracle.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -23,7 +23,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             vm_emit_lane_status "$pair" "$lane" BLOCKED_UNVERIFIED \
                 "$image_id" "$oracle" immutable-image-not-pinned
             ;;
+        blocked-unimplemented)
+            vm_require_missing_matrix_runner "$repo_root" "$pair" "$lane"
+            vm_emit_lane_status "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
+                "$image_id" "$oracle" adapter-runner-missing
+            ;;
         ready-unproven)
+            vm_require_ready_matrix_runner "$repo_root" "$pair" "$lane" \
+                "$SCRIPT_DIR/check-runner-policy.sh"
             vm_emit_lane_status "$pair" "$lane" READY_UNPROVEN \
                 "$image_id" "$oracle" runtime-proof-required
             ;;

@@ -18,6 +18,15 @@ pub fn splash_disabled_at(path: &Path) -> io::Result<bool> {
     fs::read_to_string(path).map(|cmdline| splash_disabled(&cmdline))
 }
 
+/// Return whether an early-boot adapter may acquire the splash display.
+///
+/// An unreadable command line is deliberately treated the same as an explicit
+/// disable token. The boot must continue through its stock presentation and
+/// password path rather than letting an adapter guess that Bootart is enabled.
+pub fn early_boot_enabled_at(path: &Path) -> bool {
+    matches!(splash_disabled_at(path), Ok(false))
+}
+
 pub fn splash_disabled_for_current_boot() -> io::Result<bool> {
     splash_disabled_at(Path::new(PROC_CMDLINE))
 }
@@ -47,5 +56,13 @@ mod tests {
                 "unexpected match for {cmdline:?}"
             );
         }
+    }
+
+    #[test]
+    fn early_boot_predicate_fails_open_to_the_stock_boot_path() {
+        assert!(early_boot_enabled_at(Path::new("/dev/null")));
+        assert!(!early_boot_enabled_at(Path::new(
+            "/bootart-test-path-that-must-not-exist/cmdline",
+        )));
     }
 }

@@ -18,7 +18,7 @@ use crate::password::{EchoMode, InputFeedback, PromptCoordinator};
 use crate::render::{FrameEngine, FrameError};
 use crate::terminal::TerminalSize;
 
-use super::state::{Lifecycle, SplashState, StateAction, StateError, View};
+use super::state::{Lifecycle, Mode, SplashState, StateAction, StateError, View};
 
 pub const DEFAULT_FRAMES_PER_SECOND: u16 = 30;
 pub const MAX_FRAMES_PER_SECOND: u16 = 60;
@@ -496,6 +496,18 @@ fn apply_overlays(
                 },
             ));
         }
+        // Mode is normal presentation context, not operational information.
+        // Append it last so the bounded row selection drops it before a
+        // message, status, or progress update on short displays.
+        let (mode_label, mode_color) = mode_presentation(state.mode());
+        lines.push((
+            mode_label.to_owned(),
+            Style {
+                foreground: mode_color,
+                background: Color::Default,
+                bold: true,
+            },
+        ));
     }
 
     let mut sensitive = None;
@@ -516,6 +528,22 @@ fn apply_overlays(
         }
     }
     Ok(sensitive)
+}
+
+/// Stable text-VT presentation for every lifecycle mode.
+///
+/// The label is deliberately static, short, and independent of status or
+/// message text. This keeps shutdown/reboot/update presentation observable
+/// even on a one-row display while the prompt branch above can suppress all
+/// non-prompt overlays at the secret-input boundary.
+fn mode_presentation(mode: Mode) -> (&'static str, Color) {
+    match mode {
+        Mode::Boot => ("BOOTING", Color::BrightCyan),
+        Mode::Shutdown => ("SHUTTING DOWN", Color::BrightYellow),
+        Mode::Reboot => ("REBOOTING", Color::BrightMagenta),
+        Mode::Update => ("UPDATING", Color::BrightBlue),
+        Mode::Upgrade => ("UPGRADING", Color::BrightGreen),
+    }
 }
 
 fn visible_prefix(text: &str, maximum_cells: usize) -> (&str, usize) {
@@ -677,6 +705,23 @@ mod tests {
         state
     }
 
+    fn rendered_mode_scene(mode: Mode, dimensions: Dimensions, elapsed: Duration) -> Scene {
+        let art = Art::parse("X").unwrap();
+        let backend = BufferBackend::new(dimensions);
+        let mut engine = SplashEngine::new(backend, &art, None, EngineConfig::default()).unwrap();
+        let mut state = SplashState::new(mode);
+        state.apply(StateAction::MarkRunning).unwrap();
+        engine.start(&mut state).unwrap();
+        engine.tick_at(&mut state, elapsed).unwrap();
+        engine.backend().frames().last().unwrap().clone()
+    }
+
+    fn scene_row(scene: &Scene, row: u16) -> String {
+        (0..scene.dimensions().columns())
+            .map(|column| scene.get(column, row).unwrap().glyph())
+            .collect()
+    }
+
     struct EnginePrompt {
         input: PromptInput,
     }
@@ -791,6 +836,109 @@ mod tests {
     }
 
     #[test]
+    fn every_mode_has_distinct_deterministic_presentation() {
+        let dimensions = Dimensions::new(24, 4).unwrap();
+        let elapsed = Duration::from_millis(1_234);
+        let cases = [
+            (Mode::Boot, "BOOTING", Color::BrightCyan),
+            (Mode::Shutdown, "SHUTTING DOWN", Color::BrightYellow),
+            (Mode::Reboot, "REBOOTING", Color::BrightMagenta),
+            (Mode::Update, "UPDATING", Color::BrightBlue),
+            (Mode::Upgrade, "UPGRADING", Color::BrightGreen),
+        ];
+        let mut rendered_rows = Vec::new();
+
+        for (mode, label, color) in cases {
+            let first = rendered_mode_scene(mode, dimensions, elapsed);
+            let second = rendered_mode_scene(mode, dimensions, elapsed);
+            assert_eq!(first, second, "{mode:?} presentation must be deterministic");
+
+            let row = scene_row(&first, dimensions.rows() - 1);
+            let column = row.find(label).expect("mode label must be visible") as u16;
+            assert_eq!(
+                first.get(column, dimensions.rows() - 1).unwrap().style(),
+                Style {
+                    foreground: color,
+                    background: Color::Default,
+                    bold: true,
+                }
+            );
+            assert!(!rendered_rows.contains(&row));
+            rendered_rows.push(row);
+        }
+    }
+
+    #[test]
+    fn changing_mode_changes_the_next_frame_in_the_same_engine() {
+        let art = Art::parse("X").unwrap();
+        let dimensions = Dimensions::new(20, 4).unwrap();
+        let backend = BufferBackend::new(dimensions);
+        let mut engine = SplashEngine::new(backend, &art, None, EngineConfig::default()).unwrap();
+        let mut state = running_state();
+        engine.start(&mut state).unwrap();
+        engine.tick_at(&mut state, Duration::ZERO).unwrap();
+
+        state.apply(StateAction::SetMode(Mode::Upgrade)).unwrap();
+        engine
+            .tick_at(&mut state, Duration::from_millis(40))
+            .unwrap();
+
+        let frames = engine.backend().frames();
+        assert_eq!(frames.len(), 2);
+        let boot = scene_row(&frames[0], dimensions.rows() - 1);
+        let upgrade = scene_row(&frames[1], dimensions.rows() - 1);
+        assert!(boot.contains("BOOTING"));
+        assert!(!boot.contains("UPGRADING"));
+        assert!(upgrade.contains("UPGRADING"));
+        assert!(!upgrade.contains("BOOTING"));
+    }
+
+    #[test]
+    fn one_row_mode_presentations_are_bounded_and_distinct() {
+        let dimensions = Dimensions::new(3, 1).unwrap();
+        let cases = [
+            (Mode::Boot, "BOO"),
+            (Mode::Shutdown, "SHU"),
+            (Mode::Reboot, "REB"),
+            (Mode::Update, "UPD"),
+            (Mode::Upgrade, "UPG"),
+        ];
+        let mut rendered_rows = Vec::new();
+
+        for (mode, expected) in cases {
+            let scene = rendered_mode_scene(mode, dimensions, Duration::ZERO);
+            assert_eq!(scene.dimensions(), dimensions);
+            let row = scene_row(&scene, 0);
+            assert_eq!(row, expected);
+            assert!(!rendered_rows.contains(&row));
+            rendered_rows.push(row);
+        }
+    }
+
+    #[test]
+    fn operational_text_displaces_the_low_priority_mode_on_a_one_row_display() {
+        let art = Art::parse("X").unwrap();
+        let dimensions = Dimensions::new(7, 1).unwrap();
+        let backend = BufferBackend::new(dimensions);
+        let mut engine = SplashEngine::new(backend, &art, None, EngineConfig::default()).unwrap();
+        let mut state = SplashState::new(Mode::Reboot);
+        state.apply(StateAction::MarkRunning).unwrap();
+        state
+            .apply(StateAction::SetMessage(Some("MESSAGE".into())))
+            .unwrap();
+        state
+            .apply(StateAction::SetStatus(Some("STATUS".into())))
+            .unwrap();
+        state.apply(StateAction::SetProgress(Some(42))).unwrap();
+        engine.start(&mut state).unwrap();
+        engine.tick_at(&mut state, Duration::ZERO).unwrap();
+
+        let row = scene_row(engine.backend().frames().last().unwrap(), 0);
+        assert_eq!(row, "MESSAGE");
+        assert!(!row.contains("REBOOT"));
+    }
+
+    #[test]
     fn retain_request_keeps_only_pixels_and_releases_display_ownership() {
         let art = Art::parse("X").unwrap();
         let backend = BufferBackend::new(Dimensions::new(8, 3).unwrap());
@@ -878,6 +1026,7 @@ mod tests {
         let mut engine = SplashEngine::new(backend, &art, None, EngineConfig::default()).unwrap();
         let clock = FakeClock::default();
         let mut state = running_state();
+        state.apply(StateAction::SetMode(Mode::Reboot)).unwrap();
         state
             .apply(StateAction::BeginPrompt(
                 PromptMetadata::new(7, "Disk password")
@@ -902,6 +1051,8 @@ mod tests {
             .map(|cell| cell.glyph())
             .collect();
         assert!(!frame_text.contains("hunter2"));
+        assert!(frame_text.contains("Disk password"));
+        assert!(!frame_text.contains("REBOOTING"));
         assert!(!format!("{:?}", engine.backend().operations()).contains("hunter2"));
         assert!(
             engine

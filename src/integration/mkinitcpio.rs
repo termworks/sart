@@ -22,7 +22,8 @@ HELPEOF
 pub const RUNTIME_HOOK: &str = r#"#!/usr/bin/ash
 
 run_earlyhook() {
-    if [ ! -x /usr/bin/bootart ]; then
+    if [ ! -x /usr/bin/bootart ] || \
+       ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1; then
         return 0
     fi
     if /usr/bin/bootart ping >/dev/null 2>&1; then
@@ -68,5 +69,24 @@ mod tests {
         assert!(RUNTIME_HOOK.contains("/usr/bin/bootart quit"));
         assert!(!RUNTIME_HOOK.contains("exec /usr/bin/bootart"));
         assert!(!RUNTIME_HOOK.contains("systemctl"));
+    }
+
+    #[test]
+    fn runtime_disable_predicate_gates_only_early_start() {
+        let (early, cleanup) = RUNTIME_HOOK
+            .split_once("\nrun_cleanuphook()")
+            .expect("separate mkinitcpio lifecycle hooks");
+        let predicate = early
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("mkinitcpio early predicate");
+        let ping = early
+            .find("/usr/bin/bootart ping")
+            .expect("mkinitcpio ping");
+        let daemon = early
+            .find("/usr/bin/bootart daemon")
+            .expect("mkinitcpio daemon start");
+        assert!(predicate < ping && ping < daemon);
+        assert!(!cleanup.contains("early-boot-enabled"));
+        assert!(!INSTALL_HOOK.contains("early-boot-enabled"));
     }
 }

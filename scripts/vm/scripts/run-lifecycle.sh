@@ -16,6 +16,7 @@ lock_file=$3
 image_id=$4
 bootart_bin=$5
 qemu="$(vm_resolve_qemu "${QEMU:-qemu-system-x86_64}")"
+qemu_identity="$(vm_executable_identity "$qemu")"
 QEMU=$qemu
 export QEMU
 timeout_seconds=${TIMEOUT_SECONDS:-90}
@@ -33,6 +34,8 @@ IFS='|' read -r id status url sha format arch filename kernel_member initrd_memb
 [[ "$status" == verified ]] || vm_die \
     "VM gate blocked for $id: images.lock has no reviewed checksum"
 [[ "$format" == iso ]] || vm_die "lifecycle smoke requires a locked ISO input: $id"
+bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
+    vm_die 'ready lifecycle VM lane requires the repository artifact lock'
 
 image="$vm_root/cache/images/$filename"
 vm_assert_private_dir "$vm_root/cache/images"
@@ -135,6 +138,7 @@ vm_assert_file_size_at_most "$args_file" "$max_evidence_bytes" 'QEMU argument re
 QEMU="$qemu" bash "$SCRIPT_DIR/check-command.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$args_file"
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
+vm_assert_executable_identity "$qemu" "$qemu_identity" 'configured QEMU executable'
 
 bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_log_bytes" "${args[@]}" \
     >/dev/null 2>&1 &
@@ -147,7 +151,8 @@ printf '%s\n' "$qemu_pid" > "$run_dir/qemu.pid"
 vm_pid_starttime "$qemu_pid" > "$run_dir/qemu.starttime" || vm_die 'cannot record QEMU start time'
 qemu_exec_ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if [[ "$(readlink "/proc/$qemu_pid/exe" 2>/dev/null || true)" == "$qemu" ]]; then
+    if [[ "$(readlink "/proc/$qemu_pid/exe" 2>/dev/null || true)" == "$qemu" && \
+          "$(vm_pid_executable_identity "$qemu_pid" 2>/dev/null || true)" == "$qemu_identity" ]]; then
         qemu_exec_ready=1
         break
     fi
@@ -156,9 +161,11 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 [[ $qemu_exec_ready -eq 1 ]] || vm_die 'bounded QEMU child did not reach the validated executable'
 printf '%s\n' "$qemu" > "$run_dir/qemu.exe"
-chmod 0600 -- "$run_dir/qemu.pid" "$run_dir/qemu.starttime" "$run_dir/qemu.exe"
+printf '%s\n' "$qemu_identity" > "$run_dir/qemu.identity"
+chmod 0600 -- "$run_dir/qemu.pid" "$run_dir/qemu.starttime" \
+    "$run_dir/qemu.exe" "$run_dir/qemu.identity"
 vm_pid_matches_run "$run_dir" || vm_die 'QEMU ownership record failed validation'
-for evidence in qemu.pid qemu.starttime qemu.exe; do
+for evidence in qemu.pid qemu.starttime qemu.exe qemu.identity; do
     vm_assert_file_size_at_most "$run_dir/$evidence" "$max_evidence_bytes" \
         "QEMU $evidence evidence"
 done
@@ -195,4 +202,5 @@ vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 printf '%s  %s\n' "$sha" "$image" | sha256sum --check --status - || \
     vm_die "immutable cached base changed during VM run: $image"
+bash "$SCRIPT_DIR/check-lifecycle-oracle.sh" "$serial" "$pass_marker" "$fail_marker"
 printf 'bootart-vm: lifecycle smoke PASS; artifacts retained: %s\n' "$run_dir"

@@ -250,7 +250,7 @@ impl NativeCredentialClient {
             ];
             let mut message: libc::msghdr = unsafe { mem::zeroed() };
             message.msg_iov = iovecs.as_mut_ptr();
-            message.msg_iovlen = iovecs.len();
+            message.msg_iovlen = iovecs.len() as _;
             // SAFETY: message references writable header and protected mapping
             // storage for the duration of this call.
             received = unsafe {
@@ -435,7 +435,9 @@ pub fn send_responder_packet(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.bytes.as_mut_ptr().cast();
-    message.msg_controllen = control_length;
+    // msghdr uses size_t on glibc and socklen_t on musl. This fixed buffer is
+    // only 64 bytes, so it is representable by either target ABI field.
+    message.msg_controllen = control_length as _;
 
     // SAFETY: the control buffer is sufficiently sized and aligned for one
     // cmsghdr, as calculated by CMSG_SPACE.
@@ -446,7 +448,7 @@ pub fn send_responder_packet(
         }
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as _) as usize;
+        (*header).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as _) as _;
         std::ptr::write_unaligned(
             libc::CMSG_DATA(header).cast::<RawFd>(),
             responder.as_raw_fd(),
@@ -532,7 +534,7 @@ pub fn receive_responder_packet(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.bytes.as_mut_ptr().cast();
-    message.msg_controllen = control_length;
+    message.msg_controllen = control_length as _;
 
     // SAFETY: message references writable marker/control storage.
     let received = unsafe {
@@ -720,6 +722,20 @@ fn cmsg_space_for_fd() -> usize {
     unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as _) as usize }
 }
 
+fn cmsg_length(header: &libc::cmsghdr) -> usize {
+    // Linux libc exposes cmsg_len as usize for glibc and socklen_t for musl.
+    // Keep each target's conversion explicit so both ABIs compile without
+    // suppressing Clippy's same-type-conversion guard on the native target.
+    #[cfg(target_env = "musl")]
+    {
+        header.cmsg_len as usize
+    }
+    #[cfg(not(target_env = "musl"))]
+    {
+        header.cmsg_len
+    }
+}
+
 fn verify_peer_uid(fd: RawFd, expected: u32) -> Result<(), NativeCredentialError> {
     let mut credentials: libc::ucred = unsafe { mem::zeroed() };
     let mut length = mem::size_of_val(&credentials) as libc::socklen_t;
@@ -757,8 +773,9 @@ fn collect_rights_checked(message: &libc::msghdr) -> Result<Vec<RawFd>, NativeCr
         while !header.is_null() {
             if (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS {
                 let minimum = libc::CMSG_LEN(0) as usize;
-                if (*header).cmsg_len >= minimum {
-                    let bytes = (*header).cmsg_len - minimum;
+                let header_length = cmsg_length(&*header);
+                if header_length >= minimum {
+                    let bytes = header_length - minimum;
                     if bytes == 0 || !bytes.is_multiple_of(mem::size_of::<RawFd>()) {
                         unexpected = true;
                     } else {
@@ -803,11 +820,12 @@ fn collect_all_rights(message: &libc::msghdr) -> Vec<RawFd> {
     unsafe {
         let mut header = libc::CMSG_FIRSTHDR(message);
         while !header.is_null() {
+            let header_length = cmsg_length(&*header);
             if (*header).cmsg_level == libc::SOL_SOCKET
                 && (*header).cmsg_type == libc::SCM_RIGHTS
-                && (*header).cmsg_len >= libc::CMSG_LEN(0) as usize
+                && header_length >= libc::CMSG_LEN(0) as usize
             {
-                let bytes = (*header).cmsg_len - libc::CMSG_LEN(0) as usize;
+                let bytes = header_length - libc::CMSG_LEN(0) as usize;
                 let count = bytes / mem::size_of::<RawFd>();
                 let data = libc::CMSG_DATA(header).cast::<RawFd>();
                 for index in 0..count {
@@ -1057,14 +1075,14 @@ mod tests {
         let mut control = AlignedControl::new(cmsg_space_for_fd());
         let mut message: libc::msghdr = unsafe { mem::zeroed() };
         message.msg_control = control.bytes.as_mut_ptr().cast();
-        message.msg_controllen = cmsg_space_for_fd();
+        message.msg_controllen = cmsg_space_for_fd() as _;
         // SAFETY: control is aligned and sized for one cmsghdr.
         unsafe {
             let header = libc::CMSG_FIRSTHDR(&message);
             assert!(!header.is_null());
             (*header).cmsg_level = libc::SOL_SOCKET;
             (*header).cmsg_type = libc::SCM_CREDENTIALS;
-            (*header).cmsg_len = libc::CMSG_LEN(0) as usize;
+            (*header).cmsg_len = libc::CMSG_LEN(0) as _;
         }
         assert!(matches!(
             collect_rights_checked(&message),

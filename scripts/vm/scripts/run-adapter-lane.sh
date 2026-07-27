@@ -29,27 +29,37 @@ lock_record="$(vm_lock_record "$lock_file" "$image_id")"
 IFS='|' read -r _ lock_status _ sha _ _ filename _ _ \
     download_bytes max_virtual_bytes max_run_bytes max_file_bytes \
     max_log_bytes max_evidence_bytes <<< "$lock_record"
+runner="$(vm_matrix_runner_path "$repo_root" "$pair" "$lane")"
 
-if [[ "$matrix_status" == blocked-unverified || "$lock_status" == blocked ]]; then
-    [[ "$matrix_status" == blocked-unverified && "$lock_status" == blocked && \
-       "$sha" == BLOCKED_UNVERIFIED ]] || vm_die 'matrix/image blocked state is inconsistent'
-    vm_emit_lane_status "$pair" "$lane" BLOCKED_UNVERIFIED \
-        "$image_id" "$oracle" immutable-image-not-pinned
-    exit 3
-fi
-[[ "$matrix_status" == ready-unproven && "$lock_status" == verified ]] ||
-    vm_die 'adapter lane is neither consistently blocked nor ready-unproven'
+case "$matrix_status" in
+    blocked-unverified)
+        [[ "$lock_status" == blocked && "$sha" == BLOCKED_UNVERIFIED ]] ||
+            vm_die 'matrix/image unverified state is inconsistent'
+        vm_emit_lane_status "$pair" "$lane" BLOCKED_UNVERIFIED \
+            "$image_id" "$oracle" immutable-image-not-pinned
+        exit 3
+        ;;
+    blocked-unimplemented)
+        [[ "$lock_status" == verified ]] ||
+            vm_die 'matrix/image unimplemented state is inconsistent'
+        vm_require_missing_matrix_runner "$repo_root" "$pair" "$lane"
+        vm_emit_lane_status "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
+            "$image_id" "$oracle" adapter-runner-missing
+        exit 3
+        ;;
+    ready-unproven)
+        [[ "$lock_status" == verified ]] || vm_die 'matrix/image ready state is inconsistent'
+        vm_require_ready_matrix_runner "$repo_root" "$pair" "$lane" \
+            "$SCRIPT_DIR/check-runner-policy.sh"
+        ;;
+    *) vm_die 'adapter lane has an invalid matrix status' ;;
+esac
+bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
+    vm_die 'ready adapter VM lane requires the repository artifact lock'
 
-# No current row can cross this point.  The remaining contract is deliberately
-# present now so adding a reviewed image cannot silently bypass private state,
-# a disposable overlay, the command policy, a timeout, or exact oracle checks.
-runner="$repo_root/vm/runners/$pair/$lane.sh"
-if [[ ! -f "$runner" || -L "$runner" ]]; then
-    vm_emit_lane_status "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
-        "$image_id" "$oracle" adapter-runner-missing
-    exit 3
-fi
-[[ -x "$runner" ]] || vm_die "adapter runner is not executable: $runner"
+# No current row can cross this point. The remaining contract is deliberately
+# present now so a ready row cannot silently bypass private state, a disposable
+# overlay, the command policy, a timeout, or exact oracle checks.
 bash "$SCRIPT_DIR/check-runner-policy.sh" "$repo_root" "$runner"
 runner_policy_hash="$(sha256sum "$runner" | awk '{ print $1 }')"
 [[ "$runner_policy_hash" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cannot hash adapter runner source'
@@ -61,7 +71,13 @@ QEMU="$configured_qemu" bash "$SCRIPT_DIR/preflight.sh" \
     "$repo_root" "$vm_root" "$lock_file"
 qemu_executable="$(vm_resolve_qemu "$configured_qemu")"
 qemu_img_executable="$(vm_resolve_qemu_img "${QEMU_IMG:-qemu-img}")"
+qemu_identity="$(vm_executable_identity "$qemu_executable")"
+qemu_img_identity="$(vm_executable_identity "$qemu_img_executable")"
 unset QEMU QEMU_IMG configured_qemu
+assert_qemu_img_pinned() {
+    vm_assert_executable_identity "$qemu_img_executable" "$qemu_img_identity" \
+        'configured QEMU_IMG executable'
+}
 vm_validate_state "$repo_root" "$vm_root"
 image="$vm_root/cache/images/$filename"
 vm_assert_private_dir "$vm_root/cache/images"
@@ -71,8 +87,10 @@ vm_assert_owned "$image"
 vm_assert_file_size_exact "$image" "$download_bytes" 'immutable adapter image'
 printf '%s  %s\n' "$sha" "$image" | sha256sum --check --status - ||
     vm_die 'cached immutable adapter image checksum mismatch'
+assert_qemu_img_pinned
 base_virtual_bytes="$(QEMU_IMG="$qemu_img_executable" \
     vm_assert_qcow2_virtual_size "$image" "$max_virtual_bytes")"
+assert_qemu_img_pinned
 vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"
 
 bootart_physical="$(readlink -f -- "$bootart_bin")" || vm_die 'cannot resolve static bootart input'
@@ -125,6 +143,9 @@ runner_env=(
     TZ=UTC
 )
 result_emitted=0
+result_status_emitted=
+pass_publish_in_progress=0
+pass_result_temporary=
 qemu_started=0
 qemu_pid=
 serial_capture_started=0
@@ -154,6 +175,79 @@ emit_result() {
     fi
     printf '%s\n' "$line"
     result_emitted=1
+    result_status_emitted=$result_status
+}
+publish_pass_result() {
+    local line result_file temporary
+    result_destination_is_safe || {
+        printf 'bootart-vm: refusing PASS result write after run validation failed\n' >&2
+        return 1
+    }
+    result_file="$run_dir/lane.result"
+    [[ ! -e "$result_file" && ! -L "$result_file" ]] || {
+        printf 'bootart-vm: refusing to replace an existing lane result path\n' >&2
+        return 1
+    }
+    line="$(vm_emit_lane_status "$pair" "$lane" PASS "$image_id" "$oracle" exact-serial-oracle)"
+    temporary="$(mktemp "$run_dir/.lane.result.XXXXXXXXXX")" || return 1
+    pass_publish_in_progress=1
+    pass_result_temporary=$temporary
+    chmod 0600 -- "$temporary"
+    printf '%s\n' "$line" > "$temporary"
+
+    # The staged file has the same size as the final result, so all resource
+    # gates can run before the atomic rename makes PASS durable.
+    vm_assert_file_size_at_most "$temporary" "$max_evidence_bytes" 'staged lane result'
+    vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"
+    vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
+    if ! mv -T -- "$temporary" "$result_file"; then
+        rm -f -- "$temporary"
+        pass_result_temporary=
+        pass_publish_in_progress=0
+        return 1
+    fi
+    pass_result_temporary=
+    result_emitted=1
+    result_status_emitted=PASS
+    pass_publish_in_progress=0
+
+    # PASS is now the final durable operation. A closed diagnostic stream must
+    # not turn that completed evidence transaction into a stale nonzero result.
+    printf '%s\n' "$line" || true
+}
+purge_secret_artifacts_and_emit_failure() {
+    local remaining scan_status
+    result_destination_is_safe || vm_die \
+        'cannot validate run tree before removing secret-bearing artifacts'
+    vm_assert_no_mount_below "$run_dir"
+
+    # Preserve only the authenticated run sentinel. Runner-created permissions
+    # must not make a detected synthetic secret into retained diagnostics.
+    find "$run_dir" -xdev -mindepth 1 -type d -exec chmod u+rwx -- '{}' +
+    find "$run_dir" -xdev -depth -mindepth 1 \
+        ! -path "$run_dir/.bootart-vm-run" -delete
+    vm_validate_run "$vm_root" "$run_dir"
+    remaining="$(find "$run_dir" -xdev -mindepth 1 -maxdepth 1 -printf '%f\n')"
+    [[ "$remaining" == .bootart-vm-run ]] || \
+        vm_die 'secret-bearing run cleanup left unexpected artifacts'
+
+    set +e
+    grep -r -a -F -q --devices=skip \
+        -f <(printf '%s' "$synthetic_secret") -- "$run_dir"
+    scan_status=$?
+    set -e
+    [[ $scan_status -eq 1 ]] || \
+        vm_die 'synthetic secret remains after run artifact cleanup'
+
+    emit_result FAIL synthetic-secret-retained
+    set +e
+    grep -r -a -F -q --devices=skip \
+        -f <(printf '%s' "$synthetic_secret") -- "$run_dir"
+    scan_status=$?
+    set -e
+    [[ $scan_status -eq 1 ]] || \
+        vm_die 'synthetic secret entered retained failure evidence'
+    unset synthetic_secret
 }
 on_exit() {
     local exit_status=$? destination_safe=0
@@ -180,6 +274,27 @@ on_exit() {
         vm_wait_direct_child_bounded "$serial_capture_pid" 20 >/dev/null 2>&1 || true
     fi
     if [[ $destination_safe -eq 1 ]]; then
+        if [[ $exit_status -ne 0 ]]; then
+            if [[ -n "$pass_result_temporary" && \
+                  "$pass_result_temporary" == "$run_dir"/.lane.result.* && \
+                  -f "$pass_result_temporary" && ! -L "$pass_result_temporary" && \
+                  "$(vm_stat_uid "$pass_result_temporary")" == "$(id -u)" ]]; then
+                rm -f -- "$pass_result_temporary"
+            fi
+            if [[ "$result_status_emitted" == PASS || $pass_publish_in_progress -eq 1 ]]; then
+                result_file="$run_dir/lane.result"
+                expected_pass="$(vm_emit_lane_status "$pair" "$lane" PASS \
+                    "$image_id" "$oracle" exact-serial-oracle)"
+                if [[ -f "$result_file" && ! -L "$result_file" && \
+                      "$(vm_stat_uid "$result_file")" == "$(id -u)" && \
+                      "$(vm_stat_mode "$result_file")" == 600 && \
+                      "$(cat -- "$result_file")" == "$expected_pass" ]]; then
+                    rm -f -- "$result_file"
+                    result_emitted=0
+                    result_status_emitted=
+                fi
+            fi
+        fi
         if [[ $exit_status -ne 0 && $result_emitted -eq 0 ]]; then
             emit_result FAIL infrastructure-error || true
         fi
@@ -198,15 +313,21 @@ printf 'schema=BOOTART_VM_LANE_RUN_V1\npair=%s\nlane=%s\nimage=%s\noracle=%s\nti
 chmod 0600 -- "$run_dir/lane.meta"
 vm_assert_file_size_at_most "$run_dir/lane.meta" "$max_evidence_bytes" 'lane metadata'
 overlay="$run_dir/overlay.qcow2"
+qemu_img_create_status=0
+assert_qemu_img_pinned
 timeout --signal=TERM --kill-after=5s 30s \
     bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" \
     "$qemu_img_executable" create -f qcow2 -F qcow2 -b "$image" "$overlay" \
-    >/dev/null 2>&1 ||
+    >/dev/null 2>&1 || qemu_img_create_status=$?
+assert_qemu_img_pinned
+[[ $qemu_img_create_status -eq 0 ]] ||
     vm_die 'could not create the bounded private qcow2 overlay'
 chmod 0600 -- "$overlay"
 vm_assert_file_size_at_most "$overlay" "$max_file_bytes" 'private qcow2 overlay'
+assert_qemu_img_pinned
 QEMU_IMG="$qemu_img_executable" \
     vm_assert_qcow2_virtual_size "$overlay" "$max_virtual_bytes" "$base_virtual_bytes" >/dev/null
+assert_qemu_img_pinned
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 
 # Adapter code prepares only guest-specific data and a one-option-per-line
@@ -233,20 +354,25 @@ vm_validate_run "$vm_root" "$run_dir"
 vm_assert_file_size_exact "$image" "$download_bytes" 'immutable adapter image after prepare'
 printf '%s  %s\n' "$sha" "$image" | sha256sum --check --status - ||
     vm_die 'immutable adapter image changed during prepare'
+assert_qemu_img_pinned
 QEMU_IMG="$qemu_img_executable" \
     vm_assert_qcow2_virtual_size "$image" "$max_virtual_bytes" "$base_virtual_bytes" >/dev/null
+assert_qemu_img_pinned
 [[ "$(vm_stat_mode "$overlay")" == 600 ]] || vm_die 'private overlay mode changed during prepare'
 vm_assert_file_size_at_most "$overlay" "$max_file_bytes" 'private overlay after prepare'
+assert_qemu_img_pinned
 QEMU_IMG="$qemu_img_executable" \
     vm_assert_qcow2_virtual_size "$overlay" "$max_virtual_bytes" "$base_virtual_bytes" >/dev/null
+assert_qemu_img_pinned
 QEMU_IMG="$qemu_img_executable" vm_assert_qcow2_backing_file "$overlay" "$image"
+assert_qemu_img_pinned
 vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 
 for reserved_name in \
     lane.result qemu.args qemu.policy.sha256 serial.log serial.fifo serial.overflow \
     qmp.sock qmp.log \
-    qemu.pid qemu.starttime qemu.exe secret-scan.matches
+    qemu.pid qemu.starttime qemu.exe qemu.identity secret-scan.matches
 do
     [[ ! -e "$run_dir/$reserved_name" && ! -L "$run_dir/$reserved_name" ]] ||
         vm_die "adapter prepare created a common-wrapper-owned path: $reserved_name"
@@ -257,8 +383,18 @@ options_file="$run_dir/machine.options"
 args_file="$run_dir/qemu.args"
 [[ -f "$seed" && ! -L "$seed" ]] || vm_die 'adapter prepare omitted private seed.img'
 vm_assert_owned "$seed"
-[[ "$(vm_stat_mode "$seed")" == 400 ]] || vm_die 'private seed.img must have mode 0400'
+# The policy-clean runner has no chmod authority. It creates the seed under
+# the inherited umask-077 boundary; common code validates that mutable handoff
+# and performs the one-way read-only seal before the image can reach QEMU.
+[[ "$(vm_stat_mode "$seed")" == 600 ]] ||
+    vm_die 'runner-produced seed.img must have mode 0600 before common sealing'
+chmod 0400 -- "$seed" || vm_die 'cannot seal private seed.img read-only'
+[[ "$(vm_stat_mode "$seed")" == 400 ]] || vm_die 'private seed.img seal failed'
 vm_assert_file_size_at_most "$seed" "$max_file_bytes" 'private seed image'
+seed_size="$(vm_stat_size "$seed")" || vm_die 'cannot inspect private seed size'
+vm_is_positive_byte_count "$seed_size" || vm_die 'private seed image must be nonempty'
+seed_digest="$(sha256sum "$seed" | awk '{ print $1 }')"
+[[ "$seed_digest" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cannot hash private seed image'
 [[ -f "$options_file" && ! -L "$options_file" ]] ||
     vm_die 'adapter prepare omitted machine.options'
 vm_assert_owned "$options_file"
@@ -287,9 +423,11 @@ chmod 0600 -- "$serial_file" "$serial_fifo"
 
 # This check is deliberately in common code and immediately precedes launch.
 # It also writes the policy digest rechecked after the driver and QEMU stop.
+assert_qemu_img_pinned
 QEMU="$qemu_executable" QEMU_IMG="$qemu_img_executable" \
     bash "$SCRIPT_DIR/check-adapter-command.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$args_file" "$image" "$overlay"
+assert_qemu_img_pinned
 mapfile -t qemu_argv < "$args_file"
 (( ${#qemu_argv[@]} >= 2 )) || vm_die 'validated QEMU argument record is empty'
 expected_policy_hash="$(cat -- "$run_dir/qemu.policy.sha256")"
@@ -298,6 +436,8 @@ vm_assert_file_size_at_most "$run_dir/qemu.policy.sha256" "$max_evidence_bytes" 
     'QEMU policy digest'
 [[ "$(sha256sum "$args_file" | awk '{ print $1 }')" == "$expected_policy_hash" ]] ||
     vm_die 'QEMU arguments changed between policy validation and launch'
+vm_assert_executable_identity "$qemu_executable" "$qemu_identity" \
+    'configured QEMU executable'
 
 # QEMU writes serial bytes only to this FIFO. A separately file-limited common
 # child retains at most max_log_bytes and marks the first overflow byte.
@@ -318,7 +458,8 @@ vm_pid_starttime "$qemu_pid" > "$run_dir/qemu.starttime" ||
     vm_die 'cannot record adapter QEMU start time'
 qemu_exec_ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if [[ "$(readlink "/proc/$qemu_pid/exe" 2>/dev/null || true)" == "$qemu_executable" ]]; then
+    if [[ "$(readlink "/proc/$qemu_pid/exe" 2>/dev/null || true)" == "$qemu_executable" && \
+          "$(vm_pid_executable_identity "$qemu_pid" 2>/dev/null || true)" == "$qemu_identity" ]]; then
         qemu_exec_ready=1
         break
     fi
@@ -327,7 +468,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 [[ $qemu_exec_ready -eq 1 ]] || vm_die 'bounded QEMU child did not reach the validated executable'
 printf '%s\n' "$qemu_executable" > "$run_dir/qemu.exe"
-chmod 0600 -- "$run_dir/qemu.pid" "$run_dir/qemu.starttime" "$run_dir/qemu.exe"
+printf '%s\n' "$qemu_identity" > "$run_dir/qemu.identity"
+chmod 0600 -- "$run_dir/qemu.pid" "$run_dir/qemu.starttime" \
+    "$run_dir/qemu.exe" "$run_dir/qemu.identity"
 vm_pid_matches_run "$run_dir" || vm_die 'adapter QEMU ownership record failed validation'
 
 elapsed=$((SECONDS - lane_started_at))
@@ -402,20 +545,27 @@ for private_file in qemu.args qemu.policy.sha256 serial.log qmp.log; do
     [[ "$(vm_stat_mode "$run_dir/$private_file")" == 600 ]] ||
         vm_die "$private_file must have mode 0600"
 done
+[[ -f "$seed" && ! -L "$seed" ]] || vm_die 'private seed changed type during adapter drive'
+vm_assert_owned "$seed"
+[[ "$(vm_stat_mode "$seed")" == 400 ]] ||
+    vm_die 'private seed mode changed during adapter drive'
+vm_assert_file_size_exact "$seed" "$seed_size" 'private seed after adapter drive'
+printf '%s  %s\n' "$seed_digest" "$seed" | sha256sum --check --status - ||
+    vm_die 'private seed changed during adapter drive'
 vm_assert_file_size_at_most "$run_dir/serial.log" "$max_log_bytes" 'serial transcript'
 vm_assert_file_size_at_most "$run_dir/qmp.log" "$max_log_bytes" 'QMP/driver transcript'
 vm_assert_file_size_at_most "$overlay" "$max_file_bytes" 'private qcow2 overlay'
+assert_qemu_img_pinned
 QEMU_IMG="$qemu_img_executable" \
     vm_assert_qcow2_virtual_size "$overlay" "$max_virtual_bytes" "$base_virtual_bytes" >/dev/null
+assert_qemu_img_pinned
 vm_assert_run_files_at_most "$vm_root" "$run_dir" "$max_file_bytes"
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 [[ "$(sha256sum "$run_dir/qemu.args" | awk '{ print $1 }')" == "$expected_policy_hash" ]] ||
     vm_die 'QEMU arguments changed after validated launch'
-[[ "$(grep -Fxc -- "$oracle" "$run_dir/serial.log" || true)" -eq 1 ]] ||
-    vm_die 'exact adapter serial PASS oracle is absent or duplicated'
-fail_oracle=${oracle%_PASS_V1}_FAIL_V1
-[[ "$(grep -Fxc -- "$fail_oracle" "$run_dir/serial.log" || true)" -eq 0 ]] ||
-    vm_die 'adapter serial transcript contains a FAIL oracle'
+if ! bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$run_dir/serial.log" "$oracle"; then
+    vm_die 'ordered exact adapter serial evidence is invalid'
+fi
 
 if [[ "$lane" == password ]]; then
     # Scan every retained regular artifact, including the qcow2 overlay, with
@@ -439,14 +589,12 @@ if [[ "$lane" == password ]]; then
     vm_assert_file_size_at_most "$run_dir/secret-scan.matches" "$max_evidence_bytes" \
         'secret scan evidence'
     if [[ $scan_status -eq 0 ]]; then
-        emit_result FAIL synthetic-secret-retained
+        purge_secret_artifacts_and_emit_failure
         exit 1
     fi
     [[ $scan_status -eq 1 ]] || vm_die 'bounded synthetic-secret artifact scan failed'
     unset synthetic_secret
 fi
 
-emit_result PASS exact-serial-oracle
-vm_assert_file_size_at_most "$run_dir/lane.result" "$max_evidence_bytes" 'lane result'
-vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 printf 'bootart-vm: unpromoted adapter evidence retained: %s\n' "$run_dir"
+publish_pass_result

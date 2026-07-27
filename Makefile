@@ -1,7 +1,75 @@
-SHELL := /bin/bash
+override SHELL := /bin/bash
+override CURDIR := $(realpath .)
 
-PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
-PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
+ifneq ($(filter command line override,$(origin MAKEFLAGS)),)
+    $(error assigning MAKEFLAGS is forbidden because it can conceal active safety-bypassing flags)
+endif
+override __BOOTART_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
+ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)
+    $(error --ignore-errors/-i is forbidden because it can bypass safety gates)
+endif
+ifeq ($(filter --%,$(__BOOTART_MAKE_SHORT_FLAGS)),)
+ifneq ($(findstring i,$(__BOOTART_MAKE_SHORT_FLAGS)),)
+    $(error --ignore-errors/-i is forbidden because it can bypass safety gates)
+endif
+endif
+ifneq ($(words $(CURDIR)),1)
+    $(error repository path whitespace is unsupported by guarded Make recipes)
+endif
+ifneq ($(findstring ',$(CURDIR)),)
+    $(error repository paths containing an apostrophe are unsupported)
+endif
+
+# Capture documented inputs without expanding embedded Make syntax. Distinct
+# internal variables are required: self-referential `$(value VAR)` assignments
+# would observe the assignment being defined rather than the caller's value.
+override __BOOTART_TEST_TIMEOUT_SECONDS_ORIGIN := $(origin TEST_TIMEOUT_SECONDS)
+override __BOOTART_TEST_TIMEOUT_SECONDS_RAW := $(value TEST_TIMEOUT_SECONDS)
+override __BOOTART_NIX_OFFLINE_ORIGIN := $(origin NIX_OFFLINE)
+override __BOOTART_NIX_OFFLINE_RAW := $(value NIX_OFFLINE)
+override __BOOTART_QEMU_ORIGIN := $(origin QEMU)
+override __BOOTART_QEMU_RAW := $(value QEMU)
+override __BOOTART_QEMU_IMG_ORIGIN := $(origin QEMU_IMG)
+override __BOOTART_QEMU_IMG_RAW := $(value QEMU_IMG)
+override __BOOTART_IMAGE_ID_ORIGIN := $(origin IMAGE_ID)
+override __BOOTART_IMAGE_ID_RAW := $(value IMAGE_ID)
+override __BOOTART_TIMEOUT_SECONDS_ORIGIN := $(origin TIMEOUT_SECONDS)
+override __BOOTART_TIMEOUT_SECONDS_RAW := $(value TIMEOUT_SECONDS)
+override __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin ADAPTER_HOST_TIMEOUT_SECONDS)
+override __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW := $(value ADAPTER_HOST_TIMEOUT_SECONDS)
+override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __BOOTART_BOOTART_BIN_ORIGIN := $(origin BOOTART_BIN)
+override __BOOTART_BOOTART_BIN_RAW := $(value BOOTART_BIN)
+override __BOOTART_PLAN_FORMAT_ORIGIN := $(origin PLAN_FORMAT)
+override __BOOTART_PLAN_FORMAT_RAW := $(value PLAN_FORMAT)
+override __BOOTART_ARGS_FILE_RAW := $(value ARGS_FILE)
+override __BOOTART_RUN_DIR_RAW := $(value RUN_DIR)
+override __BOOTART_BASE_IMAGE_RAW := $(value BASE_IMAGE)
+override __BOOTART_OVERLAY_RAW := $(value OVERLAY)
+override __BOOTART_ROOT_RAW := $(value ROOT)
+override __BOOTART_INITRAMFS_ADAPTER_RAW := $(value INITRAMFS_ADAPTER)
+override __BOOTART_REAL_ROOT_ADAPTER_RAW := $(value REAL_ROOT_ADAPTER)
+
+# Known caller inputs are temporarily removed from Make's automatic
+# command-line/environment export before any parse-time shell runs. They are
+# normalized to simple literal values below and then explicitly exported.
+unexport TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
+unexport ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
+unexport BOOTART_BIN ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
+unexport ROOT INITRAMFS_ADAPTER REAL_ROOT_ADAPTER PLAN_FORMAT
+unexport PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE VM_MAKE
+unexport NIX_OFFLINE_FLAG HOST_MACHINE STATIC_ARCH PACKAGE_ARCH
+unexport STATIC_ROOT STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
+unexport STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE STATIC_ARCH_VALID PACKAGE_ARCH_VALID
+unexport VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGETS
+unexport VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_TEST_TARGETS
+unexport UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN PREFIX
+unexport BOOTART_GUEST_ROOT BOOTART_GUEST_INITRAMFS_ADAPTER
+unexport BOOTART_GUEST_REAL_ROOT_ADAPTER BOOTART_GUEST_PLAN_FORMAT
+
+override PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
+override PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
 ifeq ($(PROJECT_NAME),)
     $(error Error: PROJECT file not found or invalid)
 endif
@@ -9,12 +77,21 @@ endif
 override CARGO := cargo
 override CARGO_LOCKED := --locked
 override NIX := nix
-TEST_TIMEOUT_SECONDS ?= 120
-NIX_OFFLINE ?= 1
+override MAKE := make
+ifeq ($(__BOOTART_TEST_TIMEOUT_SECONDS_ORIGIN),undefined)
+    override TEST_TIMEOUT_SECONDS := 120
+else
+    override TEST_TIMEOUT_SECONDS := $(value __BOOTART_TEST_TIMEOUT_SECONDS_RAW)
+endif
+ifeq ($(__BOOTART_NIX_OFFLINE_ORIGIN),undefined)
+    override NIX_OFFLINE := 1
+else
+    override NIX_OFFLINE := $(value __BOOTART_NIX_OFFLINE_RAW)
+endif
 ifeq ($(filter $(NIX_OFFLINE),0 1),)
     $(error NIX_OFFLINE must be 0 or 1)
 endif
-NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)
+override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)
 # Ordinary Make lanes are read-only even if the caller exported
 # UPDATE_GOLDEN=1. Only the explicit update-golden recipe supplies both values
 # directly to its cargo child.
@@ -22,28 +99,77 @@ override UPDATE_GOLDEN := 0
 override BOOTART_GOLDEN_WRITE_TOKEN :=
 export UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN
 PREFIX ?= $(HOME)/.local
-VM_MAKE := $(MAKE) -C vm
-QEMU ?= qemu-system-x86_64
-ADAPTER_HOST_TIMEOUT_SECONDS ?= 660
-LIFECYCLE_HOST_TIMEOUT_SECONDS ?= 180
-VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc
-VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))
-VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))
-VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))
-VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS)
+override VM_MAKE := $(MAKE) -C scripts/vm
+ifeq ($(__BOOTART_QEMU_ORIGIN),undefined)
+    override QEMU := qemu-system-x86_64
+else
+    override QEMU := $(value __BOOTART_QEMU_RAW)
+endif
+ifeq ($(__BOOTART_QEMU_IMG_ORIGIN),undefined)
+    override QEMU_IMG := qemu-img
+else
+    override QEMU_IMG := $(value __BOOTART_QEMU_IMG_RAW)
+endif
+ifeq ($(__BOOTART_IMAGE_ID_ORIGIN),undefined)
+    override IMAGE_ID := alpine-virt-3.20.0-x86_64
+else
+    override IMAGE_ID := $(value __BOOTART_IMAGE_ID_RAW)
+endif
+ifeq ($(__BOOTART_TIMEOUT_SECONDS_ORIGIN),undefined)
+    override TIMEOUT_SECONDS := 90
+else
+    override TIMEOUT_SECONDS := $(value __BOOTART_TIMEOUT_SECONDS_RAW)
+endif
+ifeq ($(__BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+    override ADAPTER_HOST_TIMEOUT_SECONDS := 660
+else
+    override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
+endif
+ifeq ($(__BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+    override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180
+else
+    override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
+endif
+override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc
+override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS)
 override STATIC_ROOT := $(CURDIR)/target/artifacts
 override STATIC_GENERATIONS_DIR := $(STATIC_ROOT)/generations
 override STATIC_CURRENT_POINTER := $(STATIC_ROOT)/current
 override STATIC_PACKAGE_DIR := $(STATIC_ROOT)/packages
-BOOTART_BIN ?= $(STATIC_CURRENT_POINTER)/release/bootart
-HOST_MACHINE := $(shell uname -m)
+ifeq ($(__BOOTART_BOOTART_BIN_ORIGIN),undefined)
+    override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+else
+    override BOOTART_BIN := $(value __BOOTART_BOOTART_BIN_RAW)
+endif
+override HOST_MACHINE := $(shell uname -m)
 override STATIC_ARCH := $(if $(filter x86_64,$(HOST_MACHINE)),x86_64,$(if $(filter aarch64,$(HOST_MACHINE)),aarch64,unsupported))
 override PACKAGE_ARCH := $(STATIC_ARCH)
-STATIC_ARCH_SAFE := $(if $(filter 1,$(words $(STATIC_ARCH))),$(filter x86_64 aarch64,$(STATIC_ARCH)))
-PACKAGE_ARCH_SAFE := $(if $(filter 1,$(words $(PACKAGE_ARCH))),$(filter x86_64 aarch64,$(PACKAGE_ARCH)))
-STATIC_ARCH_VALID := $(if $(STATIC_ARCH_SAFE),1,0)
-PACKAGE_ARCH_VALID := $(if $(PACKAGE_ARCH_SAFE),1,0)
-PLAN_FORMAT ?= human
+override STATIC_ARCH_SAFE := $(if $(filter 1,$(words $(STATIC_ARCH))),$(filter x86_64 aarch64,$(STATIC_ARCH)))
+override PACKAGE_ARCH_SAFE := $(if $(filter 1,$(words $(PACKAGE_ARCH))),$(filter x86_64 aarch64,$(PACKAGE_ARCH)))
+override STATIC_ARCH_VALID := $(if $(STATIC_ARCH_SAFE),1,0)
+override PACKAGE_ARCH_VALID := $(if $(PACKAGE_ARCH_SAFE),1,0)
+ifeq ($(__BOOTART_PLAN_FORMAT_ORIGIN),undefined)
+    override PLAN_FORMAT := human
+else
+    override PLAN_FORMAT := $(value __BOOTART_PLAN_FORMAT_RAW)
+endif
+override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)
+override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)
+override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)
+override OVERLAY := $(value __BOOTART_OVERLAY_RAW)
+override ROOT := $(value __BOOTART_ROOT_RAW)
+override INITRAMFS_ADAPTER := $(value __BOOTART_INITRAMFS_ADAPTER_RAW)
+override REAL_ROOT_ADAPTER := $(value __BOOTART_REAL_ROOT_ADAPTER_RAW)
+
+# Documented caller values cross recipe boundaries only through the
+# environment. Never splice them into shell source with Make expansion.
+export TEST_TIMEOUT_SECONDS QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
+export ADAPTER_HOST_TIMEOUT_SECONDS
+export LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN ARGS_FILE RUN_DIR
+export BASE_IMAGE OVERLAY
 
 $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
@@ -54,7 +180,7 @@ $(info ------------------------------------------)
 # not serialize two independent Make invocations.
 .NOTPARALLEL:
 
-.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards _assert-artifact-lock test-host-safety-policy test-guest-install-guards test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked guest-install-plan guest-install-status guest-install-apply guest-install-recover guest-install-uninstall clean _clean-locked assert-one-binary phase0-safety verify vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test vm-policy-check vm-adapter-policy-check vm-clean release help h
+.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-guest-install-guards test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked guest-install-plan guest-install-status guest-install-apply guest-install-recover guest-install-uninstall clean _clean-locked assert-one-binary phase0-safety verify vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-clean release help h
 
 build: phase0-safety
 	@$(CARGO) build $(CARGO_LOCKED)
@@ -70,56 +196,72 @@ compile:
 c: compile
 
 validate-test-timeout:
-	@case '$(TEST_TIMEOUT_SECONDS)' in ''|*[!0-9]*) \
+	@case "$${TEST_TIMEOUT_SECONDS}" in ''|*[!0-9]*) \
 		echo 'ERROR: TEST_TIMEOUT_SECONDS must be a positive integer' >&2; exit 2 ;; esac
-	@test '$(TEST_TIMEOUT_SECONDS)' -ge 1 -a '$(TEST_TIMEOUT_SECONDS)' -le 900 || { \
+	@test "$${TEST_TIMEOUT_SECONDS}" -ge 1 -a "$${TEST_TIMEOUT_SECONDS}" -le 900 || { \
 		echo 'ERROR: TEST_TIMEOUT_SECONDS must be between 1 and 900' >&2; exit 2; }
 
 test: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --all-targets
 
 test-unit: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --lib
 
 test-protocol: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --test state_tests --test protocol_tests
 
 test-daemon: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --test daemon_tests
 
 test-display: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --test display_tests
 
 test-pty: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --test pty_tests
 
 # Pure alternate-root tests with injected ownership, command, and fault seams.
 # This target never installs to /, invokes an image generator, or needs root.
 test-installer-root: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --features installer-test-seams --test installer_tests
 
 test-artifact-guards: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/artifact-gate-tests.sh
+
+test-artifact-operation-policy: validate-test-timeout
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
+		bash scripts/tests/artifact-operation-policy-tests.sh '$(CURDIR)'
+
+assert-artifact-operation:
+	@bash scripts/artifact-operation-policy.sh '$(CURDIR)'
+	@$(MAKE) --no-print-directory test-artifact-operation-policy
+
+test-make-boundary-policy: validate-test-timeout
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
+		bash scripts/tests/make-boundary-policy-tests.sh '$(CURDIR)'
+
+assert-make-boundary:
+	@bash scripts/make-boundary-policy.sh '$(CURDIR)'
+	@$(MAKE) --no-print-directory test-make-boundary-policy
 
 _assert-artifact-lock:
 	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
 
 test-host-safety-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash -n scripts/*.sh scripts/tests/*.sh
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/host-safety-policy-tests.sh '$(CURDIR)'
 
 test-init-neutral-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/init-neutral-policy-tests.sh '$(CURDIR)'
 
 assert-init-neutral:
@@ -127,15 +269,15 @@ assert-init-neutral:
 	@$(MAKE) --no-print-directory test-init-neutral-policy
 
 test-source-layout-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/source-layout-policy-tests.sh '$(CURDIR)'
 
 test-pid1-entry-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/pid1-entry-policy-tests.sh '$(CURDIR)'
 
 test-adapter-pair-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/adapter-pair-policy-tests.sh '$(CURDIR)'
 
 assert-adapter-pairs:
@@ -144,7 +286,7 @@ assert-adapter-pairs:
 
 # Exercises only rejection paths. It never resolves or invokes a bootart ELF.
 test-guest-install-guards: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		bash scripts/tests/guest-install-guard-tests.sh '$(CURDIR)'
 
 # Prove that an ambient mutation request cannot cross the ordinary Make
@@ -159,7 +301,7 @@ _assert-golden-readonly:
 	@printf '%s\n' 'PASS: ordinary Make lanes force golden verification read-only'
 
 update-golden: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		env UPDATE_GOLDEN=1 BOOTART_GOLDEN_WRITE_TOKEN=make-update-golden-v1 \
 		$(CARGO) test $(CARGO_LOCKED) --test golden_tests
 
@@ -200,10 +342,14 @@ _static-build-locked:
 		test ! -L '$(CURDIR)/target' || { echo 'ERROR: target must not be a symlink' >&2; exit 1; }; \
 		mkdir -p "$$root"; \
 		test ! -L "$$root" || { echo "ERROR: static root must not be a symlink: $$root" >&2; exit 1; }; \
-		stage=; outputs=; pointer_stage=; \
+		stage=; outputs=; pointer_stage=; generation_pending=; \
 		cleanup() { \
 			if test -n "$$stage"; then case "$$stage" in "$$root"/.stage.*) \
 				chmod -R u+w -- "$$stage" 2>/dev/null || true; rm -rf -- "$$stage" ;; esac; fi; \
+			if test -n "$$generation_pending"; then \
+				case "$$generation_pending" in "$$generations"/generation.*) \
+					chmod -R u+w -- "$$generation_pending" 2>/dev/null || true; \
+					rm -rf -- "$$generation_pending" ;; esac; fi; \
 			if test -n "$$outputs"; then case "$$outputs" in "$$root"/.nix-outputs.*) rm -f -- "$$outputs" ;; esac; fi; \
 			if test -n "$$pointer_stage"; then case "$$pointer_stage" in "$$root"/.pointer.*) rm -rf -- "$$pointer_stage" ;; esac; fi; \
 		}; \
@@ -241,6 +387,10 @@ _static-build-locked:
 			"$$stage/initramfs/usr/bin/bootart"; \
 		printf '%s\n' "$${nix_outputs[0]}" >"$$stage/nix-output-path"; \
 		chmod -R a-w -- "$$stage"; \
+		# rename(2) must update the moved directory's '..' entry, so Linux \
+		# requires owner-write on the stage root itself. Children stay \
+		# read-only, and the artifact flock excludes every tracked consumer. \
+		chmod u+w -- "$$stage"; \
 		generation_name="generation.$${stage##*.}"; \
 		generation="$$generations/$$generation_name"; \
 		test ! -e "$$generation" && test ! -L "$$generation" || { \
@@ -248,6 +398,9 @@ _static-build-locked:
 		}; \
 		mv -T -- "$$stage" "$$generation"; \
 		stage=; \
+		generation_pending="$$generation"; \
+		chmod a-w -- "$$generation"; \
+		generation_pending=; \
 		pointer_stage="$$(mktemp -d "$$root/.pointer.XXXXXX")"; \
 		ln -s -- "generations/$$generation_name" "$$pointer_stage/current"; \
 		if test -e '$(STATIC_CURRENT_POINTER)' || test -L '$(STATIC_CURRENT_POINTER)'; then \
@@ -283,16 +436,17 @@ _artifact-check-locked:
 # These are the only current Make-backed installer entry points. They consume
 # one already-published static generation and can only inspect an explicitly
 # named alternate/guest root. The wrapper holds the artifact publication lock
-# while the same verified ELF is both the planner and its proposed payload.
-guest-install-plan: export BOOTART_GUEST_ROOT := $(ROOT)
-guest-install-plan: export BOOTART_GUEST_INITRAMFS_ADAPTER := $(INITRAMFS_ADAPTER)
-guest-install-plan: export BOOTART_GUEST_REAL_ROOT_ADAPTER := $(REAL_ROOT_ADAPTER)
-guest-install-plan: export BOOTART_GUEST_PLAN_FORMAT := $(PLAN_FORMAT)
+# while the verified ELF is both the planner and, via /proc/self/exe, its own
+# proposed payload. No alternate executable-payload argument exists.
+guest-install-plan: override export BOOTART_GUEST_ROOT := $(ROOT)
+guest-install-plan: override export BOOTART_GUEST_INITRAMFS_ADAPTER := $(INITRAMFS_ADAPTER)
+guest-install-plan: override export BOOTART_GUEST_REAL_ROOT_ADAPTER := $(REAL_ROOT_ADAPTER)
+guest-install-plan: override export BOOTART_GUEST_PLAN_FORMAT := $(PLAN_FORMAT)
 guest-install-plan:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		bash scripts/guest-install-readonly.sh '$(CURDIR)' plan
 
-guest-install-status: export BOOTART_GUEST_ROOT := $(ROOT)
+guest-install-status: override export BOOTART_GUEST_ROOT := $(ROOT)
 guest-install-status:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		bash scripts/guest-install-readonly.sh '$(CURDIR)' status
@@ -402,7 +556,7 @@ rustdoc: phase0-safety
 	@RUSTDOCFLAGS="-Dwarnings" $(CARGO) doc $(CARGO_LOCKED) --all-features --no-deps
 
 test-all: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s '$(TEST_TIMEOUT_SECONDS)s' \
+	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
 		$(CARGO) test $(CARGO_LOCKED) --all-targets --all-features
 
 clean:
@@ -426,7 +580,7 @@ assert-one-binary:
 	@bash scripts/source-layout-policy.sh '$(CURDIR)'
 	@$(MAKE) --no-print-directory test-source-layout-policy
 
-phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs
+phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert-artifact-operation assert-make-boundary
 	@bash scripts/pid1-entry-policy.sh '$(CURDIR)'
 	@set -eu; \
 		test ! -e build.rs || { echo "ERROR: build.rs is forbidden" >&2; exit 1; }; \
@@ -486,28 +640,29 @@ vm-image-alpine:
 	@$(VM_MAKE) vm-image-alpine
 
 vm-test-lifecycle-alpine:
-	@$(VM_MAKE) vm-test-lifecycle-alpine \
-		LIFECYCLE_HOST_TIMEOUT_SECONDS='$(LIFECYCLE_HOST_TIMEOUT_SECONDS)' \
-		BOOTART_BIN='$(BOOTART_BIN)'
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-test-lifecycle-alpine
 
 $(VM_ADAPTER_TEST_TARGETS):
-	@$(VM_MAKE) '$@' ADAPTER_HOST_TIMEOUT_SECONDS='$(ADAPTER_HOST_TIMEOUT_SECONDS)' \
-		BOOTART_BIN='$(BOOTART_BIN)'
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) '$@'
 
 vm-test-adapters:
-	@$(VM_MAKE) vm-test-adapters ADAPTER_HOST_TIMEOUT_SECONDS='$(ADAPTER_HOST_TIMEOUT_SECONDS)' \
-		BOOTART_BIN='$(BOOTART_BIN)'
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-test-adapters
 
 vm-test:
-	@$(VM_MAKE) vm-test ADAPTER_HOST_TIMEOUT_SECONDS='$(ADAPTER_HOST_TIMEOUT_SECONDS)' \
-		BOOTART_BIN='$(BOOTART_BIN)'
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-test
 
 vm-policy-check:
-	@$(VM_MAKE) vm-policy-check QEMU='$(QEMU)' ARGS_FILE='$(ARGS_FILE)' RUN_DIR='$(RUN_DIR)'
+	@$(VM_MAKE) vm-policy-check
 
 vm-adapter-policy-check:
-	@$(VM_MAKE) vm-adapter-policy-check QEMU='$(QEMU)' ARGS_FILE='$(ARGS_FILE)' RUN_DIR='$(RUN_DIR)' \
-		BASE_IMAGE='$(BASE_IMAGE)' OVERLAY='$(OVERLAY)'
+	@$(VM_MAKE) vm-adapter-policy-check
+
+vm-run-gui:
+	@$(VM_MAKE) vm-run-gui
 
 vm-clean:
 	@$(VM_MAKE) vm-clean
@@ -530,9 +685,7 @@ _release-readiness-locked:
 		generation="$$(bash scripts/release-package-generation.sh \
 			'$(CURDIR)' "$$root" '$(PACKAGE_ARCH_SAFE)')"; \
 		$(MAKE) --no-print-directory vm-test \
-			BOOTART_BIN="$$generation/release/bootart" \
-			ADAPTER_HOST_TIMEOUT_SECONDS='$(ADAPTER_HOST_TIMEOUT_SECONDS)' \
-			LIFECYCLE_HOST_TIMEOUT_SECONDS='$(LIFECYCLE_HOST_TIMEOUT_SECONDS)'; \
+			BOOTART_BIN="$$generation/release/bootart"; \
 		printf '%s\n' 'PASS: source, exact packaged ELF, and exact VM release gates passed'
 
 release: release-readiness
@@ -556,8 +709,13 @@ help:
 	@echo "  test-display Run display backend integration tests"
 	@echo "  test-pty     Run terminal restoration integration tests"
 	@echo "  test-installer-root Run pure transactional tests against disposable alternate roots"
-	@echo "                Cargo test lanes are serialized and bounded by TEST_TIMEOUT_SECONDS=$(TEST_TIMEOUT_SECONDS)"
+	@printf '%s\n' \
+		"                Cargo test lanes are serialized and bounded by TEST_TIMEOUT_SECONDS=$${TEST_TIMEOUT_SECONDS}"
 	@echo "  test-artifact-guards Run pure static-artifact and generation-publication tests"
+	@echo "  test-artifact-operation-policy Prove artifact publishers/consumers share one flock"
+	@echo "  test-make-boundary-policy Prove documented Make inputs cannot become shell source"
+	@echo "  assert-artifact-operation Run live artifact-lock policy plus rejection fixtures"
+	@echo "  assert-make-boundary Run live Make-boundary policy plus inert injection fixtures"
 	@echo "  test-host-safety-policy Syntax-check and prove host command surfaces reject dangerous fixtures"
 	@echo "  test-guest-install-guards Prove guest installer wrappers fail before product invocation"
 	@echo "  update-golden Explicitly rewrite reviewed golden frame fixtures"

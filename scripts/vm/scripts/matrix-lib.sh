@@ -3,13 +3,65 @@
 
 set -Eeuo pipefail
 
-VM_LANE_STATUS_SCHEMA='BOOTART_VM_LANE_STATUS_V1'
+# V2 adds BLOCKED_UNIMPLEMENTED so verified image provenance cannot be
+# confused with an implemented/ready lane.
+VM_LANE_STATUS_SCHEMA='BOOTART_VM_LANE_STATUS_V2'
 
 vm_expected_oracle() {
     local pair=$1 lane=$2 token
     token=${pair^^}
     token=${token//-/_}
     printf 'BOOTART_VM_%s_%s_PASS_V1\n' "$token" "${lane^^}"
+}
+
+vm_matrix_runner_path() {
+    local repo_root=$1 pair=$2 lane=$3
+    [[ "$repo_root" == /* && "$repo_root" != *$'\n'* && "$repo_root" != *$'\r'* ]] ||
+        vm_die 'repository root for adapter runner must be an absolute single-line path'
+    [[ "$pair" =~ ^[a-z0-9][a-z0-9-]+$ ]] || vm_die 'unsafe adapter runner pair'
+    [[ "$lane" =~ ^(lifecycle|install|password)$ ]] || vm_die 'unsafe adapter runner lane'
+    printf '%s/scripts/vm/runners/%s/%s.sh\n' "$repo_root" "$pair" "$lane"
+}
+
+vm_require_missing_matrix_runner() {
+    local repo_root=$1 pair=$2 lane=$3 runner_root pair_root runner
+    runner_root="$repo_root/scripts/vm/runners"
+    pair_root="$runner_root/$pair"
+    runner="$(vm_matrix_runner_path "$repo_root" "$pair" "$lane")"
+    if [[ -e "$runner_root" || -L "$runner_root" ]]; then
+        [[ -d "$runner_root" && ! -L "$runner_root" ]] ||
+            vm_die "blocked-unimplemented adapter runner root is not a real directory: $pair/$lane"
+    fi
+    if [[ -e "$pair_root" || -L "$pair_root" ]]; then
+        [[ -d "$pair_root" && ! -L "$pair_root" ]] ||
+            vm_die "blocked-unimplemented adapter pair path is not a real directory: $pair/$lane"
+    fi
+    [[ ! -e "$runner" && ! -L "$runner" ]] ||
+        vm_die "blocked-unimplemented adapter lane already has a runner: $pair/$lane"
+}
+
+vm_require_ready_matrix_runner() {
+    local repo_root=$1 pair=$2 lane=$3 policy=$4 runner_root pair_root runner directory mode
+    runner_root="$repo_root/scripts/vm/runners"
+    pair_root="$runner_root/$pair"
+    runner="$(vm_matrix_runner_path "$repo_root" "$pair" "$lane")"
+    for directory in \
+        "$repo_root" "$repo_root/scripts" "$repo_root/scripts/vm" \
+        "$runner_root" "$pair_root"
+    do
+        [[ -d "$directory" && ! -L "$directory" ]] ||
+            vm_die "ready adapter runner ancestor is missing or symlinked: $pair/$lane"
+        vm_assert_owned "$directory"
+        mode="$(vm_stat_mode "$directory")" ||
+            vm_die "cannot inspect ready adapter runner ancestor mode: $directory"
+        (( (8#$mode & 0022) == 0 )) ||
+            vm_die "ready adapter runner ancestor is group/world writable: $directory"
+    done
+    [[ -f "$runner" && ! -L "$runner" && -x "$runner" ]] ||
+        vm_die "ready adapter runner must be an executable regular file: $pair/$lane"
+    [[ -f "$policy" && ! -L "$policy" ]] || vm_die 'adapter runner policy is missing or symlinked'
+    bash "$policy" "$repo_root" "$runner" >/dev/null ||
+        vm_die "ready adapter runner failed the static source policy: $pair/$lane"
 }
 
 vm_validate_matrix() {
@@ -90,6 +142,10 @@ vm_validate_matrix() {
             blocked-unverified)
                 [[ "$lock_status" == blocked && "$lock_sha" == BLOCKED_UNVERIFIED ]] ||
                     vm_die "blocked adapter lane lacks a BLOCKED_UNVERIFIED image: $pair/$lane"
+                ;;
+            blocked-unimplemented)
+                [[ "$lock_status" == verified ]] ||
+                    vm_die "unimplemented adapter lane lacks a verified immutable image: $pair/$lane"
                 ;;
             ready-unproven)
                 [[ "$lock_status" == verified ]] ||

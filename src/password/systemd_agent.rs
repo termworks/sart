@@ -715,10 +715,9 @@ impl AskQueue {
 
         let mut events = Vec::new();
         if let Some(active) = self.active.clone() {
-            let reason = if !next_known.contains_key(&active) {
-                Some(CancellationReason::Deleted)
-            } else {
-                ineligible.get(&active).copied()
+            let reason = match next_known.get(&active) {
+                None => Some(CancellationReason::Deleted),
+                Some(_) => ineligible.get(&active).copied(),
             };
             if let Some(reason) = reason {
                 self.active = None;
@@ -942,7 +941,9 @@ impl SystemdReplySocket {
             .cast();
         message.msg_namelen = address.length;
         message.msg_iov = iovecs.as_mut_ptr();
-        message.msg_iovlen = iovecs.len();
+        // msghdr uses size_t on glibc and an int-sized field on musl. The
+        // internal reply path supplies at most two iovecs.
+        message.msg_iovlen = iovecs.len() as _;
         // SAFETY: msghdr references address and iovec storage that remains live
         // for the call; no control data is provided.
         let sent = unsafe {

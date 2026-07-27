@@ -157,7 +157,7 @@ impl SecureSecret {
                 0,
             )
         };
-        if raw == libc::MAP_FAILED {
+        if std::ptr::eq(raw, libc::MAP_FAILED) {
             return Err(SecretError::Allocation(io::Error::last_os_error()));
         }
         let pointer = NonNull::new(raw.cast::<u8>()).expect("mmap never returns a null success");

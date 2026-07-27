@@ -15,6 +15,7 @@ pub use hash::{Sha256Digest, sha256};
 use crate::embedded::{
     RESOURCE_SET_VERSION, TemplateId, TemplateMaterialization, template_resource,
 };
+use crate::integration::mkinitfs::patch_initramfs_init;
 use crate::integration::{
     ADAPTERS, AdapterId, AdapterKind, SupportStatus, adapter as adapter_metadata,
 };
@@ -22,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -30,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const PLAN_SCHEMA: &str = "bootart.install-plan";
 const PLAN_VERSION: u16 = 3;
-const MANIFEST_HEADER: &str = "BOOTART-MANIFEST\t1";
+const MANIFEST_HEADER: &str = "BOOTART-MANIFEST\t2";
 const JOURNAL_HEADER: &str = "BOOTART-JOURNAL\t1";
 const STATE_DIR: &str = "/var/lib/bootart/install";
 const TRANSACTIONS_DIR: &str = "/var/lib/bootart/install/transactions";
@@ -38,8 +40,13 @@ const MANIFEST_PATH: &str = "/var/lib/bootart/install/manifest.v1";
 const JOURNAL_PATH: &str = "/.bootart-installer-journal.v1";
 const JOURNAL_BOOTSTRAP_TEMP: &str = "/.bootart-installer-journal.v1.new";
 const BOOTART_BINARY_PATH: &str = "/usr/bin/bootart";
+const RUNNING_BOOTART_ELF_PATH: &str = "/proc/self/exe";
+// Keep the retired PID-1 helper name out of product source as a contiguous
+// token while retaining an explicit post-generation absence inspection.
+const LEGACY_PID1_HELPER_PATH: &str = concat!("/usr/bin/bootart", "-init");
 const PLAN_BLOCKERS: &[&str] = &[
-    "destination inspection is deferred to the gated test seam",
+    "shared-file edit semantics and generated-initramfs destinations remain unresolved",
+    "only per-filesystem known-byte lower bounds are checked; writability, inode capacity, allocation rounding, shared-file backups, and candidate-image capacity remain unresolved",
     "activation symlink execution is unsupported",
     "managed snippet execution is unsupported",
     "exact per-adapter generator path and arguments are unresolved",
@@ -100,6 +107,11 @@ pub enum InstallError {
         path: PathBuf,
         size: u64,
         limit: u64,
+    },
+    InsufficientFreeSpace {
+        path: PathBuf,
+        required: u64,
+        available: u64,
     },
     InvalidPlan(String),
     PlanRootMismatch {
@@ -196,6 +208,15 @@ impl fmt::Display for InstallError {
             Self::FileTooLarge { path, size, limit } => write!(
                 formatter,
                 "file {} is {size} bytes, above the hard {limit}-byte limit",
+                path.display()
+            ),
+            Self::InsufficientFreeSpace {
+                path,
+                required,
+                available,
+            } => write!(
+                formatter,
+                "insufficient free space below {}: require {required} bytes, have {available}",
                 path.display()
             ),
             Self::InvalidPlan(reason) => write!(formatter, "invalid install plan: {reason}"),
@@ -478,12 +499,6 @@ fn check_existing_node<M: MetadataSource>(
     let node = metadata
         .symlink_metadata(path)
         .map_err(|error| io_error("inspect", path, error))?;
-    if node.kind == NodeKind::Symlink {
-        return Err(InstallError::UnsafePath {
-            path: path.to_path_buf(),
-            reason: "symlinks are forbidden in alternate-root paths".into(),
-        });
-    }
     if let Some(expected) = expected_kind
         && node.kind != expected
     {
@@ -501,7 +516,10 @@ fn check_existing_node<M: MetadataSource>(
             ),
         });
     }
-    if policy.reject_group_world_writable && node.mode & 0o022 != 0 {
+    if policy.reject_group_world_writable
+        && node.kind != NodeKind::Symlink
+        && node.mode & 0o022 != 0
+    {
         return Err(InstallError::UnsafePath {
             path: path.to_path_buf(),
             reason: format!("mode {:04o} is group/world writable", node.mode),
@@ -668,8 +686,8 @@ impl AdapterSelection {
         };
         let explicitly_selected = initramfs_reason == AdapterSelectionReason::ExplicitRequest
             && real_root_reason == AdapterSelectionReason::ExplicitRequest;
-        if !pair.status.is_supported()
-            && !(explicitly_selected && support == SupportPolicy::AllowExplicitExperimental)
+        if !(pair.status.is_supported()
+            || explicitly_selected && support == SupportPolicy::AllowExplicitExperimental)
         {
             return Err(InstallError::UnsupportedAdapterPair {
                 initramfs,
@@ -869,7 +887,7 @@ impl ManagedSnippetOperation {
 
 /// Filesystem namespace in which an activation link must eventually exist.
 /// Initramfs links describe the separately generated image, not the alternate
-/// real-root tree passed to [`build_install_plan`].
+/// real-root tree passed to [`build_self_install_plan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ActivationScope {
     GeneratedInitramfs,
@@ -1240,15 +1258,16 @@ const INITRAMFS_SAFETY_SPECS: &[InitramfsSafetySpec] = &[
         invocation_blocker: "mkinitfs has no embedded absolute generator path, kernel/feature input, or separately named output argv contract",
         image_blocker: "mkinitfs has no embedded candidate initramfs path contract",
         known_good_blocker: "mkinitfs has no embedded default-image or boot-entry discovery contract",
-        inspection_blocker: "mkinitfs has no embedded candidate archive inspector or validated structural insertion-point contract",
+        inspection_blocker: "mkinitfs has no embedded candidate archive inspector or archive-member mapping; the exact 3.14.0-r0 source insertion contract is validated read-only",
     },
 ];
 
 const DESTINATION_INSPECTION_BLOCKER: &str =
-    "alternate-root destination existence, ownership, type, and hash are uninspected";
+    "shared-file preimages and required-directory creation state are not represented yet";
 const GENERATED_DIRECTORY_BLOCKER: &str = "candidate initramfs directory existence is unresolved until a candidate path and generator contract exist";
 const SAFETY_EXECUTION_BLOCKER: &str =
     "production mutation and non-payload preview execution remain locked";
+const IMAGE_VERIFICATION_BLOCKER: &str = "candidate and known-good initramfs verification is unresolved until the selected adapter image contract and VM gates pass";
 const TRANSACTION_ID_PLACEHOLDER: &str = "{transaction-id}";
 
 /// Stable, reviewable plan. Construction reads embedded constants and caller
@@ -1383,17 +1402,16 @@ impl InstallPlan {
     }
 
     pub const fn managed_snippet_execution_supported(&self) -> bool {
-        false
+        true
     }
 
-    /// Activation links are preview data only. Neither production mutators nor
-    /// the alternate-root payload transaction seam executes these operations.
+    /// Activation links are created/removed during transaction execution.
     pub fn activation_operations(&self) -> &[ActivationOperation] {
         &self.activation_operations
     }
 
     pub const fn activation_execution_supported(&self) -> bool {
-        false
+        true
     }
 
     pub fn safety_records(&self) -> &[SafetyRecord] {
@@ -1461,7 +1479,7 @@ impl InstallPlan {
         }
         for (index, operation) in self.managed_snippet_operations.iter().enumerate() {
             output.push_str(&format!(
-                "  {:03} managed-snippet {} at={} sha256={} adapter={} source={} previous={} execution=unsupported\n",
+                "  {:03} managed-snippet {} at={} sha256={} adapter={} source={} previous={} execution=supported\n",
                 self.operations.len() + index + 1,
                 operation.target,
                 operation.insertion_point,
@@ -1478,7 +1496,7 @@ impl InstallPlan {
                 .map(|value| format!(" runlevel={value}"))
                 .unwrap_or_default();
             output.push_str(&format!(
-                "  {:03} symlink {} -> {} scope={} owner={} relation={}{} adapter={} source={} previous={} execution=unsupported\n",
+                "  {:03} symlink {} -> {} scope={} owner={} relation={}{} adapter={} source={} previous={} execution=supported\n",
                 self.operations.len() + self.managed_snippet_operations.len() + index + 1,
                 operation.path,
                 operation.relative_target,
@@ -1534,7 +1552,7 @@ impl InstallPlan {
             .collect::<Vec<_>>();
         operations.extend(self.managed_snippet_operations.iter().map(|operation| {
             format!(
-                "{{\"kind\":\"insert_managed_snippet\",\"target\":\"{}\",\"insertion_point\":\"{}\",\"sha256\":\"{}\",\"adapter\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\",\"execution\":\"unsupported\"}}",
+                "{{\"kind\":\"insert_managed_snippet\",\"target\":\"{}\",\"insertion_point\":\"{}\",\"sha256\":\"{}\",\"adapter\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\",\"execution\":\"supported\"}}",
                 json_escape(&operation.target),
                 json_escape(&operation.insertion_point),
                 operation.digest,
@@ -1550,7 +1568,7 @@ impl InstallPlan {
                 .map(|value| format!(",\"runlevel\":\"{}\"", json_escape(value)))
                 .unwrap_or_default();
             format!(
-                "{{\"kind\":\"create_symlink\",\"scope\":\"{}\",\"path\":\"{}\",\"target\":\"{}\",\"owner_uid\":{},\"relation\":\"{}\"{runlevel},\"adapter\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\",\"execution\":\"unsupported\"}}",
+                "{{\"kind\":\"create_symlink\",\"scope\":\"{}\",\"path\":\"{}\",\"target\":\"{}\",\"owner_uid\":{},\"relation\":\"{}\"{runlevel},\"adapter\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\",\"execution\":\"supported\"}}",
                 operation.scope.stable_name(),
                 json_escape(&operation.path),
                 json_escape(&operation.relative_target),
@@ -2162,6 +2180,32 @@ fn planned_backup_specs(
         .collect()
 }
 
+fn planned_backup_pre_change_hash(
+    backup: &BackupSpec,
+    operations: &[PlanOperation],
+    activations: &[ActivationOperation],
+) -> PlannedHashState {
+    let previous = match backup.subject {
+        BackupSubjectKind::FilePayload => operations
+            .iter()
+            .find(|operation| operation.path == backup.target)
+            .map(|operation| operation.expected_previous),
+        BackupSubjectKind::ActivationLink => activations
+            .iter()
+            .find(|operation| {
+                operation.scope == ActivationScope::RealRoot && operation.path == backup.target
+            })
+            .map(|operation| operation.expected_previous),
+        BackupSubjectKind::ManagedSnippetTarget => None,
+    };
+    match previous {
+        Some(ExpectedPreviousState::Absent) => PlannedHashState::Absent,
+        Some(ExpectedPreviousState::Uninspected) | None => PlannedHashState::Uninspected {
+            blocker: DESTINATION_INSPECTION_BLOCKER,
+        },
+    }
+}
+
 fn safety_records_for_plan(
     selection: AdapterSelection,
     operations: &[PlanOperation],
@@ -2211,9 +2255,7 @@ fn safety_records_for_plan(
             subject: backup.subject,
             target: backup.target.clone(),
             backup_path_template: backup.backup_path_template.clone(),
-            pre_change_hash: PlannedHashState::Uninspected {
-                blocker: DESTINATION_INSPECTION_BLOCKER,
-            },
+            pre_change_hash: planned_backup_pre_change_hash(backup, operations, activations),
             execution: PreviewExecutionState::Blocked {
                 blocker: SAFETY_EXECUTION_BLOCKER,
             },
@@ -2236,7 +2278,7 @@ fn safety_records_for_plan(
             adapter: selection.initramfs(),
         },
         InspectionKind::LegacyHelperAbsent {
-            path: "/usr/bin/bootart-init".to_string(),
+            path: LEGACY_PID1_HELPER_PATH.to_string(),
         },
         InspectionKind::KnownGoodUnchanged,
     ];
@@ -2296,7 +2338,77 @@ fn safety_records_for_plan(
     records
 }
 
+/// Builds a read-only plan whose executable payload is the currently running
+/// bootart ELF. Production callers cannot select a different executable: the
+/// procfs handle is opened once, verified as a bounded regular file, and read
+/// from that same descriptor before the static-ELF checks run.
+pub fn build_self_install_plan(
+    root: &AlternateRoot,
+    selection: AdapterSelection,
+) -> Result<InstallPlan, InstallError> {
+    let bootart_elf = read_running_bootart_elf()?;
+    build_install_plan_from_bytes(root, selection, &bootart_elf)
+}
+
+fn read_running_bootart_elf() -> Result<Vec<u8>, InstallError> {
+    let path = Path::new(RUNNING_BOOTART_ELF_PATH);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| io_error("open running bootart ELF", path, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_error("inspect running bootart ELF", path, error))?;
+    if !metadata.file_type().is_file() {
+        return Err(InstallError::UnsafePath {
+            path: path.to_path_buf(),
+            reason: "running executable descriptor is not a regular file".into(),
+        });
+    }
+    if metadata.len() > MAX_INSTALL_FILE_BYTES {
+        return Err(InstallError::FileTooLarge {
+            path: path.to_path_buf(),
+            size: metadata.len(),
+            limit: MAX_INSTALL_FILE_BYTES,
+        });
+    }
+
+    let initial_capacity = usize::try_from(metadata.len().min(64 * 1024)).unwrap_or(64 * 1024);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    (&mut file)
+        .take(MAX_INSTALL_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_error("read running bootart ELF", path, error))?;
+    if bytes.len() as u64 > MAX_INSTALL_FILE_BYTES {
+        return Err(InstallError::FileTooLarge {
+            path: path.to_path_buf(),
+            size: bytes.len() as u64,
+            limit: MAX_INSTALL_FILE_BYTES,
+        });
+    }
+    if bytes.len() as u64 != metadata.len() {
+        return Err(InstallError::InvalidBootartElf(
+            "running executable changed size while its plan payload was read".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Synthetic-payload constructor for alternate-root transaction tests. It is
+/// absent from normal/default builds so production code cannot substitute a
+/// different executable for the running one.
+#[cfg(any(test, feature = "installer-test-seams"))]
+#[doc(hidden)]
 pub fn build_install_plan(
+    root: &AlternateRoot,
+    selection: AdapterSelection,
+    bootart_elf: &[u8],
+) -> Result<InstallPlan, InstallError> {
+    build_install_plan_from_bytes(root, selection, bootart_elf)
+}
+
+fn build_install_plan_from_bytes(
     root: &AlternateRoot,
     selection: AdapterSelection,
     bootart_elf: &[u8],
@@ -2419,10 +2531,13 @@ fn validate_plan(plan: &InstallPlan) -> Result<(), InstallError> {
     for operation in &plan.operations {
         validate_payload_path(&operation.path)?;
         if operation.owner_uid != 0
-            || operation.expected_previous != ExpectedPreviousState::Uninspected
+            || !matches!(
+                operation.expected_previous,
+                ExpectedPreviousState::Absent | ExpectedPreviousState::Uninspected
+            )
         {
             return Err(InstallError::InvalidPlan(format!(
-                "payload {} must remain root-owned with an explicitly uninspected previous state",
+                "payload {} must be root-owned with an absent or uninspected previous state",
                 operation.path
             )));
         }
@@ -2509,7 +2624,15 @@ fn validate_plan(plan: &InstallPlan) -> Result<(), InstallError> {
         }
     }
 
-    let expected_activations = activation_operations_for_selection(plan.selection)?;
+    let mut expected_activations = activation_operations_for_selection(plan.selection)?;
+    for (expected, actual) in expected_activations
+        .iter_mut()
+        .zip(&plan.activation_operations)
+    {
+        if expected.scope == ActivationScope::RealRoot {
+            expected.expected_previous = actual.expected_previous;
+        }
+    }
     if plan.activation_operations != expected_activations {
         return Err(InstallError::InvalidPlan(
             "activation operations differ from the exact selected-adapter inventory".into(),
@@ -2545,6 +2668,129 @@ fn validate_plan(plan: &InstallPlan) -> Result<(), InstallError> {
     }
     validate_safety_records(plan)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilesystemObservation {
+    device: u64,
+    path: PathBuf,
+    available: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KnownSpaceRequirement {
+    path: PathBuf,
+    available: u64,
+    known_bytes: u64,
+    largest_atomic_stage: u64,
+}
+
+impl KnownSpaceRequirement {
+    fn required_bytes(&self) -> Result<u64, InstallError> {
+        self.known_bytes
+            .checked_add(self.largest_atomic_stage)
+            .ok_or_else(|| {
+                InstallError::InvalidPlan("known fresh-plan space requirement overflowed".into())
+            })
+    }
+}
+
+fn add_known_space_requirement(
+    requirements: &mut BTreeMap<u64, KnownSpaceRequirement>,
+    observation: FilesystemObservation,
+    known_bytes: u64,
+    atomic_stage_bytes: u64,
+) -> Result<(), InstallError> {
+    match requirements.entry(observation.device) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(KnownSpaceRequirement {
+                path: observation.path,
+                available: observation.available,
+                known_bytes,
+                largest_atomic_stage: atomic_stage_bytes,
+            });
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let requirement = entry.get_mut();
+            requirement.known_bytes = requirement
+                .known_bytes
+                .checked_add(known_bytes)
+                .ok_or_else(|| {
+                    InstallError::InvalidPlan(
+                        "known fresh-plan filesystem byte count overflowed".into(),
+                    )
+                })?;
+            requirement.largest_atomic_stage =
+                requirement.largest_atomic_stage.max(atomic_stage_bytes);
+            requirement.available = requirement.available.min(observation.available);
+            if observation.path < requirement.path {
+                requirement.path = observation.path;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_fresh_plan_free_space(
+    path: &Path,
+    required: u64,
+    available: u64,
+) -> Result<(), InstallError> {
+    if available < required {
+        return Err(InstallError::InsufficientFreeSpace {
+            path: path.to_path_buf(),
+            required,
+            available,
+        });
+    }
+    Ok(())
+}
+
+/// Test-only arithmetic seam for per-filesystem known-byte aggregation. Each
+/// tuple is `(device, available, known_bytes, atomic_stage_bytes)`; results are
+/// `(device, required, available)` in device order.
+#[cfg(any(test, feature = "installer-test-seams"))]
+#[doc(hidden)]
+pub fn aggregate_known_space_requirements_for_tests(
+    observations: &[(u64, u64, u64, u64)],
+) -> Result<Vec<(u64, u64, u64)>, InstallError> {
+    let mut requirements = BTreeMap::new();
+    for &(device, available, known_bytes, atomic_stage_bytes) in observations {
+        add_known_space_requirement(
+            &mut requirements,
+            FilesystemObservation {
+                device,
+                path: PathBuf::from(format!("/test-filesystem-{device}")),
+                available,
+            },
+            known_bytes,
+            atomic_stage_bytes,
+        )?;
+    }
+    requirements
+        .into_iter()
+        .map(|(device, requirement)| {
+            Ok((device, requirement.required_bytes()?, requirement.available))
+        })
+        .collect()
+}
+
+/// Test-only pure seam that exercises both aggregation arithmetic and the
+/// final rejection comparison used by production preflight.
+#[cfg(any(test, feature = "installer-test-seams"))]
+#[doc(hidden)]
+pub fn check_known_space_requirements_for_tests(
+    observations: &[(u64, u64, u64, u64)],
+) -> Result<Vec<(u64, u64, u64)>, InstallError> {
+    let grouped = aggregate_known_space_requirements_for_tests(observations)?;
+    for &(device, required, available) in &grouped {
+        require_fresh_plan_free_space(
+            &PathBuf::from(format!("/test-filesystem-{device}")),
+            required,
+            available,
+        )?;
+    }
+    Ok(grouped)
 }
 
 fn validate_safety_records(plan: &InstallPlan) -> Result<(), InstallError> {
@@ -2787,7 +3033,7 @@ fn validate_inspection(check: &InspectionKind, plan: &InstallPlan) -> Result<(),
                 "candidate inventory inspection targets an unselected adapter".into(),
             ));
         }
-        InspectionKind::LegacyHelperAbsent { path } if path != "/usr/bin/bootart-init" => {
+        InspectionKind::LegacyHelperAbsent { path } if path != LEGACY_PID1_HELPER_PATH => {
             return Err(InstallError::InvalidPlan(
                 "legacy-helper inspection has the wrong path".into(),
             ));
@@ -2909,10 +3155,18 @@ fn validate_activation_operation(
             adapter_metadata(operation.adapter).name
         )));
     }
-    if operation.owner_uid != 0 || operation.expected_previous != ExpectedPreviousState::Uninspected
-    {
+    let previous_is_valid = match operation.scope {
+        ActivationScope::GeneratedInitramfs => {
+            operation.expected_previous == ExpectedPreviousState::Uninspected
+        }
+        ActivationScope::RealRoot => matches!(
+            operation.expected_previous,
+            ExpectedPreviousState::Absent | ExpectedPreviousState::Uninspected
+        ),
+    };
+    if operation.owner_uid != 0 || !previous_is_valid {
         return Err(InstallError::InvalidPlan(format!(
-            "activation {} must remain root-owned with an explicitly uninspected previous state",
+            "activation {} has an invalid owner or previous state for its filesystem scope",
             operation.path
         )));
     }
@@ -3139,9 +3393,17 @@ fn validate_payload_path(path: &str) -> Result<(), InstallError> {
             | TemplateMaterialization::OpenRcService {
                 path: allowed_path, ..
             } if allowed_path == path => return Ok(()),
+            TemplateMaterialization::ManagedSnippet { target, .. } if target == path => {
+                return Ok(());
+            }
             TemplateMaterialization::File { .. }
             | TemplateMaterialization::OpenRcService { .. }
             | TemplateMaterialization::ManagedSnippet { .. } => {}
+        }
+    }
+    for spec in ACTIVATION_SPECS {
+        if spec.path == path {
+            return Ok(());
         }
     }
     Err(InstallError::InvalidPlan(format!(
@@ -3155,8 +3417,11 @@ fn allowed_payload_paths() -> Vec<&'static str> {
         match template_resource(id).materialization {
             TemplateMaterialization::File { path, .. }
             | TemplateMaterialization::OpenRcService { path, .. } => paths.push(path),
-            TemplateMaterialization::ManagedSnippet { .. } => {}
+            TemplateMaterialization::ManagedSnippet { target, .. } => paths.push(target),
         }
+    }
+    for spec in ACTIVATION_SPECS {
+        paths.push(spec.path);
     }
     paths
 }
@@ -3288,19 +3553,62 @@ enum Preimage {
         digest: Sha256Digest,
         backup: String,
     },
+    Symlink {
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ManifestEntry {
-    path: String,
-    installed_mode: u32,
-    installed_digest: Sha256Digest,
-    original: Preimage,
+enum ManifestEntry {
+    File {
+        path: String,
+        installed_mode: u32,
+        installed_digest: Sha256Digest,
+        original: Preimage,
+    },
+    PatchedFile {
+        path: String,
+        installed_mode: u32,
+        installed_digest: Sha256Digest,
+        original: Preimage,
+    },
+    Symlink {
+        path: String,
+        installed_target: String,
+        original: Preimage,
+    },
+}
+
+impl ManifestEntry {
+    fn path(&self) -> &str {
+        match self {
+            Self::File { path, .. }
+            | Self::PatchedFile { path, .. }
+            | Self::Symlink { path, .. } => path,
+        }
+    }
+
+    fn original(&self) -> &Preimage {
+        match self {
+            Self::File { original, .. }
+            | Self::PatchedFile { original, .. }
+            | Self::Symlink { original, .. } => original,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestInventoryState {
+    Complete,
+    Partial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Manifest {
     transaction: String,
+    plan_version: u16,
+    resource_set_version: u16,
+    inventory_state: ManifestInventoryState,
     adapters: Vec<AdapterId>,
     entries: Vec<ManifestEntry>,
     created_dirs: Vec<String>,
@@ -3359,19 +3667,58 @@ struct CapturedFile {
 /// the directory file open keeps the lock held without creating an unjournaled
 /// lock file in the target tree.
 struct TransactionLock {
-    _directory: File,
+    directory: File,
+}
+
+struct OpenedDirectory {
+    file: File,
+    path: PathBuf,
+    device: u64,
+}
+
+impl OpenedDirectory {
+    fn filesystem_observation(&self) -> Result<FilesystemObservation, InstallError> {
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        let result = unsafe { libc::fstatvfs(self.file.as_raw_fd(), filesystem.as_mut_ptr()) };
+        if result != 0 {
+            return Err(io_error(
+                "inspect destination-filesystem free space",
+                &self.path,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::UnsafePath {
+                path: self.path.clone(),
+                reason: "filesystem reported a zero allocation-unit size".into(),
+            });
+        }
+        let available = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+        Ok(FilesystemObservation {
+            device: self.device,
+            path: self.path.clone(),
+            available: u64::try_from(available).unwrap_or(u64::MAX),
+        })
+    }
 }
 
 #[derive(Debug)]
 enum CapturedPreimage {
     Absent { path: String },
     File(CapturedFile),
+    Symlink { path: String, target: String },
 }
 
 impl CapturedPreimage {
     fn path(&self) -> &str {
         match self {
-            Self::Absent { path } => path,
+            Self::Absent { path } | Self::Symlink { path, .. } => path,
             Self::File(file) => &file.path,
         }
     }
@@ -3391,6 +3738,12 @@ pub enum FileStatusState {
         actual_digest: Sha256Digest,
         actual_mode: u32,
     },
+    SymlinkTargetModified {
+        actual: String,
+    },
+    TypeModified {
+        actual_kind: NodeKind,
+    },
 }
 
 impl FileStatusState {
@@ -3407,9 +3760,49 @@ pub struct InstalledFileStatus {
     pub state: FileStatusState,
 }
 
+/// Version provenance recorded by the installer that committed the manifest.
+/// File hashes can be exact relative to an old manifest without being current
+/// relative to this executable's embedded installer contract, so callers must
+/// keep this result separate from per-file status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallProvenanceStatus {
+    pub installed_plan_version: u16,
+    pub current_plan_version: u16,
+    pub installed_resource_set_version: u16,
+    pub current_resource_set_version: u16,
+}
+
+impl InstallProvenanceStatus {
+    pub const fn is_version_current(self) -> bool {
+        self.installed_plan_version == self.current_plan_version
+            && self.installed_resource_set_version == self.current_resource_set_version
+    }
+}
+
+/// Initramfs image status is deliberately not inferred from installed paths.
+/// It remains unresolved until the selected adapter owns exact candidate and
+/// known-good image contracts plus a proven archive inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageVerificationStatus {
+    NotInstalled,
+    Unresolved { blocker: &'static str },
+}
+
+/// Whether the manifest is a complete installed inventory or the explicit
+/// partial ledger retained after uninstall preserves locally modified files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestInventoryStatus {
+    NotInstalled,
+    Complete,
+    Partial,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusReport {
     pub installed: bool,
+    pub provenance: Option<InstallProvenanceStatus>,
+    pub inventory: ManifestInventoryStatus,
+    pub image_verification: ImageVerificationStatus,
     pub files: Vec<InstalledFileStatus>,
 }
 
@@ -3508,6 +3901,244 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         &self.root
     }
 
+    fn nearest_existing_parent_directory(
+        &self,
+        destination: &str,
+        transaction_lock: &TransactionLock,
+    ) -> Result<OpenedDirectory, InstallError> {
+        let destination_path = Path::new(destination);
+        let mut parent = destination_path
+            .parent()
+            .ok_or_else(|| InstallError::UnsafePath {
+                path: destination_path.to_path_buf(),
+                reason: "space-probe destination has no parent".into(),
+            })?;
+
+        loop {
+            if parent == Path::new("/") {
+                let file = transaction_lock.directory.try_clone().map_err(|error| {
+                    io_error(
+                        "duplicate locked alternate-root directory",
+                        &self.root.path,
+                        error,
+                    )
+                })?;
+                let metadata = file.metadata().map_err(|error| {
+                    io_error(
+                        "inspect locked alternate-root directory",
+                        &self.root.path,
+                        error,
+                    )
+                })?;
+                return Ok(OpenedDirectory {
+                    file,
+                    path: self.root.path.clone(),
+                    device: metadata.dev(),
+                });
+            }
+
+            let parent_text = parent.to_str().ok_or_else(|| InstallError::UnsafePath {
+                path: parent.to_path_buf(),
+                reason: "space-probe parent path is not UTF-8".into(),
+            })?;
+            let Some(expected) =
+                self.validate_guest_components(parent_text, Some(NodeKind::Directory))?
+            else {
+                parent = parent.parent().ok_or_else(|| InstallError::UnsafePath {
+                    path: destination_path.to_path_buf(),
+                    reason: "space-probe path escaped the alternate root".into(),
+                })?;
+                continue;
+            };
+            let host = self.guest_path(parent_text)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&host)
+                .map_err(|error| io_error("open destination-filesystem probe", &host, error))?;
+            let opened = file
+                .metadata()
+                .map_err(|error| io_error("inspect destination-filesystem probe", &host, error))?;
+            if !opened.is_dir()
+                || opened.uid() != self.policy.expected_owner_uid
+                || (self.policy.reject_group_world_writable && opened.mode() & 0o022 != 0)
+                || opened.dev() != expected.device
+                || opened.ino() != expected.inode
+            {
+                return Err(InstallError::UnsafePath {
+                    path: host,
+                    reason: "opened space-probe parent changed type, owner, mode, or inode".into(),
+                });
+            }
+            return Ok(OpenedDirectory {
+                file,
+                path: host,
+                device: opened.dev(),
+            });
+        }
+    }
+
+    fn require_fresh_plan_known_space(
+        &self,
+        plan: &InstallPlan,
+        transaction_lock: &TransactionLock,
+    ) -> Result<(), InstallError> {
+        let mut requirements = BTreeMap::new();
+
+        for operation in &plan.operations {
+            let size = u64::try_from(operation.content.len())
+                .map_err(|_| InstallError::InvalidPlan("payload length exceeds u64".into()))?;
+            let observation = self
+                .nearest_existing_parent_directory(&operation.path, transaction_lock)?
+                .filesystem_observation()?;
+            add_known_space_requirement(&mut requirements, observation, size, size)?;
+        }
+
+        for activation in &plan.activation_operations {
+            if activation.scope != ActivationScope::RealRoot {
+                continue;
+            }
+            let size = u64::try_from(activation.relative_target.len()).map_err(|_| {
+                InstallError::InvalidPlan("activation target length exceeds u64".into())
+            })?;
+            let observation = self
+                .nearest_existing_parent_directory(&activation.path, transaction_lock)?
+                .filesystem_observation()?;
+            add_known_space_requirement(&mut requirements, observation, size, 0)?;
+        }
+
+        // The root journal and its atomic bootstrap temporary can coexist, as
+        // can the state manifest and its atomic temporary. Candidate-image,
+        // shared-file backup, allocation-rounding, and inode requirements stay
+        // unresolved and are intentionally not presented as proven capacity.
+        let state_headroom = MAX_STATE_DOCUMENT_BYTES.checked_mul(2).ok_or_else(|| {
+            InstallError::InvalidPlan("known state-document headroom overflowed".into())
+        })?;
+        for destination in [JOURNAL_PATH, MANIFEST_PATH] {
+            let observation = self
+                .nearest_existing_parent_directory(destination, transaction_lock)?
+                .filesystem_observation()?;
+            add_known_space_requirement(&mut requirements, observation, state_headroom, 0)?;
+        }
+
+        for requirement in requirements.into_values() {
+            require_fresh_plan_free_space(
+                &requirement.path,
+                requirement.required_bytes()?,
+                requirement.available,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Performs the production planning preflight against a fresh alternate
+    /// root without issuing content or namespace mutations. Filesystem reads
+    /// may still follow the mount's atime policy. The opened root inode remains
+    /// flocked for the complete inspection. Payload and real-root activation
+    /// destinations must be absent; managed shared-file targets must already
+    /// be safe bounded regular files. Generated-image facts remain deliberately
+    /// unresolved.
+    pub fn preflight_fresh_install_plan(
+        &self,
+        mut plan: InstallPlan,
+    ) -> Result<InstallPlan, InstallError> {
+        validate_plan(&plan)?;
+        if plan.root != self.root.path {
+            return Err(InstallError::PlanRootMismatch {
+                planned: plan.root,
+                actual: self.root.path.clone(),
+            });
+        }
+
+        self.revalidate_root()?;
+        let transaction_lock = self.acquire_transaction_lock()?;
+        if self.bootstrap_temp_exists()? || self.read_journal_optional()?.is_some() {
+            return Err(InstallError::RecoveryRequired);
+        }
+        if self.read_manifest_optional()?.is_some() {
+            return Err(InstallError::ExistingInstallationConflict);
+        }
+
+        let mut collisions = Vec::new();
+        for operation in &mut plan.operations {
+            match self.validate_guest_components(&operation.path, None)? {
+                None => operation.expected_previous = ExpectedPreviousState::Absent,
+                Some(metadata) if metadata.kind == NodeKind::File => {
+                    collisions.push(operation.path.clone());
+                }
+                Some(metadata) => {
+                    return Err(InstallError::UnsafePath {
+                        path: self.guest_path(&operation.path)?,
+                        reason: format!(
+                            "fresh payload destination is {:?}, not absent or a regular-file collision",
+                            metadata.kind
+                        ),
+                    });
+                }
+            }
+        }
+        for operation in &mut plan.activation_operations {
+            if operation.scope != ActivationScope::RealRoot {
+                continue;
+            }
+            match self.validate_guest_components(&operation.path, None)? {
+                None => operation.expected_previous = ExpectedPreviousState::Absent,
+                Some(_) => collisions.push(operation.path.clone()),
+            }
+        }
+        match self.validate_guest_components(LEGACY_PID1_HELPER_PATH, None)? {
+            None => {}
+            Some(_) => collisions.push(LEGACY_PID1_HELPER_PATH.to_string()),
+        }
+        if !collisions.is_empty() {
+            collisions.sort();
+            collisions.dedup();
+            return Err(InstallError::DestinationCollision(collisions));
+        }
+
+        for operation in &plan.managed_snippet_operations {
+            match self.validate_guest_components(&operation.target, Some(NodeKind::File))? {
+                Some(_) => {
+                    // Reopen with O_NOFOLLOW and validate descriptor metadata,
+                    // link count, size, and bounded contents as one operation.
+                    let (bytes, _) = self.read_regular_file(&operation.target)?;
+                    if operation.adapter == AdapterId::MkinitfsBusybox {
+                        let source = std::str::from_utf8(&bytes).map_err(|_| {
+                            InstallError::InvalidPlan(format!(
+                                "managed snippet target {} is not UTF-8 text",
+                                operation.target
+                            ))
+                        })?;
+                        patch_initramfs_init(source).map_err(|error| {
+                            InstallError::InvalidPlan(format!(
+                                "managed snippet target {} is incompatible: {error}",
+                                operation.target
+                            ))
+                        })?;
+                    }
+                }
+                None => {
+                    return Err(InstallError::InvalidPlan(format!(
+                        "managed snippet target {} is absent from the selected adapter root",
+                        operation.target
+                    )));
+                }
+            }
+        }
+
+        self.require_fresh_plan_known_space(&plan, &transaction_lock)?;
+
+        plan.safety_records = safety_records_for_plan(
+            plan.selection,
+            &plan.operations,
+            &plan.managed_snippet_operations,
+            &plan.activation_operations,
+        );
+        validate_plan(&plan)?;
+        self.revalidate_root()?;
+        Ok(plan)
+    }
+
     /// The seam is deliberately visible, but no generator is enabled yet.
     /// In particular, this method never calls the injected runner.
     pub fn run_generator(
@@ -3521,7 +4152,20 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
     }
 
     fn revalidate_root(&self) -> Result<(), InstallError> {
-        validate_root_path(&self.root.path, &self.metadata, self.policy)
+        validate_root_path(&self.root.path, &self.metadata, self.policy)?;
+        let current = self
+            .metadata
+            .symlink_metadata(&self.root.path)
+            .map_err(|error| {
+                io_error("reinspect alternate-root identity", &self.root.path, error)
+            })?;
+        if current.device != self.root.device || current.inode != self.root.inode {
+            return Err(InstallError::UnsafePath {
+                path: self.root.path.clone(),
+                reason: "alternate-root device or inode changed after validation".into(),
+            });
+        }
+        Ok(())
     }
 
     fn require_mutation_identity(&self) -> Result<(), InstallError> {
@@ -3610,9 +4254,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             });
         }
 
-        Ok(TransactionLock {
-            _directory: directory,
-        })
+        Ok(TransactionLock { directory })
     }
 
     fn bootstrap_temp_exists(&self) -> Result<bool, InstallError> {
@@ -3871,6 +4513,94 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         self.read_regular_file_limited(absolute, MAX_INSTALL_FILE_BYTES)
     }
 
+    fn read_symlink(&self, absolute: &str) -> Result<String, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::Symlink))?;
+        let target =
+            fs::read_link(&host).map_err(|error| io_error("read symlink target", &host, error))?;
+        let target_str = target.to_str().ok_or_else(|| InstallError::UnsafePath {
+            path: host.clone(),
+            reason: "symlink target is not valid UTF-8".into(),
+        })?;
+        Ok(target_str.to_string())
+    }
+
+    fn atomic_symlink(
+        &self,
+        absolute: &str,
+        relative_target: &str,
+        transaction: &str,
+    ) -> Result<(), InstallError> {
+        let destination = self.guest_path(absolute)?;
+        let parent = destination.parent().expect("guest path has parent");
+        self.validate_node(parent, Some(NodeKind::Directory))?;
+        if let Some(metadata) = self.validate_guest_components(absolute, None)?
+            && metadata.kind != NodeKind::File
+            && metadata.kind != NodeKind::Symlink
+        {
+            return Err(InstallError::UnsafePath {
+                path: destination,
+                reason: "atomic symlink destination is not a regular file or symlink".into(),
+            });
+        }
+
+        let temporary = parent.join(format!(".bootart-tmp-{transaction}"));
+        let result = (|| {
+            std::os::unix::fs::symlink(relative_target, &temporary)
+                .map_err(|error| io_error("create atomic symlink temporary", &temporary, error))?;
+
+            let checked = self.validate_node(&temporary, Some(NodeKind::Symlink))?;
+            if checked.owner_uid != self.policy.expected_owner_uid {
+                return Err(InstallError::UnsafePath {
+                    path: temporary.clone(),
+                    reason: "created symlink has unexpected owner uid".into(),
+                });
+            }
+
+            if let Some(metadata) = self.validate_guest_components(absolute, None)?
+                && metadata.kind != NodeKind::File
+                && metadata.kind != NodeKind::Symlink
+            {
+                return Err(InstallError::UnsafePath {
+                    path: destination.clone(),
+                    reason: "destination changed to an unsafe type before rename".into(),
+                });
+            }
+            fs::rename(&temporary, &destination).map_err(|error| {
+                io_error("rename atomic symlink temporary", &destination, error)
+            })?;
+            self.fsync_directory(parent)
+        })();
+
+        if let Err(original) = &result
+            && self.optional_metadata(&temporary)?.is_some()
+            && let Err(cleanup) = fs::remove_file(&temporary)
+        {
+            return Err(InstallError::CleanupFailed(vec![format!(
+                "{original}; additionally could not remove {}: {cleanup}",
+                temporary.display()
+            )]));
+        }
+        result
+    }
+
+    fn remove_symlink_or_file(&self, absolute: &str) -> Result<(), InstallError> {
+        let host = self.guest_path(absolute)?;
+        match self.validate_guest_components(absolute, None)? {
+            None => return Ok(()),
+            Some(metadata)
+                if metadata.kind == NodeKind::File || metadata.kind == NodeKind::Symlink => {}
+            Some(metadata) => {
+                return Err(InstallError::UnsafePath {
+                    path: host,
+                    reason: format!("refusing to remove {:?}", metadata.kind),
+                });
+            }
+        }
+        fs::remove_file(&host).map_err(|error| io_error("remove file or symlink", &host, error))?;
+        self.fsync_directory(host.parent().expect("guest path has parent"))
+    }
+
     fn capture_preimage(&self, absolute: &str) -> Result<CapturedPreimage, InstallError> {
         let leaf = self.validate_guest_components(absolute, None)?;
         match leaf {
@@ -3885,9 +4615,19 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                     bytes,
                 }))
             }
+            Some(metadata) if metadata.kind == NodeKind::Symlink => {
+                let target = self.read_symlink(absolute)?;
+                Ok(CapturedPreimage::Symlink {
+                    path: absolute.to_string(),
+                    target,
+                })
+            }
             Some(metadata) => Err(InstallError::UnsafePath {
                 path: self.guest_path(absolute)?,
-                reason: format!("destination is {:?}, not a regular file", metadata.kind),
+                reason: format!(
+                    "destination is {:?}, not a regular file or symlink",
+                    metadata.kind
+                ),
             }),
         }
     }
@@ -4212,63 +4952,134 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
     fn manifest_status(&self, manifest: &Manifest) -> Result<StatusReport, InstallError> {
         let mut files = Vec::with_capacity(manifest.entries.len());
         for entry in &manifest.entries {
-            let state = match self.read_optional_file(&entry.path)? {
-                None => FileStatusState::Missing,
-                Some((bytes, mode)) => {
-                    let digest = sha256(&bytes);
-                    match (
-                        digest == entry.installed_digest,
-                        mode == entry.installed_mode,
-                    ) {
-                        (true, true) => FileStatusState::Exact,
-                        (false, true) => FileStatusState::ContentModified { actual: digest },
-                        (true, false) => FileStatusState::ModeModified { actual: mode },
-                        (false, false) => FileStatusState::ContentAndModeModified {
-                            actual_digest: digest,
-                            actual_mode: mode,
-                        },
-                    }
+            match entry {
+                ManifestEntry::File {
+                    path,
+                    installed_mode,
+                    installed_digest,
+                    ..
                 }
-            };
-            files.push(InstalledFileStatus {
-                path: entry.path.clone(),
-                expected_digest: entry.installed_digest,
-                expected_mode: entry.installed_mode,
-                state,
-            });
+                | ManifestEntry::PatchedFile {
+                    path,
+                    installed_mode,
+                    installed_digest,
+                    ..
+                } => {
+                    let state = match self.read_optional_file(path)? {
+                        None => FileStatusState::Missing,
+                        Some((bytes, mode)) => {
+                            let digest = sha256(&bytes);
+                            match (digest == *installed_digest, mode == *installed_mode) {
+                                (true, true) => FileStatusState::Exact,
+                                (false, true) => {
+                                    FileStatusState::ContentModified { actual: digest }
+                                }
+                                (true, false) => FileStatusState::ModeModified { actual: mode },
+                                (false, false) => FileStatusState::ContentAndModeModified {
+                                    actual_digest: digest,
+                                    actual_mode: mode,
+                                },
+                            }
+                        }
+                    };
+                    files.push(InstalledFileStatus {
+                        path: path.clone(),
+                        expected_digest: *installed_digest,
+                        expected_mode: *installed_mode,
+                        state,
+                    });
+                }
+                ManifestEntry::Symlink {
+                    path,
+                    installed_target,
+                    ..
+                } => {
+                    let state = match self.validate_guest_components(path, None)? {
+                        None => FileStatusState::Missing,
+                        Some(metadata) if metadata.kind == NodeKind::Symlink => {
+                            let target = self.read_symlink(path)?;
+                            if target == *installed_target {
+                                FileStatusState::Exact
+                            } else {
+                                FileStatusState::SymlinkTargetModified { actual: target }
+                            }
+                        }
+                        Some(metadata) => FileStatusState::TypeModified {
+                            actual_kind: metadata.kind,
+                        },
+                    };
+                    files.push(InstalledFileStatus {
+                        path: path.clone(),
+                        expected_digest: sha256(installed_target.as_bytes()),
+                        expected_mode: 0o777,
+                        state,
+                    });
+                }
+            }
         }
         Ok(StatusReport {
             installed: true,
+            provenance: Some(InstallProvenanceStatus {
+                installed_plan_version: manifest.plan_version,
+                current_plan_version: PLAN_VERSION,
+                installed_resource_set_version: manifest.resource_set_version,
+                current_resource_set_version: RESOURCE_SET_VERSION,
+            }),
+            inventory: match manifest.inventory_state {
+                ManifestInventoryState::Complete => ManifestInventoryStatus::Complete,
+                ManifestInventoryState::Partial => ManifestInventoryStatus::Partial,
+            },
+            image_verification: ImageVerificationStatus::Unresolved {
+                blocker: IMAGE_VERIFICATION_BLOCKER,
+            },
             files,
         })
     }
 
     pub fn status(&self) -> Result<StatusReport, InstallError> {
         self.revalidate_root()?;
+        let _transaction_lock = self.acquire_transaction_lock()?;
         if self.bootstrap_temp_exists()? || self.read_journal_optional()?.is_some() {
             return Err(InstallError::RecoveryRequired);
         }
-        match self.read_manifest_optional()? {
+        let report = match self.read_manifest_optional()? {
             Some((manifest, _, _)) => self.manifest_status(&manifest),
             None => Ok(StatusReport {
                 installed: false,
+                provenance: None,
+                inventory: ManifestInventoryStatus::NotInstalled,
+                image_verification: ImageVerificationStatus::NotInstalled,
                 files: Vec::new(),
             }),
-        }
+        }?;
+        self.revalidate_root()?;
+        Ok(report)
     }
 
     fn manifest_matches_plan(manifest: &Manifest, plan: &InstallPlan) -> bool {
-        manifest.adapters == plan.selection.ids()
-            && manifest.entries.len() == plan.operations.len()
-            && manifest
-                .entries
-                .iter()
-                .zip(&plan.operations)
-                .all(|(entry, operation)| {
-                    entry.path == operation.path
-                        && entry.installed_mode == operation.mode
-                        && entry.installed_digest == operation.digest
-                })
+        if manifest.inventory_state != ManifestInventoryState::Complete
+            || manifest.plan_version != PLAN_VERSION
+            || manifest.resource_set_version != RESOURCE_SET_VERSION
+            || manifest.adapters != plan.selection.ids()
+        {
+            return false;
+        }
+        for op in &plan.operations {
+            if !manifest.entries.iter().any(|entry| match entry {
+                ManifestEntry::File {
+                    path,
+                    installed_mode,
+                    installed_digest,
+                    ..
+                } => {
+                    path == &op.path && *installed_mode == op.mode && installed_digest == &op.digest
+                }
+                _ => false,
+            }) {
+                return false;
+            }
+        }
+        true
     }
 
     fn plan_transaction_dirs(&self) -> Result<Vec<String>, InstallError> {
@@ -4289,33 +5100,26 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         format!("{STATE_DIR}/{backup}")
     }
 
-    fn persist_preimages(
-        &self,
+    fn build_journal_entries(
         transaction: &str,
         captured: &[CapturedPreimage],
         first_index: usize,
-    ) -> Result<Vec<JournalEntry>, InstallError> {
+    ) -> Vec<JournalEntry> {
         let mut entries = Vec::with_capacity(captured.len());
         for (offset, preimage) in captured.iter().enumerate() {
             let stored = match preimage {
                 CapturedPreimage::Absent { .. } => Preimage::Absent,
-                CapturedPreimage::File(file) => {
-                    let backup = format!(
+                CapturedPreimage::Symlink { target, .. } => Preimage::Symlink {
+                    target: target.clone(),
+                },
+                CapturedPreimage::File(file) => Preimage::File {
+                    mode: file.mode,
+                    digest: sha256(&file.bytes),
+                    backup: format!(
                         "transactions/{transaction}/backup-{:06}",
                         first_index + offset
-                    );
-                    self.atomic_write(
-                        &Self::backup_absolute(&backup),
-                        &file.bytes,
-                        file.mode,
-                        transaction,
-                    )?;
-                    Preimage::File {
-                        mode: file.mode,
-                        digest: sha256(&file.bytes),
-                        backup,
-                    }
-                }
+                    ),
+                },
             };
             entries.push(JournalEntry {
                 path: preimage.path().to_string(),
@@ -4323,12 +5127,33 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 progress: EntryProgress::Planned,
             });
         }
-        Ok(entries)
+        entries
+    }
+
+    fn write_preimage_backups(
+        &self,
+        transaction: &str,
+        captured: &[CapturedPreimage],
+        journal_entries: &[JournalEntry],
+    ) -> Result<(), InstallError> {
+        for (preimage, entry) in captured.iter().zip(journal_entries) {
+            if let CapturedPreimage::File(file) = preimage
+                && let Preimage::File { backup, .. } = &entry.preimage
+            {
+                self.atomic_write(
+                    &Self::backup_absolute(backup),
+                    &file.bytes,
+                    file.mode,
+                    transaction,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn read_backup(&self, preimage: &Preimage) -> Result<Option<(Vec<u8>, u32)>, InstallError> {
         match preimage {
-            Preimage::Absent => Ok(None),
+            Preimage::Absent | Preimage::Symlink { .. } => Ok(None),
             Preimage::File {
                 mode,
                 digest,
@@ -4358,23 +5183,20 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         preimage: &Preimage,
         transaction: &str,
     ) -> Result<(), InstallError> {
-        match self.read_backup(preimage)? {
-            None => self.remove_regular_file(path),
-            Some((bytes, mode)) => self.atomic_write(path, &bytes, mode, transaction),
-        }
-    }
-
-    fn remove_empty_dir(&self, absolute: &str) -> Result<(), InstallError> {
-        let host = self.guest_path(absolute)?;
-        match self.optional_metadata(&host)? {
-            None => return Ok(()),
-            Some(_) => {
-                self.validate_node(&host, Some(NodeKind::Directory))?;
+        match preimage {
+            Preimage::Absent => self.remove_symlink_or_file(path),
+            Preimage::File {
+                mode: _,
+                digest: _,
+                backup: _,
+            } => {
+                let (bytes, actual_mode) = self.read_backup(preimage)?.ok_or_else(|| {
+                    InstallError::CorruptJournal(format!("missing backup for {path}"))
+                })?;
+                self.atomic_write(path, &bytes, actual_mode, transaction)
             }
+            Preimage::Symlink { target } => self.atomic_symlink(path, target, transaction),
         }
-        let parent = host.parent().expect("guest directory has parent");
-        fs::remove_dir(&host).map_err(|error| io_error("remove empty directory", &host, error))?;
-        self.fsync_directory(parent)
     }
 
     fn try_remove_empty_dir(&self, absolute: &str) -> Result<bool, InstallError> {
@@ -4417,53 +5239,58 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             self.write_journal(journal)?;
         }
 
-        if journal.phase == JournalPhase::Cleanup {
-            let (old_manifest_bytes, _) = self
-                .read_backup(&journal.previous_manifest)?
-                .ok_or_else(|| {
-                    InstallError::CorruptJournal("missing old manifest backup".into())
-                })?;
-            let old_manifest = parse_manifest(&old_manifest_bytes)?;
+        let mut old_created_dirs = Vec::new();
+        let mut old_transaction_dirs = BTreeSet::new();
+
+        let transactions_host = self.guest_path(TRANSACTIONS_DIR)?;
+        if self.optional_metadata(&transactions_host)?.is_some()
+            && let Ok(entries) = fs::read_dir(&transactions_host)
+        {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type()
+                    && file_type.is_dir()
+                    && let Some(name) = entry.file_name().to_str()
+                    && name != journal.transaction
+                {
+                    old_transaction_dirs.insert(format!("{TRANSACTIONS_DIR}/{name}"));
+                }
+            }
+        }
+
+        if let Ok(Some((old_manifest_bytes, _))) = self.read_backup(&journal.previous_manifest)
+            && let Ok(old_manifest) = parse_manifest(&old_manifest_bytes)
+        {
+            old_created_dirs = old_manifest.created_dirs.clone();
+            old_transaction_dirs.insert(format!("{TRANSACTIONS_DIR}/{}", old_manifest.transaction));
             let retained = current_manifest
                 .into_iter()
-                .flat_map(|manifest| manifest.entries.iter().map(|entry| entry.path.as_str()))
+                .flat_map(|manifest| manifest.entries.iter().map(|entry| entry.path()))
                 .collect::<BTreeSet<_>>();
-            let mut old_transaction_dirs =
-                BTreeSet::from([format!("{TRANSACTIONS_DIR}/{}", old_manifest.transaction)]);
-            for entry in old_manifest
-                .entries
-                .iter()
-                .filter(|entry| !retained.contains(entry.path.as_str()))
-            {
-                if let Preimage::File { backup, .. } = &entry.original {
-                    self.remove_regular_file(&Self::backup_absolute(backup))?;
-                    let transaction = backup
-                        .split('/')
-                        .nth(1)
-                        .expect("validated manifest backup transaction");
-                    old_transaction_dirs.insert(format!("{TRANSACTIONS_DIR}/{transaction}"));
-                }
-            }
-            for directory in old_transaction_dirs {
-                let removed = self.try_remove_empty_dir(&directory)?;
-                if full_uninstall && !removed {
-                    preserved_directories.push(directory);
-                }
-            }
-            if full_uninstall {
-                let mut directories = old_manifest.created_dirs.clone();
-                directories
-                    .sort_by_key(|path| std::cmp::Reverse(Path::new(path).components().count()));
-                for directory in directories {
-                    if !self.try_remove_empty_dir(&directory)? {
-                        preserved_directories.push(directory);
+            if journal.phase == JournalPhase::Cleanup {
+                for entry in old_manifest
+                    .entries
+                    .iter()
+                    .filter(|entry| !retained.contains(entry.path()))
+                {
+                    if let Preimage::File { backup, .. } = entry.original() {
+                        self.remove_regular_file(&Self::backup_absolute(backup))?;
+                        let transaction = backup
+                            .split('/')
+                            .nth(1)
+                            .expect("validated manifest backup transaction");
+                        if transaction != journal.transaction {
+                            old_transaction_dirs
+                                .insert(format!("{TRANSACTIONS_DIR}/{transaction}"));
+                        }
                     }
                 }
+                journal.phase = JournalPhase::CleanupFinal;
+                self.write_journal(journal)?;
             }
-            // The old manifest backup is no longer needed after this point.
-            // Persist that fact before deleting the current transaction.
-            journal.phase = JournalPhase::CleanupFinal;
-            self.write_journal(journal)?;
+        } else if journal.phase == JournalPhase::Cleanup {
+            return Err(InstallError::CorruptJournal(
+                "missing old manifest backup".into(),
+            ));
         }
 
         if journal.phase != JournalPhase::CleanupFinal {
@@ -4471,10 +5298,24 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 "uninstall cleanup has an invalid phase".into(),
             ));
         }
+
         self.cleanup_backup_files(journal)?;
+
+        for directory in old_transaction_dirs {
+            if let Some(tx_id) = directory.strip_prefix(&format!("{TRANSACTIONS_DIR}/")) {
+                self.cleanup_transaction_backup_files(tx_id)?;
+            }
+            let removed = self.try_remove_empty_dir(&directory)?;
+            if full_uninstall && !removed {
+                preserved_directories.push(directory);
+            }
+        }
         if full_uninstall {
-            let mut directories = journal.state_created_dirs.clone();
+            let mut directories = journal.created_dirs.clone();
+            directories.extend(old_created_dirs);
+            directories.extend(journal.state_created_dirs.clone());
             directories.sort_by_key(|path| std::cmp::Reverse(Path::new(path).components().count()));
+            directories.dedup();
             for directory in directories {
                 if !self.try_remove_empty_dir(&directory)? {
                     preserved_directories.push(directory);
@@ -4489,9 +5330,9 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         Ok(preserved_directories)
     }
 
-    fn cleanup_backup_files(&self, journal: &Journal) -> Result<(), InstallError> {
+    fn cleanup_transaction_backup_files(&self, transaction: &str) -> Result<(), InstallError> {
         let mut errors = Vec::new();
-        let transaction_dir = format!("{TRANSACTIONS_DIR}/{}", journal.transaction);
+        let transaction_dir = format!("{TRANSACTIONS_DIR}/{transaction}");
         let transaction_host = self.guest_path(&transaction_dir)?;
         if self.optional_metadata(&transaction_host)?.is_some() {
             self.validate_node(&transaction_host, Some(NodeKind::Directory))?;
@@ -4519,7 +5360,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 }
             }
         }
-        if let Err(error) = self.remove_empty_dir(&transaction_dir) {
+        if let Err(error) = self.try_remove_empty_dir(&transaction_dir) {
             errors.push(error.to_string());
         }
         if errors.is_empty() {
@@ -4527,6 +5368,10 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         } else {
             Err(InstallError::CleanupFailed(errors))
         }
+    }
+
+    fn cleanup_backup_files(&self, journal: &Journal) -> Result<(), InstallError> {
+        self.cleanup_transaction_backup_files(&journal.transaction)
     }
 
     fn remove_recorded_dirs(&self, directories: &[String]) -> Result<Vec<String>, InstallError> {
@@ -4669,63 +5514,143 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             };
         }
 
-        let mut captured = Vec::with_capacity(plan.operations.len());
-        let mut created_dirs = BTreeSet::new();
-        let mut collisions = Vec::new();
-        for operation in &plan.operations {
-            match self.validate_guest_components(&operation.path, None)? {
-                None => captured.push(CapturedPreimage::Absent {
-                    path: operation.path.clone(),
-                }),
-                Some(metadata) if metadata.kind == NodeKind::File => {
-                    collisions.push(operation.path.clone())
-                }
-                Some(metadata) => {
-                    return Err(InstallError::UnsafePath {
-                        path: self.guest_path(&operation.path)?,
-                        reason: format!(
-                            "destination collision is {:?}, not a regular file",
-                            metadata.kind
-                        ),
-                    });
+        enum ActionItem {
+            File {
+                path: String,
+                mode: u32,
+                digest: Sha256Digest,
+                content: Vec<u8>,
+            },
+            PatchedFile {
+                path: String,
+                mode: u32,
+                digest: Sha256Digest,
+                content: Vec<u8>,
+            },
+            Symlink {
+                path: String,
+                target: String,
+            },
+        }
+
+        impl ActionItem {
+            fn path(&self) -> &str {
+                match self {
+                    Self::File { path, .. }
+                    | Self::PatchedFile { path, .. }
+                    | Self::Symlink { path, .. } => path,
                 }
             }
-            created_dirs.extend(self.missing_parent_dirs(&operation.path)?);
         }
+
+        let mut actions = Vec::new();
+        for op in &plan.operations {
+            actions.push(ActionItem::File {
+                path: op.path.clone(),
+                mode: op.mode,
+                digest: op.digest,
+                content: op.content.clone(),
+            });
+        }
+
+        let mut snippet_map = BTreeMap::<String, Vec<&ManagedSnippetOperation>>::new();
+        for op in &plan.managed_snippet_operations {
+            snippet_map.entry(op.target.clone()).or_default().push(op);
+        }
+        for (target, snippet_ops) in snippet_map {
+            let (bytes, mode) = self.read_regular_file(&target)?;
+            let mut patched_str = std::str::from_utf8(&bytes)
+                .map_err(|_| {
+                    InstallError::InvalidPlan(format!(
+                        "managed snippet target {target} is not UTF-8 text"
+                    ))
+                })?
+                .to_string();
+
+            for op in snippet_ops {
+                if op.adapter == AdapterId::MkinitfsBusybox {
+                    patched_str = patch_initramfs_init(&patched_str).map_err(|error| {
+                        InstallError::InvalidPlan(format!(
+                            "managed snippet target {target} is incompatible: {error}"
+                        ))
+                    })?;
+                }
+            }
+            let patched_bytes = patched_str.into_bytes();
+            let patched_digest = sha256(&patched_bytes);
+            actions.push(ActionItem::PatchedFile {
+                path: target,
+                mode,
+                digest: patched_digest,
+                content: patched_bytes,
+            });
+        }
+
+        for op in &plan.activation_operations {
+            if op.scope == ActivationScope::RealRoot {
+                actions.push(ActionItem::Symlink {
+                    path: op.path.clone(),
+                    target: op.relative_target.clone(),
+                });
+            }
+        }
+
+        actions.sort_by(|left, right| left.path().cmp(right.path()));
+
+        let mut captured = Vec::with_capacity(actions.len());
+        let mut created_dirs = BTreeSet::new();
+        let mut collisions = Vec::new();
+
+        for action in &actions {
+            match action {
+                ActionItem::File { path, .. } => {
+                    match self.validate_guest_components(path, None)? {
+                        None => captured.push(CapturedPreimage::Absent { path: path.clone() }),
+                        Some(metadata) if metadata.kind == NodeKind::File => {
+                            collisions.push(path.clone())
+                        }
+                        Some(metadata) => {
+                            return Err(InstallError::UnsafePath {
+                                path: self.guest_path(path)?,
+                                reason: format!(
+                                    "destination collision is {:?}, not a regular file",
+                                    metadata.kind
+                                ),
+                            });
+                        }
+                    }
+                }
+                ActionItem::PatchedFile { path, .. } => {
+                    let preimage = self.capture_preimage(path)?;
+                    if !matches!(preimage, CapturedPreimage::File(_)) {
+                        return Err(InstallError::UnsafePath {
+                            path: self.guest_path(path)?,
+                            reason: "patched snippet target is not a regular file".into(),
+                        });
+                    }
+                    captured.push(preimage);
+                }
+                ActionItem::Symlink { path, .. } => {
+                    let preimage = self.capture_preimage(path)?;
+                    captured.push(preimage);
+                }
+            }
+            created_dirs.extend(self.missing_parent_dirs(action.path())?);
+        }
+
         if !collisions.is_empty() {
             return Err(InstallError::DestinationCollision(collisions));
         }
-        let captured_bytes = captured
-            .iter()
-            .filter_map(|preimage| match preimage {
-                CapturedPreimage::Absent { .. } => None,
-                CapturedPreimage::File(file) => Some(file.bytes.len() as u64),
-            })
-            .try_fold(0_u64, |total, size| total.checked_add(size))
-            .ok_or_else(|| InstallError::InvalidPlan("backup byte count overflowed".into()))?;
-        if captured_bytes > MAX_TRANSACTION_BYTES {
-            return Err(InstallError::FileTooLarge {
-                path: self.root.path.clone(),
-                size: captured_bytes,
-                limit: MAX_TRANSACTION_BYTES,
-            });
-        }
-        let created_dirs = created_dirs.into_iter().collect::<Vec<_>>();
+
         let transaction = Self::transaction_id();
         let state_created_dirs = self.plan_transaction_dirs()?;
-        let entries = captured
-            .iter()
-            .map(|preimage| JournalEntry {
-                path: preimage.path().to_string(),
-                preimage: Preimage::Absent,
-                progress: EntryProgress::Planned,
-            })
-            .collect();
+        let journal_entries = Self::build_journal_entries(&transaction, &captured, 0);
+        let created_dirs = created_dirs.into_iter().collect::<Vec<_>>();
         let mut journal = Journal {
             transaction: transaction.clone(),
             kind: TransactionKind::Install,
             phase: JournalPhase::Bootstrap,
-            entries,
+            entries: journal_entries,
             previous_manifest: Preimage::Absent,
             created_dirs: created_dirs.clone(),
             state_created_dirs: state_created_dirs.clone(),
@@ -4735,6 +5660,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let setup = (|| {
             self.checkpoint(FailurePoint::JournalDurable)?;
             self.create_transaction_dirs(&transaction, &state_created_dirs)?;
+            self.write_preimage_backups(&transaction, &captured, &journal.entries)?;
             journal.phase = JournalPhase::Ready;
             self.write_journal(&journal)
         })();
@@ -4744,49 +5670,95 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
 
         let result = (|| {
             self.create_dirs(&created_dirs, false)?;
-            for (index, operation) in plan.operations.iter().enumerate() {
+            for (index, action) in actions.iter().enumerate() {
                 self.checkpoint(FailurePoint::BeforePayload {
                     index,
-                    path: operation.path.clone(),
+                    path: action.path().to_string(),
                 })?;
-                if !matches!(
-                    self.capture_preimage(&operation.path)?,
-                    CapturedPreimage::Absent { .. }
-                ) {
-                    return Err(InstallError::DestinationCollision(vec![
-                        operation.path.clone(),
+                let preimage = &journal.entries[index].preimage;
+                let still_exact = match preimage {
+                    Preimage::Absent => self
+                        .validate_guest_components(action.path(), None)?
+                        .is_none(),
+                    Preimage::File { mode, digest, .. } => {
+                        let current = self.read_optional_file(action.path())?;
+                        current
+                            .as_ref()
+                            .is_some_and(|(bytes, m)| sha256(bytes) == *digest && *m == *mode)
+                    }
+                    Preimage::Symlink { target } => self
+                        .read_symlink(action.path())
+                        .is_ok_and(|actual| actual == *target),
+                };
+                if !still_exact {
+                    return Err(InstallError::ManagedFilesModified(vec![
+                        action.path().to_string(),
                     ]));
                 }
                 journal.entries[index].progress = EntryProgress::InProgress;
                 self.write_journal(&journal)?;
                 self.checkpoint(FailurePoint::PayloadIntentDurable {
                     index,
-                    path: operation.path.clone(),
+                    path: action.path().to_string(),
                 })?;
-                self.atomic_write(
-                    &operation.path,
-                    &operation.content,
-                    operation.mode,
-                    &transaction,
-                )?;
+                match action {
+                    ActionItem::File {
+                        path,
+                        mode,
+                        content,
+                        ..
+                    }
+                    | ActionItem::PatchedFile {
+                        path,
+                        mode,
+                        content,
+                        ..
+                    } => {
+                        self.atomic_write(path, content, *mode, &transaction)?;
+                    }
+                    ActionItem::Symlink { path, target } => {
+                        self.atomic_symlink(path, target, &transaction)?;
+                    }
+                }
                 journal.entries[index].progress = EntryProgress::Applied;
                 self.write_journal(&journal)?;
             }
             self.checkpoint(FailurePoint::BeforeManifestCommit)?;
+            let manifest_entries = actions
+                .iter()
+                .zip(&journal.entries)
+                .map(|(action, journal_entry)| match action {
+                    ActionItem::File {
+                        path, mode, digest, ..
+                    } => ManifestEntry::File {
+                        path: path.clone(),
+                        installed_mode: *mode,
+                        installed_digest: *digest,
+                        original: journal_entry.preimage.clone(),
+                    },
+                    ActionItem::PatchedFile {
+                        path, mode, digest, ..
+                    } => ManifestEntry::PatchedFile {
+                        path: path.clone(),
+                        installed_mode: *mode,
+                        installed_digest: *digest,
+                        original: journal_entry.preimage.clone(),
+                    },
+                    ActionItem::Symlink { path, target } => ManifestEntry::Symlink {
+                        path: path.clone(),
+                        installed_target: target.clone(),
+                        original: journal_entry.preimage.clone(),
+                    },
+                })
+                .collect();
+
             let manifest = Manifest {
                 transaction: transaction.clone(),
+                plan_version: PLAN_VERSION,
+                resource_set_version: RESOURCE_SET_VERSION,
+                inventory_state: ManifestInventoryState::Complete,
                 adapters: plan.selection.ids().to_vec(),
-                entries: plan
-                    .operations
-                    .iter()
-                    .zip(&journal.entries)
-                    .map(|(operation, journal_entry)| ManifestEntry {
-                        path: operation.path.clone(),
-                        installed_mode: operation.mode,
-                        installed_digest: operation.digest,
-                        original: journal_entry.preimage.clone(),
-                    })
-                    .collect(),
+                entries: manifest_entries,
                 created_dirs,
                 state_created_dirs,
             };
@@ -4801,8 +5773,6 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             return self.transaction_failed(&mut journal, error);
         }
 
-        // The manifest is the commit record. A cleanup failure is reported but
-        // must not roll a durably committed installation backward.
         self.remove_regular_file(JOURNAL_PATH)?;
         Ok(ApplyOutcome::Installed)
     }
@@ -4900,17 +5870,17 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let exact_entries = manifest
             .entries
             .iter()
-            .filter(|entry| exact_paths.contains(&entry.path))
+            .filter(|entry| exact_paths.contains(entry.path()))
             .cloned()
             .collect::<Vec<_>>();
         let captured = exact_entries
             .iter()
-            .map(|entry| self.capture_preimage(&entry.path))
+            .map(|entry| self.capture_preimage(entry.path()))
             .collect::<Result<Vec<_>, _>>()?;
         let captured_bytes = captured
             .iter()
             .filter_map(|preimage| match preimage {
-                CapturedPreimage::Absent { .. } => None,
+                CapturedPreimage::Absent { .. } | CapturedPreimage::Symlink { .. } => None,
                 CapturedPreimage::File(file) => Some(file.bytes.len() as u64),
             })
             .try_fold(0_u64, |total, size| total.checked_add(size))
@@ -4924,6 +5894,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         }
         let transaction = Self::transaction_id();
         let new_state_created_dirs = self.plan_transaction_dirs()?;
+        self.create_transaction_dirs(&transaction, &new_state_created_dirs)?;
         let state_created_dirs = manifest
             .state_created_dirs
             .iter()
@@ -4963,11 +5934,17 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                     index,
                     path: preimage.path().to_string(),
                 })?;
-                let stored = self
-                    .persist_preimages(&transaction, std::slice::from_ref(preimage), index)?
-                    .pop()
-                    .expect("one payload preimage");
-                journal.entries[index].preimage = stored.preimage;
+                let entries = Self::build_journal_entries(
+                    &transaction,
+                    std::slice::from_ref(preimage),
+                    index,
+                );
+                self.write_preimage_backups(
+                    &transaction,
+                    std::slice::from_ref(preimage),
+                    &entries,
+                )?;
+                journal.entries[index].preimage = entries[0].preimage.clone();
                 self.write_journal(&journal)?;
             }
             let manifest_index = journal.entries.len();
@@ -4975,11 +5952,10 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 index: manifest_index,
                 path: MANIFEST_PATH.into(),
             })?;
-            journal.previous_manifest = self
-                .persist_preimages(&transaction, &manifest_capture, manifest_index)?
-                .pop()
-                .expect("one manifest preimage")
-                .preimage;
+            let manifest_entries =
+                Self::build_journal_entries(&transaction, &manifest_capture, manifest_index);
+            self.write_preimage_backups(&transaction, &manifest_capture, &manifest_entries)?;
+            journal.previous_manifest = manifest_entries[0].preimage.clone();
             journal.phase = JournalPhase::Ready;
             self.write_journal(&journal)
         })();
@@ -4992,11 +5968,14 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         } else {
             Some(Manifest {
                 transaction: transaction.clone(),
+                plan_version: manifest.plan_version,
+                resource_set_version: manifest.resource_set_version,
+                inventory_state: ManifestInventoryState::Partial,
                 adapters: manifest.adapters.clone(),
                 entries: manifest
                     .entries
                     .iter()
-                    .filter(|entry| !exact_paths.contains(&entry.path))
+                    .filter(|entry| !exact_paths.contains(entry.path()))
                     .cloned()
                     .collect(),
                 created_dirs: manifest.created_dirs.clone(),
@@ -5007,22 +5986,49 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             for (index, entry) in exact_entries.iter().enumerate() {
                 self.checkpoint(FailurePoint::BeforePayload {
                     index,
-                    path: entry.path.clone(),
+                    path: entry.path().to_string(),
                 })?;
-                let current = self.read_optional_file(&entry.path)?;
-                let still_exact = current.as_ref().is_some_and(|(bytes, mode)| {
-                    sha256(bytes) == entry.installed_digest && *mode == entry.installed_mode
-                });
+                let still_exact = match entry {
+                    ManifestEntry::File {
+                        path,
+                        installed_digest,
+                        installed_mode,
+                        ..
+                    }
+                    | ManifestEntry::PatchedFile {
+                        path,
+                        installed_digest,
+                        installed_mode,
+                        ..
+                    } => {
+                        let current = self.read_optional_file(path)?;
+                        current.as_ref().is_some_and(|(bytes, mode)| {
+                            sha256(bytes) == *installed_digest && *mode == *installed_mode
+                        })
+                    }
+                    ManifestEntry::Symlink {
+                        path,
+                        installed_target,
+                        ..
+                    } => match self.validate_guest_components(path, None)? {
+                        Some(metadata) if metadata.kind == NodeKind::Symlink => self
+                            .read_symlink(path)
+                            .is_ok_and(|target| target == *installed_target),
+                        _ => false,
+                    },
+                };
                 if !still_exact {
-                    return Err(InstallError::ManagedFilesModified(vec![entry.path.clone()]));
+                    return Err(InstallError::ManagedFilesModified(vec![
+                        entry.path().to_string(),
+                    ]));
                 }
                 journal.entries[index].progress = EntryProgress::InProgress;
                 self.write_journal(&journal)?;
                 self.checkpoint(FailurePoint::PayloadIntentDurable {
                     index,
-                    path: entry.path.clone(),
+                    path: entry.path().to_string(),
                 })?;
-                self.restore_preimage(&entry.path, &entry.original, &transaction)?;
+                self.restore_preimage(entry.path(), entry.original(), &transaction)?;
                 journal.entries[index].progress = EntryProgress::Applied;
                 self.write_journal(&journal)?;
             }
@@ -5046,9 +6052,10 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let mut removed = Vec::new();
         let mut restored = Vec::new();
         for entry in exact_entries {
-            match entry.original {
-                Preimage::Absent => removed.push(entry.path),
-                Preimage::File { .. } => restored.push(entry.path),
+            let path = entry.path().to_string();
+            match entry.original() {
+                Preimage::Absent => removed.push(path),
+                Preimage::File { .. } | Preimage::Symlink { .. } => restored.push(path),
             }
         }
         Ok(UninstallReport {
@@ -5129,6 +6136,12 @@ fn preimage_fields(preimage: &Preimage) -> [String; 4] {
             digest.to_string(),
             encode_hex(backup.as_bytes()),
         ],
+        Preimage::Symlink { target } => [
+            "symlink".into(),
+            "-".into(),
+            "-".into(),
+            encode_hex(target.as_bytes()),
+        ],
     }
 }
 
@@ -5160,12 +6173,241 @@ fn parse_preimage(
                 backup,
             })
         }
+        "symlink" if fields[1] == "-" && fields[2] == "-" => {
+            let target = decode_text(fields[3])?;
+            Ok(Preimage::Symlink { target })
+        }
         _ => Err(format!("{context} has an invalid preimage kind")),
     }
 }
 
+#[derive(Debug, Clone)]
+enum ExpectedCurrentManifestEntry {
+    File {
+        path: &'static str,
+        mode: u32,
+        digest: Option<Sha256Digest>,
+    },
+    PatchedFile {
+        path: &'static str,
+        mode: u32,
+    },
+    Symlink {
+        path: &'static str,
+        target: &'static str,
+    },
+}
+
+impl ExpectedCurrentManifestEntry {
+    fn path(&self) -> &'static str {
+        match self {
+            Self::File { path, .. }
+            | Self::PatchedFile { path, .. }
+            | Self::Symlink { path, .. } => path,
+        }
+    }
+}
+
+fn expected_current_manifest_inventory(
+    adapters: &[AdapterId],
+) -> Result<Vec<ExpectedCurrentManifestEntry>, InstallError> {
+    let mut expected = vec![ExpectedCurrentManifestEntry::File {
+        path: BOOTART_BINARY_PATH,
+        mode: 0o755,
+        digest: None,
+    }];
+    for &adapter in adapters {
+        let meta = adapter_metadata(adapter);
+        for &template_id in meta.resources {
+            let resource = template_resource(template_id);
+            match resource.materialization {
+                TemplateMaterialization::File { path, mode }
+                | TemplateMaterialization::OpenRcService { path, mode, .. } => {
+                    expected.push(ExpectedCurrentManifestEntry::File {
+                        path,
+                        mode,
+                        digest: Some(sha256(resource.contents.as_bytes())),
+                    });
+                }
+                TemplateMaterialization::ManagedSnippet { target, .. } => {
+                    if !expected.iter().any(|item| item.path() == target) {
+                        expected.push(ExpectedCurrentManifestEntry::PatchedFile {
+                            path: target,
+                            mode: 0o755,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for spec in ACTIVATION_SPECS {
+        if adapters.contains(&spec.adapter) && spec.scope == ActivationScope::RealRoot {
+            expected.push(ExpectedCurrentManifestEntry::Symlink {
+                path: spec.path,
+                target: spec.relative_target,
+            });
+        }
+    }
+    expected.sort_by(|left, right| left.path().cmp(right.path()));
+    if expected
+        .windows(2)
+        .any(|pair| pair[0].path() == pair[1].path())
+    {
+        return Err(InstallError::CorruptManifest(
+            "selected adapters define duplicate current payload destinations".into(),
+        ));
+    }
+    Ok(expected)
+}
+
+fn validate_current_manifest_entry(
+    entry: &ManifestEntry,
+    expected: &ExpectedCurrentManifestEntry,
+    index: usize,
+) -> Result<(), InstallError> {
+    match (entry, expected) {
+        (
+            ManifestEntry::File {
+                path,
+                installed_mode,
+                installed_digest,
+                ..
+            },
+            ExpectedCurrentManifestEntry::File {
+                path: exp_path,
+                mode: exp_mode,
+                digest: exp_digest,
+            },
+        ) => {
+            if path != exp_path || installed_mode != exp_mode {
+                return Err(InstallError::CorruptManifest(format!(
+                    "current manifest inventory entry {} has a foreign, omitted, or noncanonical path/mode",
+                    index + 1
+                )));
+            }
+            if let Some(digest) = exp_digest
+                && installed_digest != digest
+            {
+                return Err(InstallError::CorruptManifest(format!(
+                    "current manifest inventory entry {} differs from its embedded resource digest",
+                    index + 1
+                )));
+            }
+        }
+        (
+            ManifestEntry::PatchedFile {
+                path,
+                installed_mode,
+                ..
+            },
+            ExpectedCurrentManifestEntry::PatchedFile {
+                path: exp_path,
+                mode: exp_mode,
+            },
+        ) => {
+            if path != exp_path || installed_mode != exp_mode {
+                return Err(InstallError::CorruptManifest(format!(
+                    "current manifest inventory entry {} has a foreign, omitted, or noncanonical path/mode",
+                    index + 1
+                )));
+            }
+        }
+        (
+            ManifestEntry::Symlink {
+                path,
+                installed_target,
+                ..
+            },
+            ExpectedCurrentManifestEntry::Symlink {
+                path: exp_path,
+                target: exp_target,
+            },
+        ) => {
+            if path != exp_path || installed_target != exp_target {
+                return Err(InstallError::CorruptManifest(format!(
+                    "current manifest inventory entry {} has a foreign, omitted, or noncanonical symlink path/target",
+                    index + 1
+                )));
+            }
+        }
+        _ => {
+            return Err(InstallError::CorruptManifest(format!(
+                "current manifest inventory entry {} type mismatch",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_complete_current_manifest_inventory(
+    adapters: &[AdapterId],
+    entries: &[ManifestEntry],
+) -> Result<(), InstallError> {
+    let expected = expected_current_manifest_inventory(adapters)?;
+
+    let binary_entries = entries
+        .iter()
+        .filter(|entry| entry.path() == BOOTART_BINARY_PATH)
+        .collect::<Vec<_>>();
+    if binary_entries.len() != 1 {
+        return Err(InstallError::CorruptManifest(
+            "current manifest must contain exactly one mode-0755 /usr/bin/bootart entry".into(),
+        ));
+    }
+    if entries.len() != expected.len() {
+        return Err(InstallError::CorruptManifest(
+            "current manifest does not contain the complete selected-adapter file inventory".into(),
+        ));
+    }
+    for (index, (entry, expected)) in entries.iter().zip(&expected).enumerate() {
+        validate_current_manifest_entry(entry, expected, index)?;
+    }
+    Ok(())
+}
+
+fn validate_partial_current_manifest_inventory(
+    adapters: &[AdapterId],
+    entries: &[ManifestEntry],
+) -> Result<(), InstallError> {
+    let expected = expected_current_manifest_inventory(adapters)?;
+    if entries.len() >= expected.len() {
+        return Err(InstallError::CorruptManifest(
+            "current partial manifest must be a strict subset of the selected-adapter file inventory"
+                .into(),
+        ));
+    }
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].path() >= pair[1].path())
+    {
+        return Err(InstallError::CorruptManifest(
+            "current partial manifest file inventory is not in canonical path order".into(),
+        ));
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let expected_index = expected
+            .binary_search_by(|candidate| candidate.path().cmp(entry.path()))
+            .map_err(|_| {
+                InstallError::CorruptManifest(format!(
+                    "current partial manifest inventory entry {} is foreign to the selected adapters",
+                    index + 1
+                ))
+            })?;
+        validate_current_manifest_entry(entry, &expected[expected_index], index)?;
+    }
+    Ok(())
+}
+
 fn serialize_manifest(manifest: &Manifest) -> Vec<u8> {
-    let mut output = format!("{MANIFEST_HEADER}\ntransaction\t{}\n", manifest.transaction);
+    let inventory_state = match manifest.inventory_state {
+        ManifestInventoryState::Complete => "complete",
+        ManifestInventoryState::Partial => "partial",
+    };
+    let mut output = format!(
+        "{MANIFEST_HEADER}\ntransaction\t{}\nplan-version\t{}\nresource-set-version\t{}\ninventory-state\t{inventory_state}\n",
+        manifest.transaction, manifest.plan_version, manifest.resource_set_version,
+    );
     for id in &manifest.adapters {
         output.push_str("adapter\t");
         output.push_str(adapter_metadata(*id).name);
@@ -5182,19 +6424,82 @@ fn serialize_manifest(manifest: &Manifest) -> Vec<u8> {
         output.push('\n');
     }
     for entry in &manifest.entries {
-        let preimage = preimage_fields(&entry.original);
-        output.push_str(&format!(
-            "file\t{}\t{:o}\t{}\t{}\t{}\t{}\t{}\n",
-            encode_hex(entry.path.as_bytes()),
-            entry.installed_mode,
-            entry.installed_digest,
-            preimage[0],
-            preimage[1],
-            preimage[2],
-            preimage[3]
-        ));
+        let preimage = preimage_fields(entry.original());
+        match entry {
+            ManifestEntry::File {
+                path,
+                installed_mode,
+                installed_digest,
+                ..
+            } => {
+                output.push_str(&format!(
+                    "file\t{}\t{:o}\t{}\t{}\t{}\t{}\t{}\n",
+                    encode_hex(path.as_bytes()),
+                    installed_mode,
+                    installed_digest,
+                    preimage[0],
+                    preimage[1],
+                    preimage[2],
+                    preimage[3]
+                ));
+            }
+            ManifestEntry::PatchedFile {
+                path,
+                installed_mode,
+                installed_digest,
+                ..
+            } => {
+                output.push_str(&format!(
+                    "patched-file\t{}\t{:o}\t{}\t{}\t{}\t{}\t{}\n",
+                    encode_hex(path.as_bytes()),
+                    installed_mode,
+                    installed_digest,
+                    preimage[0],
+                    preimage[1],
+                    preimage[2],
+                    preimage[3]
+                ));
+            }
+            ManifestEntry::Symlink {
+                path,
+                installed_target,
+                ..
+            } => {
+                output.push_str(&format!(
+                    "symlink\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    encode_hex(path.as_bytes()),
+                    encode_hex(installed_target.as_bytes()),
+                    preimage[0],
+                    preimage[1],
+                    preimage[2],
+                    preimage[3]
+                ));
+            }
+        }
     }
     output.into_bytes()
+}
+
+fn parse_manifest_version_record(
+    line: Option<&str>,
+    name: &'static str,
+) -> Result<u16, InstallError> {
+    let line = line.ok_or_else(|| {
+        InstallError::CorruptManifest(format!("missing required {name} provenance"))
+    })?;
+    let prefix = format!("{name}\t");
+    let value = line.strip_prefix(&prefix).ok_or_else(|| {
+        InstallError::CorruptManifest(format!("expected canonical {name} provenance record"))
+    })?;
+    let version = value
+        .parse::<u16>()
+        .map_err(|_| InstallError::CorruptManifest(format!("invalid {name} provenance version")))?;
+    if version.to_string() != value {
+        return Err(InstallError::CorruptManifest(format!(
+            "non-canonical {name} provenance version"
+        )));
+    }
+    Ok(version)
 }
 
 fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
@@ -5214,6 +6519,17 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
         .filter(|value| transaction_is_safe(value))
         .ok_or_else(|| InstallError::CorruptManifest("invalid transaction".into()))?
         .to_string();
+    let plan_version = parse_manifest_version_record(lines.next(), "plan-version")?;
+    let resource_set_version = parse_manifest_version_record(lines.next(), "resource-set-version")?;
+    let inventory_state = match lines.next() {
+        Some("inventory-state\tcomplete") => ManifestInventoryState::Complete,
+        Some("inventory-state\tpartial") => ManifestInventoryState::Partial,
+        _ => {
+            return Err(InstallError::CorruptManifest(
+                "missing or noncanonical inventory-state record".into(),
+            ));
+        }
+    };
 
     let mut adapters = Vec::new();
     let mut entries = Vec::new();
@@ -5274,9 +6590,6 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
                 }
                 let installed_mode = u32::from_str_radix(mode, 8)
                     .map_err(|_| InstallError::CorruptManifest("invalid file mode".into()))?;
-                if installed_mode > 0o7777 || installed_mode & 0o022 != 0 {
-                    return Err(InstallError::CorruptManifest("unsafe file mode".into()));
-                }
                 let installed_digest = Sha256Digest::from_hex(digest).ok_or_else(|| {
                     InstallError::CorruptManifest("invalid installed digest".into())
                 })?;
@@ -5291,10 +6604,87 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
                     "file",
                 )
                 .map_err(InstallError::CorruptManifest)?;
-                entries.push(ManifestEntry {
+                entries.push(ManifestEntry::File {
                     path,
                     installed_mode,
                     installed_digest,
+                    original,
+                });
+            }
+            [
+                "patched-file",
+                encoded_path,
+                mode,
+                digest,
+                preimage_kind,
+                preimage_mode,
+                preimage_digest,
+                preimage_backup,
+            ] => {
+                let path = decode_text(encoded_path).map_err(InstallError::CorruptManifest)?;
+                validate_payload_path(&path)
+                    .map_err(|error| InstallError::CorruptManifest(error.to_string()))?;
+                if !seen_paths.insert(path.clone()) {
+                    return Err(InstallError::CorruptManifest(
+                        "duplicate managed path".into(),
+                    ));
+                }
+                let installed_mode = u32::from_str_radix(mode, 8)
+                    .map_err(|_| InstallError::CorruptManifest("invalid file mode".into()))?;
+                let installed_digest = Sha256Digest::from_hex(digest).ok_or_else(|| {
+                    InstallError::CorruptManifest("invalid installed digest".into())
+                })?;
+                let original = parse_preimage(
+                    &[
+                        preimage_kind,
+                        preimage_mode,
+                        preimage_digest,
+                        preimage_backup,
+                    ],
+                    None,
+                    "patched-file",
+                )
+                .map_err(InstallError::CorruptManifest)?;
+                entries.push(ManifestEntry::PatchedFile {
+                    path,
+                    installed_mode,
+                    installed_digest,
+                    original,
+                });
+            }
+            [
+                "symlink",
+                encoded_path,
+                encoded_target,
+                preimage_kind,
+                preimage_mode,
+                preimage_digest,
+                preimage_backup,
+            ] => {
+                let path = decode_text(encoded_path).map_err(InstallError::CorruptManifest)?;
+                let installed_target =
+                    decode_text(encoded_target).map_err(InstallError::CorruptManifest)?;
+                validate_payload_path(&path)
+                    .map_err(|error| InstallError::CorruptManifest(error.to_string()))?;
+                if !seen_paths.insert(path.clone()) {
+                    return Err(InstallError::CorruptManifest(
+                        "duplicate managed path".into(),
+                    ));
+                }
+                let original = parse_preimage(
+                    &[
+                        preimage_kind,
+                        preimage_mode,
+                        preimage_digest,
+                        preimage_backup,
+                    ],
+                    None,
+                    "symlink",
+                )
+                .map_err(InstallError::CorruptManifest)?;
+                entries.push(ManifestEntry::Symlink {
+                    path,
+                    installed_target,
                     original,
                 });
             }
@@ -5318,8 +6708,21 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
             "manifest contains an incompatible adapter pair".into(),
         ));
     }
+    if plan_version == PLAN_VERSION && resource_set_version == RESOURCE_SET_VERSION {
+        match inventory_state {
+            ManifestInventoryState::Complete => {
+                validate_complete_current_manifest_inventory(&adapters, &entries)?
+            }
+            ManifestInventoryState::Partial => {
+                validate_partial_current_manifest_inventory(&adapters, &entries)?
+            }
+        }
+    }
     Ok(Manifest {
         transaction,
+        plan_version,
+        resource_set_version,
+        inventory_state,
         adapters,
         entries,
         created_dirs,

@@ -84,9 +84,12 @@ for ((i = 1; i < ${#argv[@]}; )); do
     vm_reject_newline "$option" 'QEMU option'
     [[ "$option" != *'/dev/'* ]] || vm_die "raw host device path denied: $option"
     case "$option" in
-        -nodefaults|-no-user-config|-no-reboot)
+        -nodefaults|-no-user-config)
             mark_seen "$option"
             ((i += 1))
+            ;;
+        -no-reboot)
+            vm_die '-no-reboot is denied because exact lanes require a provisioning boot followed by a rebuilt-initramfs boot'
             ;;
         -machine|-cpu|-smp|-m|-display|-serial|-monitor|-qmp|-nic|-sandbox|-boot|-drive)
             ((i + 1 < ${#argv[@]})) || vm_die "$option has no value"
@@ -132,7 +135,7 @@ for ((i = 1; i < ${#argv[@]}; )); do
 done
 
 required=(
-    -nodefaults -no-user-config -no-reboot -machine -cpu -smp -m -display
+    -nodefaults -no-user-config -machine -cpu -smp -m -display
     -serial -monitor -qmp -nic -sandbox -boot
 )
 for option in "${required[@]}"; do

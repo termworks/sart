@@ -92,6 +92,7 @@ install() {
 pub const CLASSIC_START_HOOK: &str = r#"#!/bin/sh
 
 if [ ! -x /usr/bin/bootart ] || \
+   ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1 || \
    [ ! -f /lib/dracut-crypt-lib.sh ] || \
    [ -L /lib/dracut-crypt-lib.sh ] || \
    ! grep -Fq '# bootart:native-askpass-v1' \
@@ -155,6 +156,11 @@ return 0
 /// mismatch leaves the original library untouched, and the later start hook
 /// refuses to acquire a VT rather than racing stock TTY unlock.
 pub const CLASSIC_ASKPASS_PATCH_HOOK: &str = r#"#!/bin/sh
+
+if [ ! -x /usr/bin/bootart ] || \
+   ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1; then
+    return 0
+fi
 
 bootart_crypt_lib=/lib/dracut-crypt-lib.sh
 bootart_crypt_ask="$(command -v cryptroot-ask 2>/dev/null)"
@@ -295,8 +301,14 @@ ask_for_password() {
     {
         flock -s 9
 
-        if [ -x /usr/bin/bootart ] && \
-           /usr/bin/bootart native-ready >/dev/null 2>&1 && \
+        # A disabled splash or unreadable kernel command line must use the
+        # already-reviewed stock console path without probing, starting, or
+        # stopping a Bootart daemon.
+        if [ ! -x /usr/bin/bootart ] || \
+           ! /usr/bin/bootart early-boot-enabled >/dev/null 2>&1; then
+            bootart_console_fallback=yes
+            bootart_native_state=console
+        elif /usr/bin/bootart native-ready >/dev/null 2>&1 && \
            [ -n "$ply_cmd" ] && [ -n "$ply_prompt" ]; then
             i=1
             while [ "$i" -le "$ply_tries" ]; do
@@ -502,6 +514,51 @@ mod tests {
     }
 
     #[test]
+    fn runtime_disable_predicate_precedes_start_patch_and_native_interception() {
+        let start_predicate = CLASSIC_START_HOOK
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("classic start predicate");
+        let start_guard = CLASSIC_START_HOOK
+            .find("bootart_start_guard=")
+            .expect("classic start guard");
+        let daemon = CLASSIC_START_HOOK
+            .find("/usr/bin/bootart daemon")
+            .expect("classic daemon start");
+        assert!(start_predicate < start_guard && start_guard < daemon);
+
+        let patch_predicate = CLASSIC_ASKPASS_PATCH_HOOK
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("classic patch predicate");
+        let patch_target = CLASSIC_ASKPASS_PATCH_HOOK
+            .find("bootart_crypt_lib=")
+            .expect("classic patch target");
+        let patch_write = CLASSIC_ASKPASS_PATCH_HOOK
+            .find("cat \"$bootart_crypt_lib\"")
+            .expect("classic patch write");
+        assert!(patch_predicate < patch_target && patch_target < patch_write);
+
+        let override_predicate = CLASSIC_ASKPASS_OVERRIDE
+            .find("/usr/bin/bootart early-boot-enabled")
+            .expect("classic askpass predicate");
+        let direct_console = CLASSIC_ASKPASS_OVERRIDE[override_predicate..]
+            .find("bootart_native_state=console")
+            .expect("disabled stock-console branch")
+            + override_predicate;
+        let readiness = CLASSIC_ASKPASS_OVERRIDE
+            .find("/usr/bin/bootart native-ready")
+            .expect("native readiness probe");
+        let native_client = CLASSIC_ASKPASS_OVERRIDE
+            .find("/usr/bin/bootart native-askpass")
+            .expect("native askpass client");
+        assert!(override_predicate < direct_console && direct_console < readiness);
+        assert!(readiness < native_client);
+
+        assert!(!CLASSIC_PRE_PIVOT_HOOK.contains("early-boot-enabled"));
+        assert!(!SYSTEMD_MODULE_SETUP.contains("early-boot-enabled"));
+        assert!(!CLASSIC_MODULE_SETUP.contains("early-boot-enabled"));
+    }
+
+    #[test]
     fn classic_adapter_intercepts_only_the_expected_current_dracut_contract() {
         assert!(CLASSIC_MODULE_SETUP.contains("bootart-askpass-patch.sh"));
         assert!(CLASSIC_MODULE_SETUP.contains("bootart-askpass-lib.sh"));
@@ -547,7 +604,7 @@ mod tests {
             CLASSIC_ASKPASS_OVERRIDE
                 .matches("bootart_console_fallback=yes")
                 .count(),
-            2
+            3
         );
         assert!(
             CLASSIC_ASKPASS_OVERRIDE

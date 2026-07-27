@@ -1,3 +1,4 @@
+use crate::cmdline::PROC_CMDLINE;
 use crate::display::text_vt::TextVtConfig;
 use crate::splash::engine::{MAX_ANIMATION_CYCLE, MAX_FRAMES_PER_SECOND, MIN_ANIMATION_CYCLE};
 use crate::splash::runtime::DEFAULT_RUNTIME_DIR;
@@ -13,6 +14,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Internal early-boot splash eligibility predicate
+    #[command(name = "early-boot-enabled", hide = true)]
+    EarlyBootEnabled(EarlyBootEnabledArgs),
     /// Run the foreground splash daemon
     Daemon(DaemonArgs),
     /// Show the splash view
@@ -45,6 +49,12 @@ pub enum Command {
     Ping(RuntimeArgs),
     /// Inspect or request guarded installation operations for an alternate root
     Install(InstallArgs),
+    /// Read-only inspection of host root (/) install plan
+    HostPlan(HostPlanArgs),
+    /// Request confirmed host root (/) installation; requires --confirm-host-apply
+    HostApply(HostApplyArgs),
+    /// Request confirmed host root (/) uninstallation; requires --confirm-host-uninstall
+    HostUninstall(HostUninstallArgs),
     /// Internal same-ELF native broker capability probe
     #[command(name = "native-ready", hide = true)]
     NativeReady(RuntimeArgs),
@@ -59,6 +69,13 @@ pub enum Command {
     RenderFinal(RenderFinalArgs),
     /// Validate ASCII logo file
     Validate(ValidateArgs),
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct EarlyBootEnabledArgs {
+    /// Kernel command-line file; override only in an isolated test
+    #[arg(long, hide = true, default_value = PROC_CMDLINE)]
+    pub cmdline: PathBuf,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -229,6 +246,27 @@ pub enum InstallAction {
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct HostPlanArgs {
+    /// Render the host install plan in stable machine-readable JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct HostApplyArgs {
+    /// Explicit human confirmation flag to apply changes to host root (/)
+    #[arg(long, default_value_t = false)]
+    pub confirm_host_apply: bool,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct HostUninstallArgs {
+    /// Explicit human confirmation flag to uninstall bootart from host root (/)
+    #[arg(long, default_value_t = false)]
+    pub confirm_host_uninstall: bool,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct InstallSelectionArgs {
     /// Existing, root-owned disposable guest root; the running host root is forbidden
     #[arg(long)]
@@ -239,9 +277,6 @@ pub struct InstallSelectionArgs {
     /// Exact real-root supervisor adapter to preview
     #[arg(long, value_enum)]
     pub real_root_adapter: RealRootAdapterSelection,
-    /// Static bootart ELF that would be copied; defaults to this executable
-    #[arg(long, default_value = "/proc/self/exe")]
-    pub bootart_elf: PathBuf,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -582,6 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn hidden_early_boot_predicate_has_only_a_testable_cmdline_input() {
+        let default = Cli::parse_from(["bootart", "early-boot-enabled"]);
+        assert!(matches!(
+            default.command,
+            Some(Command::EarlyBootEnabled(EarlyBootEnabledArgs { cmdline }))
+                if cmdline.as_path() == std::path::Path::new(PROC_CMDLINE)
+        ));
+
+        let overridden = Cli::parse_from([
+            "bootart",
+            "early-boot-enabled",
+            "--cmdline",
+            "/tmp/bootart-test-cmdline",
+        ]);
+        assert!(matches!(
+            overridden.command,
+            Some(Command::EarlyBootEnabled(EarlyBootEnabledArgs { cmdline }))
+                if cmdline.as_path() == std::path::Path::new("/tmp/bootart-test-cmdline")
+        ));
+    }
+
+    #[test]
     fn installer_surface_requires_an_exact_pair_and_confirmation() {
         let plan = Cli::parse_from([
             "bootart",
@@ -613,6 +670,24 @@ mod tests {
             Cli::try_parse_from([
                 "bootart",
                 "install",
+                "plan",
+                "--root",
+                "/guest",
+                "--initramfs-adapter",
+                "dracut-systemd",
+                "--real-root-adapter",
+                "systemd",
+                "--bootart-elf",
+                "/tmp/substitute",
+            ])
+            .is_err(),
+            "production planning must not accept an alternate executable payload"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "bootart",
+                "install",
                 "apply",
                 "--root",
                 "/guest",
@@ -635,6 +710,32 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn host_commands_parse_explicit_flags() {
+        let plan = Cli::try_parse_from(["bootart", "host-plan", "--json"]).unwrap();
+        assert!(matches!(
+            plan.command,
+            Some(Command::HostPlan(HostPlanArgs { json: true }))
+        ));
+
+        let apply = Cli::try_parse_from(["bootart", "host-apply", "--confirm-host-apply"]).unwrap();
+        assert!(matches!(
+            apply.command,
+            Some(Command::HostApply(HostApplyArgs {
+                confirm_host_apply: true
+            }))
+        ));
+
+        let uninstall =
+            Cli::try_parse_from(["bootart", "host-uninstall", "--confirm-host-uninstall"]).unwrap();
+        assert!(matches!(
+            uninstall.command,
+            Some(Command::HostUninstall(HostUninstallArgs {
+                confirm_host_uninstall: true
+            }))
+        ));
     }
 
     #[test]

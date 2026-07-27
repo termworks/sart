@@ -17,4 +17,10 @@ ulimit -c 0
 # builtin's platform-dependent block units: the lock value is a hard byte
 # ceiling, including failure artifacts retained for diagnosis.
 prlimit_executable="$(vm_resolve_prlimit)"
-exec "$prlimit_executable" --fsize="$maximum:$maximum" -- "$@"
+
+# Running `prlimit -- COMMAND` leaves util-linux prlimit as the background PID
+# on current util-linux releases and places COMMAND in a child. VM ownership
+# evidence must instead bind the PID returned by `$!` directly to QEMU. Lower
+# this wrapper shell's own limit, then replace it with the requested command.
+"$prlimit_executable" --pid "$$" --fsize="$maximum:$maximum"
+exec "$@"
