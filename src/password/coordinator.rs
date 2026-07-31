@@ -245,11 +245,14 @@ impl SystemdPromptCoordinator {
             .input
             .finish_with(|secret| reply.send_success(&request, secret))
             .map_err(|_| CoordinatorFailure::Agent)?;
-        let events = self
-            .queue
-            .complete_active(CancellationReason::Answered)
-            .map_err(|_| CoordinatorFailure::Agent)?;
-        self.apply_events(state, events)
+        // A systemd requester keeps the same ask.* identity and reply socket
+        // alive while cryptsetup rejects a wrong passphrase and asks again.
+        // Sending one answer therefore clears only this input attempt; the
+        // prompt stays active and can deliver another datagram. The request
+        // file's deletion (normally after a correct answer) is the
+        // authenticated completion signal that retires the prompt.
+        debug_assert!(state.view().prompt().is_some());
+        Ok(())
     }
 
     fn cancel_by_user(&mut self, state: &mut SplashState) -> Result<(), CoordinatorFailure> {
@@ -540,7 +543,8 @@ mod tests {
 
         assert_eq!(harness.replies.borrow().successes, [13]);
         assert_eq!(harness.replies.borrow().cancels, 0);
-        assert!(matches!(harness.state.view(), View::Splash));
+        assert!(matches!(harness.state.view(), View::Prompt { .. }));
+        assert_eq!(harness.coordinator.feedback().unwrap().character_count(), 0);
         let state = state_json(&harness.state);
         assert!(!state.contains("correct"));
         assert!(!format!("{:?}", harness.state).contains("correct"));
@@ -598,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_advances_without_reusing_answered_request() {
+    fn request_remains_promptable_for_retry_until_its_identity_disappears() {
         let mut harness = Harness::new(vec![request("ask.b", 11, 0), request("ask.a", 10, 0)]);
         harness.activate();
         assert_eq!(
@@ -608,10 +612,20 @@ mod tests {
         harness.input(b"one\n");
         assert_eq!(
             harness.state.view().prompt().unwrap().requester_pid(),
+            Some(10)
+        );
+        assert_eq!(harness.replies.borrow().successes, [3]);
+
+        harness.source.borrow_mut().remove(1);
+        harness.coordinator.initial_scan = true;
+        harness.coordinator.poll(&mut harness.state);
+        assert_eq!(
+            harness.state.view().prompt().unwrap().requester_pid(),
             Some(11)
         );
         harness.input(b"two\n");
         assert_eq!(harness.replies.borrow().successes, [3, 3]);
+        assert!(matches!(harness.state.view(), View::Prompt { .. }));
     }
 
     #[test]

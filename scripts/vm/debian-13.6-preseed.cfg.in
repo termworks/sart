@@ -1,0 +1,105 @@
+### TEST INFRASTRUCTURE ONLY: unattended Debian installer input for disposable QEMU.
+d-i debian-installer/locale string en_US.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+d-i console-setup/ask_detect boolean false
+
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string bootart-vm
+d-i netcfg/get_domain string local
+d-i hw-detect/load_firmware boolean true
+
+d-i mirror/country string manual
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+d-i mirror/suite string trixie
+d-i apt-setup/cdrom/set-first boolean false
+d-i apt-setup/disable-cdrom-entries boolean true
+d-i apt-setup/use_mirror boolean true
+d-i apt-setup/services-select multiselect security, updates
+
+d-i passwd/root-login boolean false
+d-i passwd/user-fullname string Bootart VM
+d-i passwd/username string bootart
+d-i passwd/user-password password ubuntu
+d-i passwd/user-password-again password ubuntu
+d-i passwd/user-default-groups string audio cdrom video sudo
+d-i user-setup/allow-password-weak boolean true
+
+d-i clock-setup/utc boolean true
+d-i time/zone string UTC
+d-i clock-setup/ntp boolean false
+
+d-i partman-auto/disk string /dev/vda
+d-i partman-auto/method string crypto
+d-i partman-auto-lvm/guided_size string max
+d-i partman-auto-lvm/new_vg_name string bootart-vg
+d-i partman-crypto/passphrase password __BOOTART_VM_LUKS_PASSPHRASE__
+d-i partman-crypto/passphrase-again password __BOOTART_VM_LUKS_PASSPHRASE__
+d-i partman-crypto/weak_passphrase boolean true
+d-i partman-auto-crypto/erase_disks boolean false
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-auto/expert_recipe string                         \
+      bootart ::                                             \
+              768 788 1024 free                              \
+                      $primary{ }                             \
+                      $iflabel{ msdos gpt }                   \
+                      $reusemethod{ }                         \
+                      method{ efi }                           \
+                      format{ }                               \
+              .                                              \
+              4096 4116 4096 ext4                            \
+                      $defaultignore{ }                       \
+                      method{ format }                        \
+                      format{ }                               \
+                      use_filesystem{ }                       \
+                      filesystem{ ext4 }                      \
+                      mountpoint{ /boot }                     \
+              .                                              \
+              16384 20000 -1 ext4                            \
+                      $lvmok{ }                               \
+                      method{ format }                        \
+                      format{ }                               \
+                      use_filesystem{ }                       \
+                      filesystem{ ext4 }                      \
+                      mountpoint{ / }                         \
+              .                                              \
+              500 550 100% linux-swap                        \
+                      $lvmok{ }                               \
+                      $reusemethod{ }                         \
+                      method{ swap }                          \
+                      format{ }                               \
+              .
+d-i partman-auto/choose_recipe select bootart
+d-i partman/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string sudo cryptsetup-initramfs busybox
+d-i pkgsel/upgrade select none
+popularity-contest popularity-contest/participate boolean false
+
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean false
+d-i grub-installer/force-efi-extra-removable boolean true
+
+d-i preseed/late_command string \
+    mkdir -p /target/var/cache/bootart-kernel-update; \
+    cp /kernel-packages/SHA256SUMS /kernel-packages/*.deb /target/var/cache/bootart-kernel-update/; \
+    in-target /bin/sh -c 'cd /var/cache/bootart-kernel-update && sha256sum -c SHA256SUMS'; \
+    in-target chmod 0400 /var/cache/bootart-kernel-update/SHA256SUMS /var/cache/bootart-kernel-update/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb; \
+    in-target /bin/sh -c 'printf "%s\n" "GRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=tty0\"" > /etc/default/grub.d/99-bootart-vm.cfg'; \
+    in-target update-initramfs -u -k all; \
+    in-target update-grub; \
+    in-target systemctl enable serial-getty@ttyS0.service; \
+    in-target /bin/sh -c 'printf "%s\n" "[Unit]" "Description=Remove disposable installer evidence before acceptance" "DefaultDependencies=no" "After=local-fs.target" "Before=getty.target" "" "[Service]" "Type=oneshot" "ExecStart=/bin/rm -rf /var/log/installer /var/cache/debconf/passwords.dat" "ExecStart=/bin/rm -f /etc/systemd/system/getty.target.wants/bootart-vm-sanitize.service" "ExecStart=/bin/rm -f /etc/systemd/system/bootart-vm-sanitize.service" "" "[Install]" "WantedBy=getty.target" > /etc/systemd/system/bootart-vm-sanitize.service'; \
+    in-target systemctl enable bootart-vm-sanitize.service; \
+    in-target /bin/sh -c 'printf "%s\n" BOOTART_VM_DEBIAN_13_6_INSTALL_COMPLETE_V1 > /dev/ttyS0'
+
+d-i finish-install/reboot_in_progress note
+d-i debian-installer/exit/poweroff boolean true

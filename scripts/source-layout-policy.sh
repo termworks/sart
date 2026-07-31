@@ -115,6 +115,23 @@ if [[ -d "$repo_root/src/bin" ]] &&
    find "$repo_root/src/bin" -type f -name '*.rs' -print -quit | grep -q .; then
     die 'helper binary sources below src/bin are forbidden'
 fi
+
+# Product installer modules describe mechanisms, never distributions. Distro
+# names belong only to scripts/vm fixtures and compatibility evidence.
+for distribution_module in ubuntu fedora debian arch alpine; do
+    distribution_path="$repo_root/src/install/$distribution_module.rs"
+    [[ ! -e "$distribution_path" && ! -L "$distribution_path" ]] ||
+        die "distribution-named product installer module is forbidden: $distribution_path"
+done
+unset distribution_module distribution_path
+
+distribution_identity_hit="$(find "$repo_root/src/install" -type f -name '*.rs' -exec \
+    grep -H -n -E -i '(^|[^[:alnum:]_])(ubuntu|fedora|debian|alpine)([^[:alnum:]_]|$)|Arch[[:space:]]+Linux' {} + \
+    2>/dev/null || true)"
+[[ -z "$distribution_identity_hit" ]] ||
+    die "distribution identity is forbidden in product installer source: $distribution_identity_hit"
+unset distribution_identity_hit
+
 if [[ -d "$repo_root/examples" ]] &&
    find "$repo_root/examples" -type f -print -quit | grep -q .; then
     die 'Cargo example payloads are forbidden'
@@ -127,6 +144,19 @@ include_hit="$(find "$repo_root/src" -type f -name '*.rs' -exec \
     grep -H -n -E '(^|[^[:alnum:]_])(include|include_str|include_bytes)([^[:alnum:]_]|$)' {} + \
     2>/dev/null || true)"
 [[ -z "$include_hit" ]] || die "compile-time external input is forbidden below src/: $include_hit"
+
+# The product must never learn how a VM test is provisioned. QEMU exercises
+# the production VT/broker path, but its kernel flag, public fixture
+# credential, and disposable drive name belong exclusively to scripts/vm/.
+# Reject them anywhere below src/, including comments and string literals, so
+# a future shortcut cannot accidentally ship test-only behavior in the ELF.
+for vm_fixture_token in 'bootart.vm.' '112358' 'encrypted-drive.qcow2'; do
+    vm_fixture_hit="$(find "$repo_root/src" -type f -name '*.rs' -exec \
+        grep -H -n -F -- "$vm_fixture_token" {} + 2>/dev/null || true)"
+    [[ -z "$vm_fixture_hit" ]] ||
+        die "VM fixture token is forbidden below src/: $vm_fixture_token: $vm_fixture_hit"
+done
+unset vm_fixture_token vm_fixture_hit
 
 # Parse enough of Rust's lexical structure to identify an attribute across
 # lines without mistaking comments, quoted strings, or raw strings for source

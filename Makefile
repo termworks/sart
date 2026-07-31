@@ -41,15 +41,10 @@ override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_H
 override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
 override __BOOTART_BOOTART_BIN_ORIGIN := $(origin BOOTART_BIN)
 override __BOOTART_BOOTART_BIN_RAW := $(value BOOTART_BIN)
-override __BOOTART_PLAN_FORMAT_ORIGIN := $(origin PLAN_FORMAT)
-override __BOOTART_PLAN_FORMAT_RAW := $(value PLAN_FORMAT)
 override __BOOTART_ARGS_FILE_RAW := $(value ARGS_FILE)
 override __BOOTART_RUN_DIR_RAW := $(value RUN_DIR)
 override __BOOTART_BASE_IMAGE_RAW := $(value BASE_IMAGE)
 override __BOOTART_OVERLAY_RAW := $(value OVERLAY)
-override __BOOTART_ROOT_RAW := $(value ROOT)
-override __BOOTART_INITRAMFS_ADAPTER_RAW := $(value INITRAMFS_ADAPTER)
-override __BOOTART_REAL_ROOT_ADAPTER_RAW := $(value REAL_ROOT_ADAPTER)
 
 # Known caller inputs are temporarily removed from Make's automatic
 # command-line/environment export before any parse-time shell runs. They are
@@ -57,16 +52,15 @@ override __BOOTART_REAL_ROOT_ADAPTER_RAW := $(value REAL_ROOT_ADAPTER)
 unexport TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
 unexport ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
 unexport BOOTART_BIN ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
-unexport ROOT INITRAMFS_ADAPTER REAL_ROOT_ADAPTER PLAN_FORMAT
 unexport PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE VM_MAKE
-unexport NIX_OFFLINE_FLAG HOST_MACHINE STATIC_ARCH PACKAGE_ARCH
+unexport NIX_OFFLINE_FLAG NIX_NETWORK_MODE HOST_MACHINE STATIC_ARCH PACKAGE_ARCH
 unexport STATIC_ROOT STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
 unexport STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE STATIC_ARCH_VALID PACKAGE_ARCH_VALID
 unexport VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGETS
-unexport VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_TEST_TARGETS
+unexport VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_RECOVERY_TARGETS
+unexport VM_ADAPTER_UNINSTALL_TARGETS VM_ADAPTER_KERNEL_UPDATE_TARGETS
+unexport VM_ADAPTER_TEST_TARGETS VM_ADAPTER_RUNNABLE_TARGETS
 unexport UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN PREFIX
-unexport BOOTART_GUEST_ROOT BOOTART_GUEST_INITRAMFS_ADAPTER
-unexport BOOTART_GUEST_REAL_ROOT_ADAPTER BOOTART_GUEST_PLAN_FORMAT
 
 override PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
 override PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
@@ -92,6 +86,7 @@ ifeq ($(filter $(NIX_OFFLINE),0 1),)
     $(error NIX_OFFLINE must be 0 or 1)
 endif
 override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)
+override NIX_NETWORK_MODE := $(if $(filter 1,$(NIX_OFFLINE)),offline,online)
 # Ordinary Make lanes are read-only even if the caller exported
 # UPDATE_GOLDEN=1. Only the explicit update-golden recipe supplies both values
 # directly to its cargo child.
@@ -121,7 +116,9 @@ else
     override TIMEOUT_SECONDS := $(value __BOOTART_TIMEOUT_SECONDS_RAW)
 endif
 ifeq ($(__BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
-    override ADAPTER_HOST_TIMEOUT_SECONDS := 660
+    # The matrix deadline belongs to the launched guest driver. The outer
+    # bound additionally covers immutable multi-gigabyte image verification.
+    override ADAPTER_HOST_TIMEOUT_SECONDS := 5100
 else
     override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
 endif
@@ -130,11 +127,18 @@ ifeq ($(__BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
 else
     override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
 endif
-override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc
+override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc
 override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))
 override VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))
 override VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))
-override VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS)
+override VM_ADAPTER_RECOVERY_TARGETS := $(addprefix vm-test-recovery-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_UNINSTALL_TARGETS := $(addprefix vm-test-uninstall-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_KERNEL_UPDATE_TARGETS := $(addprefix vm-test-kernel-update-,$(VM_ADAPTER_PAIRS))
+override VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS) $(VM_ADAPTER_RECOVERY_TARGETS) $(VM_ADAPTER_UNINSTALL_TARGETS) $(VM_ADAPTER_KERNEL_UPDATE_TARGETS)
+# Every currently implemented x86_64 lane consumes a freshly published static
+# ELF. The ARM64 boot-deploy fixture overrides this with its
+# architecture-correct artifact; blocked lanes must fail before any build.
+override VM_ADAPTER_RUNNABLE_TARGETS := $(filter %-dracut-systemd %-mkinitfs-openrc,$(VM_ADAPTER_TEST_TARGETS)) vm-test-lifecycle-initramfs-tools vm-test-install-initramfs-tools vm-test-password-initramfs-tools vm-test-recovery-initramfs-tools vm-test-uninstall-initramfs-tools vm-test-kernel-update-initramfs-tools vm-test-lifecycle-mkinitc$()pio vm-test-install-mkinitc$()pio vm-test-password-mkinitc$()pio vm-test-recovery-mkinitc$()pio vm-test-uninstall-mkinitc$()pio vm-test-kernel-update-mkinitc$()pio
 override STATIC_ROOT := $(CURDIR)/target/artifacts
 override STATIC_GENERATIONS_DIR := $(STATIC_ROOT)/generations
 override STATIC_CURRENT_POINTER := $(STATIC_ROOT)/current
@@ -151,18 +155,10 @@ override STATIC_ARCH_SAFE := $(if $(filter 1,$(words $(STATIC_ARCH))),$(filter x
 override PACKAGE_ARCH_SAFE := $(if $(filter 1,$(words $(PACKAGE_ARCH))),$(filter x86_64 aarch64,$(PACKAGE_ARCH)))
 override STATIC_ARCH_VALID := $(if $(STATIC_ARCH_SAFE),1,0)
 override PACKAGE_ARCH_VALID := $(if $(PACKAGE_ARCH_SAFE),1,0)
-ifeq ($(__BOOTART_PLAN_FORMAT_ORIGIN),undefined)
-    override PLAN_FORMAT := human
-else
-    override PLAN_FORMAT := $(value __BOOTART_PLAN_FORMAT_RAW)
-endif
 override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)
 override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)
 override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)
 override OVERLAY := $(value __BOOTART_OVERLAY_RAW)
-override ROOT := $(value __BOOTART_ROOT_RAW)
-override INITRAMFS_ADAPTER := $(value __BOOTART_INITRAMFS_ADAPTER_RAW)
-override REAL_ROOT_ADAPTER := $(value __BOOTART_REAL_ROOT_ADAPTER_RAW)
 
 # Documented caller values cross recipe boundaries only through the
 # environment. Never splice them into shell source with Make expansion.
@@ -180,7 +176,8 @@ $(info ------------------------------------------)
 # not serialize two independent Make invocations.
 .NOTPARALLEL:
 
-.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-guest-install-guards test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked guest-install-plan guest-install-status guest-install-apply guest-install-recover guest-install-uninstall clean _clean-locked assert-one-binary phase0-safety verify vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-clean release help h
+.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked artifact-cli-check _artifact-cli-check-locked clean _clean-locked assert-one-binary phase0-safety verify vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-artifact-aarch64 vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd vm-test-release-ubuntu-26.04-dracut-systemd _vm-test-release-ubuntu-26.04-dracut-systemd-locked vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-clean release help h
+.PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
 
 build: phase0-safety
 	@$(CARGO) build $(CARGO_LOCKED)
@@ -284,11 +281,6 @@ assert-adapter-pairs:
 	@bash scripts/adapter-pair-policy.sh '$(CURDIR)'
 	@$(MAKE) --no-print-directory test-adapter-pair-policy
 
-# Exercises only rejection paths. It never resolves or invokes a bootart ELF.
-test-guest-install-guards: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/guest-install-guard-tests.sh '$(CURDIR)'
-
 # Prove that an ambient mutation request cannot cross the ordinary Make
 # boundary. This target runs no Rust executable and touches no fixture.
 test-golden-guards:
@@ -320,7 +312,7 @@ fmt-check:
 	@$(CARGO) fmt --all -- --check
 
 nix-check: phase0-safety
-	@$(NIX) flake check 'path:$(CURDIR)' --no-build $(NIX_OFFLINE_FLAG) --no-update-lock-file
+	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' check '$(NIX)'
 
 # Nix owns its immutable store as usual; every checkout-visible output stays
 # below target/artifacts. A complete read-only generation is published before
@@ -367,8 +359,8 @@ _static-build-locked:
 		stage="$$(mktemp -d "$$root/.stage.XXXXXX")"; \
 		outputs="$$(mktemp "$$root/.nix-outputs.XXXXXX")"; \
 		mkdir -p "$$stage/release" "$$stage/real-root/usr/bin" "$$stage/initramfs/usr/bin"; \
-		$(NIX) build $(NIX_OFFLINE_FLAG) --no-update-lock-file --no-link --print-out-paths \
-			'path:$(CURDIR)#bootart-static' >"$$outputs"; \
+		bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' build \
+			'$(NIX)' bootart-static >"$$outputs"; \
 		mapfile -t nix_outputs <"$$outputs"; \
 		test "$${#nix_outputs[@]}" -eq 1 || { \
 			echo "ERROR: expected one Nix output, found $${#nix_outputs[@]}" >&2; \
@@ -433,29 +425,20 @@ _artifact-check-locked:
 			"$$generation/release" "$$generation/real-root/usr/bin/bootart" \
 			"$$generation/initramfs/usr/bin/bootart"
 
-# These are the only current Make-backed installer entry points. They consume
-# one already-published static generation and can only inspect an explicitly
-# named alternate/guest root. The wrapper holds the artifact publication lock
-# while the verified ELF is both the planner and, via /proc/self/exe, its own
-# proposed payload. No alternate executable-payload argument exists.
-guest-install-plan: override export BOOTART_GUEST_ROOT := $(ROOT)
-guest-install-plan: override export BOOTART_GUEST_INITRAMFS_ADAPTER := $(INITRAMFS_ADAPTER)
-guest-install-plan: override export BOOTART_GUEST_REAL_ROOT_ADAPTER := $(REAL_ROOT_ADAPTER)
-guest-install-plan: override export BOOTART_GUEST_PLAN_FORMAT := $(PLAN_FORMAT)
-guest-install-plan:
+artifact-cli-check: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
-		bash scripts/guest-install-readonly.sh '$(CURDIR)' plan
+		$(MAKE) --no-print-directory _artifact-cli-check-locked \
+		BOOTART_BIN='$(STATIC_CURRENT_POINTER)/release/bootart'
 
-guest-install-status: override export BOOTART_GUEST_ROOT := $(ROOT)
-guest-install-status:
-	@bash scripts/artifact-lock.sh '$(CURDIR)' \
-		bash scripts/guest-install-readonly.sh '$(CURDIR)' status
-
-# Default/release mutation is locked in Rust and again at the Make boundary.
-# These targets intentionally fail without building or invoking bootart.
-guest-install-apply guest-install-recover guest-install-uninstall:
-	@echo 'ERROR: guest installer mutation is locked until its exact disposable-VM gate passes' >&2
-	@exit 2
+_artifact-cli-check-locked:
+	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
+	@set -euo pipefail; \
+		generation="$$(bash scripts/artifact-generation.sh '$(STATIC_ROOT)')"; \
+		elf="$$(readlink -f -- "$${BOOTART_BIN}")"; \
+		test "$$elf" = "$$generation/release/bootart" || { \
+			echo 'ERROR: CLI proof did not resolve the pinned static generation' >&2; exit 1; \
+		}; \
+		bash scripts/artifact-cli-policy.sh "$$elf"
 
 # The archive has exactly one member: the verified static ELF named bootart.
 # Its checksum is release metadata beside the archive, not another payload.
@@ -588,7 +571,7 @@ phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert
 			echo "ERROR: symlinks are forbidden below src/" >&2; exit 1; \
 		fi; \
 		grep -Eq '^default[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$$' Cargo.toml || { \
-			echo "ERROR: Cargo default features must stay empty; installer mutation is test-only" >&2; \
+		echo "ERROR: Cargo default features must stay empty; test-only installer seams must stay opt-in" >&2; \
 			exit 1; \
 		}; \
 		grep -Eq '^installer-test-seams[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$$' Cargo.toml || { \
@@ -610,7 +593,7 @@ phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert
 	@bash scripts/host-safety-policy.sh '$(CURDIR)'
 	@bash scripts/tests/host-safety-policy-tests.sh '$(CURDIR)'
 
-verify: assert-one-binary assert-init-neutral assert-adapter-pairs phase0-safety test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy test-artifact-guards test-guest-install-guards test-golden-guards vm-script-check fmt-check check test-protocol test-daemon test-display test-installer-root test check-all test-all clippy rustdoc
+verify: assert-one-binary assert-init-neutral assert-adapter-pairs phase0-safety test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy test-artifact-guards test-golden-guards vm-script-check fmt-check check test-protocol test-daemon test-display test-installer-root test check-all test-all clippy rustdoc
 
 vm-script-check:
 	@$(VM_MAKE) vm-script-check
@@ -639,13 +622,203 @@ vm-state-init:
 vm-image-alpine:
 	@$(VM_MAKE) vm-image-alpine
 
+vm-image-alpine-3.24.1:
+	@$(VM_MAKE) vm-image-alpine-3.24.1
+
+vm-image-ubuntu-26.04:
+	@$(VM_MAKE) vm-image-ubuntu-26.04
+
+vm-image-fedora-44:
+	@$(VM_MAKE) vm-image-fedora-44
+
+vm-image-debian-13.6:
+	@$(VM_MAKE) vm-image-debian-13.6
+
+vm-image-arch-mkinitc$()pio:
+	@$(VM_MAKE) vm-image-arch-mkinitc$()pio
+
+vm-kernel-packages-ubuntu-26.04:
+	@$(VM_MAKE) vm-kernel-packages-ubuntu-26.04
+
+vm-kernel-packages-fedora-44:
+	@$(VM_MAKE) vm-kernel-packages-fedora-44
+
+vm-kernel-packages-alpine-3.24:
+	@$(VM_MAKE) vm-kernel-packages-alpine-3.24
+
+vm-kernel-packages-debian-13.6:
+	@$(VM_MAKE) vm-kernel-packages-debian-13.6
+
+vm-kernel-packages-arch-mkinitc$()pio:
+	@$(VM_MAKE) vm-kernel-packages-arch-mkinitc$()pio
+
+vm-reset-arch-mkinitc$()pio-systemd:
+	@$(VM_MAKE) vm-reset-arch-mkinitc$()pio-systemd
+
+vm-provision-arch-mkinitc$()pio-systemd:
+	@$(VM_MAKE) vm-provision-arch-mkinitc$()pio-systemd
+
+vm-verify-arch-mkinitc$()pio-systemd:
+	@$(VM_MAKE) vm-verify-arch-mkinitc$()pio-systemd
+
+vm-reset-ubuntu-26.04-dracut-systemd:
+	@$(VM_MAKE) vm-reset-ubuntu-26.04-dracut-systemd
+
+vm-provision-ubuntu-26.04-dracut-systemd:
+	@$(VM_MAKE) vm-provision-ubuntu-26.04-dracut-systemd
+
+vm-verify-ubuntu-26.04-dracut-systemd:
+	@$(VM_MAKE) vm-verify-ubuntu-26.04-dracut-systemd
+
+vm-reset-fedora-44-dracut-systemd:
+	@$(VM_MAKE) vm-reset-fedora-44-dracut-systemd
+
+vm-provision-fedora-44-dracut-systemd:
+	@$(VM_MAKE) vm-provision-fedora-44-dracut-systemd
+
+vm-verify-fedora-44-dracut-systemd:
+	@$(VM_MAKE) vm-verify-fedora-44-dracut-systemd
+
+vm-reset-debian-13.6-initramfs-tools-systemd:
+	@$(VM_MAKE) vm-reset-debian-13.6-initramfs-tools-systemd
+
+vm-provision-debian-13.6-initramfs-tools-systemd:
+	@$(VM_MAKE) vm-provision-debian-13.6-initramfs-tools-systemd
+
+vm-verify-debian-13.6-initramfs-tools-systemd:
+	@$(VM_MAKE) vm-verify-debian-13.6-initramfs-tools-systemd
+
+vm-reset-alpine-3.24.1-mkinitfs-openrc:
+	@$(VM_MAKE) vm-reset-alpine-3.24.1-mkinitfs-openrc
+
+vm-provision-alpine-3.24.1-mkinitfs-openrc:
+	@$(VM_MAKE) vm-provision-alpine-3.24.1-mkinitfs-openrc
+
+vm-verify-alpine-3.24.1-mkinitfs-openrc:
+	@$(VM_MAKE) vm-verify-alpine-3.24.1-mkinitfs-openrc
+
+vm-sources-postmarketos:
+	@$(VM_MAKE) vm-sources-postmarketos
+
+vm-review-postmarketos-sources:
+	@$(VM_MAKE) vm-review-postmarketos-sources
+
+vm-artifact-aarch64: phase0-safety nix-check vm-state-init
+	@bash scripts/vm/scripts/build-aarch64-artifact.sh \
+		'$(CURDIR)' '$(CURDIR)/target/vm' '$(NIX_NETWORK_MODE)' '$(NIX)'
+
+vm-reset-postmarketos-qemu-aarch64:
+	@$(VM_MAKE) vm-reset-postmarketos-qemu-aarch64
+
+vm-provision-postmarketos-qemu-aarch64:
+	@$(VM_MAKE) vm-provision-postmarketos-qemu-aarch64
+
+vm-verify-postmarketos-qemu-aarch64:
+	@$(VM_MAKE) vm-verify-postmarketos-qemu-aarch64
+
 vm-test-lifecycle-alpine:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-test-lifecycle-alpine
 
+$(VM_ADAPTER_TEST_TARGETS): override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
 $(VM_ADAPTER_TEST_TARGETS):
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) '$@'
+$(VM_ADAPTER_RUNNABLE_TARGETS): static-build
+
+vm-test-debian-13.6-initramfs-tools-systemd: \
+	vm-test-install-initramfs-tools \
+	vm-test-lifecycle-initramfs-tools \
+	vm-test-password-initramfs-tools \
+	vm-test-recovery-initramfs-tools \
+	vm-test-uninstall-initramfs-tools \
+	vm-test-kernel-update-initramfs-tools
+
+vm-test-arch-mkinitc$()pio-systemd: \
+	vm-test-install-mkinitc$()pio \
+	vm-test-lifecycle-mkinitc$()pio \
+	vm-test-password-mkinitc$()pio \
+	vm-test-recovery-mkinitc$()pio \
+	vm-test-uninstall-mkinitc$()pio \
+	vm-test-kernel-update-mkinitc$()pio
+
+vm-test-alpine-3.24.1-mkinitfs-openrc: \
+	vm-test-install-mkinitfs-openrc \
+	vm-test-lifecycle-mkinitfs-openrc \
+	vm-test-password-mkinitfs-openrc \
+	vm-test-recovery-mkinitfs-openrc \
+	vm-test-uninstall-mkinitfs-openrc \
+	vm-test-kernel-update-mkinitfs-openrc
+
+# The postmarketOS fixture runs the same source/CLI as an architecture-correct
+# static aarch64 ELF. A machine-code-identical x86_64 artifact cannot execute
+# on the ARM virtual machine, but each guest still receives only one Bootart
+# binary and no helper payload.
+vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-lifecycle-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-install-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-install-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-password-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-password-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-recovery-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-recovery-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-uninstall-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-kernel-update-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+
+vm-test-install-fedora-44-dracut-systemd \
+vm-test-lifecycle-fedora-44-dracut-systemd \
+vm-test-password-fedora-44-dracut-systemd \
+vm-test-recovery-fedora-44-dracut-systemd \
+vm-test-uninstall-fedora-44-dracut-systemd \
+vm-test-kernel-update-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-install-fedora-44-dracut-systemd \
+vm-test-lifecycle-fedora-44-dracut-systemd \
+vm-test-password-fedora-44-dracut-systemd \
+vm-test-recovery-fedora-44-dracut-systemd \
+vm-test-uninstall-fedora-44-dracut-systemd \
+vm-test-kernel-update-fedora-44-dracut-systemd: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) '$@'
+
+vm-test-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-ubuntu-26.04-dracut-systemd: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-test-ubuntu-26.04-dracut-systemd
+
+vm-test-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-fedora-44-dracut-systemd: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-test-fedora-44-dracut-systemd
+
+# Phase C acceptance uses the ordinary no-feature static ELF and the canonical
+# production CLI. One artifact lock pins that exact immutable generation while
+# six independent overlays prove every Ubuntu milestone lane.
+vm-test-release-ubuntu-26.04-dracut-systemd: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \
+		BOOTART_BIN='$(STATIC_CURRENT_POINTER)/release/bootart'
+
+_vm-test-release-ubuntu-26.04-dracut-systemd-locked:
+	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
+	@set -euo pipefail; \
+		generation="$$(bash scripts/artifact-generation.sh '$(STATIC_ROOT)')"; \
+		elf="$$(readlink -f -- "$${BOOTART_BIN}")"; \
+		test "$$elf" = "$$generation/release/bootart" || { \
+			echo 'ERROR: release VM proof did not resolve the pinned static generation' >&2; exit 1; \
+		}; \
+		digest="$$(sha256sum -- "$$elf" | awk '{ print $$1 }')"; \
+		test "$${#digest}" -eq 64 || { echo 'ERROR: cannot hash release VM ELF' >&2; exit 1; }; \
+		bash scripts/artifact-cli-policy.sh "$$elf"; \
+		printf 'bootart: Phase 7 normal release ELF %s\n' "$$digest"; \
+		$(VM_MAKE) vm-test-install-dracut-systemd BOOTART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-password-dracut-systemd BOOTART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-lifecycle-dracut-systemd BOOTART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-recovery-dracut-systemd BOOTART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-uninstall-dracut-systemd BOOTART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-kernel-update-dracut-systemd BOOTART_BIN="$$elf"; \
+		printf 'BOOTART_VM_UBUNTU_26_04_RELEASE_ELF_PASS_V1|sha256=%s\n' "$$digest"
 
 vm-test-adapters:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
@@ -661,18 +834,29 @@ vm-policy-check:
 vm-adapter-policy-check:
 	@$(VM_MAKE) vm-adapter-policy-check
 
-vm-run-gui:
-	@$(VM_MAKE) vm-run-gui
+vm-run-gui: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui
+
+vm-run-gui-password: static-build
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-password
+
+# Visual inspection boots the currently published immutable ELF. Rebuilding
+# here changes the proof identity and can turn a quick second boot into another
+# full headless install. Run `make static-build` explicitly to refresh it.
+vm-run-gui-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-ubuntu-26.04-dracut-systemd:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-ubuntu-26.04-dracut-systemd
 
 vm-clean:
 	@$(VM_MAKE) vm-clean
 
-# Publication is impossible unless the complete source gate and every exact
-# lifecycle/install/password VM lane pass against the ELF committed by the
+# Publication is impossible unless the complete source gate and the exact
+# Ubuntu production sequence pass against the normal ELF committed by the
 # package manifest. Holding the publication lock across all VM lanes prevents
 # the archive, manifest, or selected generation from changing between lanes.
-# Current immutable-image blockers stop this target before any product or QEMU
-# process is resolved.
 release-readiness: verify validate-package-arch nix-check
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(MAKE) --no-print-directory _release-readiness-locked
@@ -684,9 +868,9 @@ _release-readiness-locked:
 		root='$(STATIC_ROOT)'; \
 		generation="$$(bash scripts/release-package-generation.sh \
 			'$(CURDIR)' "$$root" '$(PACKAGE_ARCH_SAFE)')"; \
-		$(MAKE) --no-print-directory vm-test \
+		$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \
 			BOOTART_BIN="$$generation/release/bootart"; \
-		printf '%s\n' 'PASS: source, exact packaged ELF, and exact VM release gates passed'
+		printf '%s\n' 'PASS: source, exact packaged ELF, and Ubuntu production VM gates passed'
 
 release: release-readiness
 	@echo 'ERROR: tag/publication mutation remains locked until the exact tagged-tree flow is designed' >&2
@@ -700,7 +884,7 @@ help:
 	@echo "  build        Build the binary and library"
 	@echo "  release-build Alias for the guarded static-build lane"
 	@echo "  release-package Build/check/package one Linux bootart ELF plus checksum metadata"
-	@echo "  release-readiness Require verify plus every exact VM lane before publication"
+	@echo "  release-readiness Require verify plus the exact Ubuntu production-ELF VM gate"
 	@echo "  compile      Clean and rebuild"
 	@echo "  test         Run all tests"
 	@echo "  test-unit    Run pure library unit tests"
@@ -717,7 +901,6 @@ help:
 	@echo "  assert-artifact-operation Run live artifact-lock policy plus rejection fixtures"
 	@echo "  assert-make-boundary Run live Make-boundary policy plus inert injection fixtures"
 	@echo "  test-host-safety-policy Syntax-check and prove host command surfaces reject dangerous fixtures"
-	@echo "  test-guest-install-guards Prove guest installer wrappers fail before product invocation"
 	@echo "  update-golden Explicitly rewrite reviewed golden frame fixtures"
 	@echo "  check        Run cargo check on all targets"
 	@echo "  check-all    Run cargo check on all targets/all features"
@@ -729,10 +912,7 @@ help:
 	@echo "  nix-check    Evaluate the locked flake offline without building"
 	@echo "  static-build Publish one immutable static-ELF generation under target/artifacts"
 	@echo "  artifact-check Resolve current once and verify that generation's three SHA-256 values"
-	@echo "  guest-install-plan Render a read-only, locked plan for an explicit alternate-root adapter pair"
-	@echo "                Requires ROOT, INITRAMFS_ADAPTER, and REAL_ROOT_ADAPTER; PLAN_FORMAT=human|json"
-	@echo "  guest-install-status Read and verify the manifest under an explicit alternate root (requires ROOT)"
-	@echo "  guest-install-{apply,recover,uninstall} Locked; fail before bootart is invoked"
+	@echo "  artifact-cli-check Prove the normal static ELF hides every installer test-seam option"
 	@echo "  clean        Remove Cargo build artifacts"
 	@echo "  verify       Run the full local gate"
 	@echo "  assert-one-binary Prove bootart is the only Cargo binary"
@@ -741,18 +921,45 @@ help:
 	@echo "  vm-script-check Syntax-check VM host/guest shell data without state or QEMU"
 	@echo "  vm-runner-policy-check Audit future VM runner sources without executing them"
 	@echo "  vm-matrix-check Read-only exact adapter-pair, isolation, image-state, and oracle audit"
-	@echo "  vm-blocked-lane-check Prove all 15 unpinned lanes stop before product/QEMU"
+	@echo "  vm-blocked-lane-check Prove blocked matrix lanes stop before product/QEMU"
 	@echo "  vm-preflight Read-only VM tool, lock, and path safety checks"
 	@echo "  vm-state-init Create sentinel-owned state only under target/vm"
 	@echo "  vm-image-alpine Fetch the exact checksum-locked Alpine input"
+	@echo "  vm-image-alpine-3.24.1 Fetch the exact Alpine 3.24.1 cloud source"
+	@echo "  vm-image-arch-mkinitc"pio "Fetch the exact Arch mkinitc"pio "cloud builder"
+	@echo "  vm-provision-arch-mkinitc"pio"-systemd Install encrypted Arch into a private qcow2"
+	@echo "  vm-verify-arch-mkinitc"pio"-systemd Prove Arch stock LUKS rejection/unlock/login"
+	@echo "  vm-sources-postmarketos Fetch all pinned postmarketOS source archives"
+	@echo "  vm-review-postmarketos-sources Verify exact mkinitfs, boot-deploy, and unl0kr sources"
+	@echo "  vm-artifact-aarch64 Build one content-addressed static aarch64 ELF for VM lanes"
+	@echo "  vm-provision-postmarketos-qemu-aarch64 Build encrypted postmarketOS ARM64 in a disposable VM"
+	@echo "  vm-verify-postmarketos-qemu-aarch64 Prove stock ARM64 UEFI/unl0kr unlock and login"
+	@echo "  vm-image-ubuntu-26.04 Fetch the exact checksum-locked Ubuntu 26.04 installer ISO"
+	@echo "  vm-image-fedora-44 Fetch the exact checksum-locked Fedora 44 Server installer ISO"
+	@echo "  vm-kernel-packages-ubuntu-26.04 Fetch the exact offline Ubuntu kernel-update packages"
+	@echo "  vm-reset-ubuntu-26.04-dracut-systemd Remove only the authenticated disposable Ubuntu base"
+	@echo "  vm-provision-ubuntu-26.04-dracut-systemd Run normal Subiquity into a private encrypted-root qcow2"
+	@echo "  vm-verify-ubuntu-26.04-dracut-systemd Prove disk-only stock unlock/login before Bootart"
+	@echo "  vm-reset-fedora-44-dracut-systemd Remove only the authenticated disposable Fedora base"
+	@echo "  vm-provision-fedora-44-dracut-systemd Run normal Anaconda into a private encrypted-root qcow2"
+	@echo "  vm-verify-fedora-44-dracut-systemd Prove Fedora disk-only stock unlock/login before Bootart"
+	@echo "  vm-reset-alpine-3.24.1-mkinitfs-openrc Remove only the authenticated disposable Alpine base"
+	@echo "  vm-provision-alpine-3.24.1-mkinitfs-openrc Run Alpine setup-disk into an encrypted qcow2"
+	@echo "  vm-verify-alpine-3.24.1-mkinitfs-openrc Prove Alpine stock LUKS rejection/unlock/login"
 	@echo "  vm-test-lifecycle-alpine Run the bounded no-disk/no-network QEMU gate"
-	@echo "  vm-test-{lifecycle,install,password}-PAIR Run one exact adapter gate"
-	@echo "                PAIR: dracut-systemd, dracut-classic, initramfs-tools, mkinitc""pio, mkinitfs-openrc"
-	@echo "                All currently report BLOCKED_UNVERIFIED; no serial PASS evidence exists"
+	@echo "  vm-test-{lifecycle,install,password,recovery,uninstall,kernel-update}-PAIR Run one exact adapter gate"
+	@echo "                PAIR: dracut-systemd, dracut-classic, initramfs-tools, mkinitc""pio, mkinitfs-openrc, mkinitfs-boot-deploy-openrc"
+	@echo "                matrix states describe runnable inputs; lane.result files are runtime evidence"
 	@echo "  vm-test-adapters Aggregate exact adapter gates (currently blocked)"
+	@echo "  vm-test-release-ubuntu-26.04-dracut-systemd Prove one normal release ELF across all six Ubuntu lanes"
 	@echo "  vm-test      Run all required disposable VM gates (currently blocked)"
 	@echo "  vm-policy-check Validate a recorded QEMU argv file (ARGS_FILE/RUN_DIR)"
 	@echo "  vm-adapter-policy-check Validate a real-guest argv/overlay/seed record"
+	@echo "  vm-run-gui  Launch a disposable windowed guest for visual inspection only"
+	@echo "  vm-run-gui-password Interactively unlock a disposable encrypted qcow2"
+	@echo "  vm-run-gui-ubuntu-26.04-dracut-systemd Show real Ubuntu boot; reuse matching proven install"
+	@echo "  vm-test-{lane}-fedora-44-dracut-systemd Prove one Fedora fixture lane"
+	@echo "  vm-test-fedora-44-dracut-systemd Prove all six Fedora fixture lanes"
 	@echo "  vm-clean     Remove only validated owned VM run directories"
 	@echo "  release      Locked: exact tagged-tree publication is not implemented"
 	@echo

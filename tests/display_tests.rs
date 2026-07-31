@@ -110,7 +110,7 @@ fn buffer_backend_enforces_the_display_lifecycle_deterministically() {
 #[cfg(target_os = "linux")]
 mod linux_text_vt {
     use super::*;
-    use bootart::display::text_vt::{TextVtBackend, TextVtConfig, VtIo};
+    use bootart::display::text_vt::{TextVtBackend, TextVtConfig, VtDeallocation, VtIo};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Device {
@@ -152,6 +152,7 @@ mod linux_text_vt {
         input: VecDeque<Vec<u8>>,
         fail_frame_write_once: bool,
         fail_restore_terminal: bool,
+        disallocate_in_use: bool,
     }
 
     impl Default for FakeState {
@@ -166,6 +167,7 @@ mod linux_text_vt {
                 input: VecDeque::new(),
                 fail_frame_write_once: false,
                 fail_restore_terminal: false,
+                disallocate_in_use: false,
             }
         }
     }
@@ -287,9 +289,17 @@ mod linux_text_vt {
             }
         }
 
-        fn disallocate(&mut self, _control: &Self::Device, number: u16) -> io::Result<()> {
+        fn disallocate(
+            &mut self,
+            _control: &Self::Device,
+            number: u16,
+        ) -> io::Result<VtDeallocation> {
             self.push(Call::Disallocate(number));
-            Ok(())
+            if self.state.borrow().disallocate_in_use {
+                Ok(VtDeallocation::InUse)
+            } else {
+                Ok(VtDeallocation::Deallocated)
+            }
         }
 
         fn write_all(&mut self, _vt: &mut Self::Device, bytes: &[u8]) -> io::Result<()> {
@@ -420,6 +430,29 @@ mod linux_text_vt {
                 .any(|call| matches!(call, Call::Disallocate(_)))
         );
         assert!(calls.contains(&Call::OpenVt("/dev/tty9".into(), 9)));
+    }
+
+    #[test]
+    fn dynamically_claimed_open_query_vt_is_still_released_successfully() {
+        let (io, state) = FakeIo::new();
+        let mut display = TextVtBackend::with_io(TextVtConfig::open_query(), io);
+        display.acquire().unwrap();
+        display.show().unwrap();
+
+        // A real-root console manager can open the VT that was unused when
+        // initramfs called VT_OPENQRY. The kernel then refuses to discard that
+        // other owner's storage, but Bootart must still restore its state,
+        // close its descriptor, switch away, and report a clean shutdown.
+        state.borrow_mut().disallocate_in_use = true;
+        display.restore().unwrap();
+
+        assert_eq!(display.state(), DisplayState::Restored);
+        assert_eq!(state.borrow().active_vt, 1);
+        let calls = &state.borrow().calls;
+        assert!(calls.contains(&Call::RestoreTerminal));
+        assert!(calls.contains(&Call::Activate(1)));
+        assert!(calls.contains(&Call::WaitActive(1, Duration::from_millis(500))));
+        assert!(calls.contains(&Call::Disallocate(7)));
     }
 
     #[test]

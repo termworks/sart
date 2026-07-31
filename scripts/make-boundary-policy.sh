@@ -115,12 +115,17 @@ for guard in \
     'override NIX := nix' \
     'override MAKE := make' \
     'override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)' \
+    'override NIX_NETWORK_MODE := $(if $(filter 1,$(NIX_OFFLINE)),offline,online)' \
     'override VM_MAKE := $(MAKE) -C scripts/vm' \
-    'override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc' \
+    'override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc' \
     'override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))' \
     'override VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))' \
     'override VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))' \
-    'override VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS)' \
+    'override VM_ADAPTER_RECOVERY_TARGETS := $(addprefix vm-test-recovery-,$(VM_ADAPTER_PAIRS))' \
+    'override VM_ADAPTER_UNINSTALL_TARGETS := $(addprefix vm-test-uninstall-,$(VM_ADAPTER_PAIRS))' \
+    'override VM_ADAPTER_KERNEL_UPDATE_TARGETS := $(addprefix vm-test-kernel-update-,$(VM_ADAPTER_PAIRS))' \
+    'override VM_ADAPTER_TEST_TARGETS := $(VM_ADAPTER_LIFECYCLE_TARGETS) $(VM_ADAPTER_INSTALL_TARGETS) $(VM_ADAPTER_PASSWORD_TARGETS) $(VM_ADAPTER_RECOVERY_TARGETS) $(VM_ADAPTER_UNINSTALL_TARGETS) $(VM_ADAPTER_KERNEL_UPDATE_TARGETS)' \
+    'override VM_ADAPTER_RUNNABLE_TARGETS := $(filter %-dracut-systemd %-mkinitfs-openrc,$(VM_ADAPTER_TEST_TARGETS)) vm-test-lifecycle-initramfs-tools vm-test-install-initramfs-tools vm-test-password-initramfs-tools vm-test-recovery-initramfs-tools vm-test-uninstall-initramfs-tools vm-test-kernel-update-initramfs-tools vm-test-lifecycle-mkinitc$()pio vm-test-install-mkinitc$()pio vm-test-password-mkinitc$()pio vm-test-recovery-mkinitc$()pio vm-test-uninstall-mkinitc$()pio vm-test-kernel-update-mkinitc$()pio' \
     'override STATIC_ROOT := $(CURDIR)/target/artifacts' \
     'override STATIC_GENERATIONS_DIR := $(STATIC_ROOT)/generations' \
     'override STATIC_CURRENT_POINTER := $(STATIC_ROOT)/current' \
@@ -138,9 +143,11 @@ done
 
 root_structural=(
     SHELL CURDIR PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE
-    NIX_OFFLINE_FLAG VM_MAKE
+    NIX_OFFLINE_FLAG NIX_NETWORK_MODE VM_MAKE
     VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGETS
-    VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_TEST_TARGETS STATIC_ROOT
+    VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_RECOVERY_TARGETS
+    VM_ADAPTER_UNINSTALL_TARGETS VM_ADAPTER_KERNEL_UPDATE_TARGETS
+    VM_ADAPTER_TEST_TARGETS VM_ADAPTER_RUNNABLE_TARGETS STATIC_ROOT
     STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
     HOST_MACHINE STATIC_ARCH PACKAGE_ARCH STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE
     STATIC_ARCH_VALID PACKAGE_ARCH_VALID
@@ -151,37 +158,16 @@ done
 
 root_pre_shell_fixed=(
     PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE VM_MAKE
-    NIX_OFFLINE_FLAG HOST_MACHINE STATIC_ARCH PACKAGE_ARCH STATIC_ROOT
+    NIX_OFFLINE_FLAG NIX_NETWORK_MODE HOST_MACHINE STATIC_ARCH PACKAGE_ARCH STATIC_ROOT
     STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
     STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE STATIC_ARCH_VALID PACKAGE_ARCH_VALID
     VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGETS
-    VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_TEST_TARGETS
+    VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_RECOVERY_TARGETS
+    VM_ADAPTER_UNINSTALL_TARGETS VM_ADAPTER_KERNEL_UPDATE_TARGETS
+    VM_ADAPTER_TEST_TARGETS VM_ADAPTER_RUNNABLE_TARGETS
 )
 for variable in "${root_pre_shell_fixed[@]}"; do
     require_unexport "$root_make" "$variable"
-done
-
-root_internal_exports=(
-    BOOTART_GUEST_ROOT BOOTART_GUEST_INITRAMFS_ADAPTER
-    BOOTART_GUEST_REAL_ROOT_ADAPTER BOOTART_GUEST_PLAN_FORMAT
-)
-for variable in "${root_internal_exports[@]}"; do
-    require_unexport "$root_make" "$variable"
-done
-for guard in \
-    'guest-install-plan: override export BOOTART_GUEST_ROOT := $(ROOT)' \
-    'guest-install-plan: override export BOOTART_GUEST_INITRAMFS_ADAPTER := $(INITRAMFS_ADAPTER)' \
-    'guest-install-plan: override export BOOTART_GUEST_REAL_ROOT_ADAPTER := $(REAL_ROOT_ADAPTER)' \
-    'guest-install-plan: override export BOOTART_GUEST_PLAN_FORMAT := $(PLAN_FORMAT)' \
-    'guest-install-status: override export BOOTART_GUEST_ROOT := $(ROOT)'
-do
-    require_line "$root_make" "$guard"
-done
-require_assignment_count "$root_make" BOOTART_GUEST_ROOT 2
-for variable in BOOTART_GUEST_INITRAMFS_ADAPTER BOOTART_GUEST_REAL_ROOT_ADAPTER \
-    BOOTART_GUEST_PLAN_FORMAT
-do
-    require_assignment_count "$root_make" "$variable" 1
 done
 
 for guard in \
@@ -195,11 +181,14 @@ for guard in \
     'override VM_SOURCE_ROOT := $(REPO_ROOT)/scripts/vm' \
     'override LOCK_FILE := $(VM_SOURCE_ROOT)/images.lock' \
     'override MATRIX_FILE := $(VM_SOURCE_ROOT)/adapter-matrix.lock' \
-    'override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc' \
+    'override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc' \
     'override ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(ADAPTER_PAIRS))' \
     'override ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(ADAPTER_PAIRS))' \
     'override ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(ADAPTER_PAIRS))' \
-    'override ADAPTER_TEST_TARGETS := $(ADAPTER_LIFECYCLE_TARGETS) $(ADAPTER_INSTALL_TARGETS) $(ADAPTER_PASSWORD_TARGETS)' \
+    'override ADAPTER_RECOVERY_TARGETS := $(addprefix vm-test-recovery-,$(ADAPTER_PAIRS))' \
+    'override ADAPTER_UNINSTALL_TARGETS := $(addprefix vm-test-uninstall-,$(ADAPTER_PAIRS))' \
+    'override ADAPTER_KERNEL_UPDATE_TARGETS := $(addprefix vm-test-kernel-update-,$(ADAPTER_PAIRS))' \
+    'override ADAPTER_TEST_TARGETS := $(ADAPTER_LIFECYCLE_TARGETS) $(ADAPTER_INSTALL_TARGETS) $(ADAPTER_PASSWORD_TARGETS) $(ADAPTER_RECOVERY_TARGETS) $(ADAPTER_UNINSTALL_TARGETS) $(ADAPTER_KERNEL_UPDATE_TARGETS)' \
     'ifneq ($(CURDIR),$(VM_SOURCE_ROOT))'
 do
     require_line "$vm_make" "$guard"
@@ -209,7 +198,8 @@ done
 vm_structural=(
     SHELL CURDIR REPO_ROOT VM_ROOT VM_SOURCE_ROOT LOCK_FILE MATRIX_FILE
     ADAPTER_PAIRS ADAPTER_LIFECYCLE_TARGETS ADAPTER_INSTALL_TARGETS
-    ADAPTER_PASSWORD_TARGETS ADAPTER_TEST_TARGETS
+    ADAPTER_PASSWORD_TARGETS ADAPTER_RECOVERY_TARGETS ADAPTER_UNINSTALL_TARGETS
+    ADAPTER_KERNEL_UPDATE_TARGETS ADAPTER_TEST_TARGETS
 )
 for variable in "${vm_structural[@]}"; do
     require_assignment_count "$vm_make" "$variable" 1
@@ -218,13 +208,11 @@ done
 root_inputs=(
     TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
     ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN
-    PLAN_FORMAT ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY ROOT INITRAMFS_ADAPTER
-    REAL_ROOT_ADAPTER
+    ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 )
 root_default_inputs=(
     TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
     ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN
-    PLAN_FORMAT
 )
 for variable in "${root_inputs[@]}"; do
     internal=__BOOTART_${variable}_RAW
@@ -290,33 +278,38 @@ for guard in \
     'override IMAGE_ID := $(value __BOOTART_IMAGE_ID_RAW)' \
     'override TIMEOUT_SECONDS := 90' \
     'override TIMEOUT_SECONDS := $(value __BOOTART_TIMEOUT_SECONDS_RAW)' \
-    'override ADAPTER_HOST_TIMEOUT_SECONDS := 660' \
+    'override ADAPTER_HOST_TIMEOUT_SECONDS := 5100' \
     'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
     'override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
     'override BOOTART_BIN := $(value __BOOTART_BOOTART_BIN_RAW)' \
-    'override PLAN_FORMAT := human' \
-    'override PLAN_FORMAT := $(value __BOOTART_PLAN_FORMAT_RAW)' \
+    '$(VM_ADAPTER_TEST_TARGETS): override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    '$(VM_ADAPTER_RUNNABLE_TARGETS): static-build' \
+    'vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-install-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-password-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-recovery-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
     'override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)' \
     'override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)' \
     'override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)' \
-    'override OVERLAY := $(value __BOOTART_OVERLAY_RAW)' \
-    'override ROOT := $(value __BOOTART_ROOT_RAW)' \
-    'override INITRAMFS_ADAPTER := $(value __BOOTART_INITRAMFS_ADAPTER_RAW)' \
-    'override REAL_ROOT_ADAPTER := $(value __BOOTART_REAL_ROOT_ADAPTER_RAW)'
+    'override OVERLAY := $(value __BOOTART_OVERLAY_RAW)'
 do
     require_line "$root_make" "$guard"
 done
 
 for variable in TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID \
     TIMEOUT_SECONDS ADAPTER_HOST_TIMEOUT_SECONDS \
-    LIFECYCLE_HOST_TIMEOUT_SECONDS PLAN_FORMAT
+    LIFECYCLE_HOST_TIMEOUT_SECONDS
 do
     require_assignment_count "$root_make" "$variable" 2
 done
-require_assignment_count "$root_make" BOOTART_BIN 2
-for variable in ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY ROOT INITRAMFS_ADAPTER REAL_ROOT_ADAPTER; do
+require_assignment_count "$root_make" BOOTART_BIN 13
+for variable in ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY; do
     require_assignment_count "$root_make" "$variable" 1
 done
 
@@ -333,7 +326,7 @@ for guard in \
     'override TIMEOUT_SECONDS := $(value __BOOTART_VM_TIMEOUT_SECONDS_RAW)' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
-    'override ADAPTER_HOST_TIMEOUT_SECONDS := 660' \
+    'override ADAPTER_HOST_TIMEOUT_SECONDS := 5100' \
     'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
     'override ARGS_FILE := $(value __BOOTART_VM_ARGS_FILE_RAW)' \
     'override RUN_DIR := $(value __BOOTART_VM_RUN_DIR_RAW)' \
@@ -441,7 +434,7 @@ reject_recipe_expansion() {
 }
 
 reject_recipe_expansion "$root_make" \
-    'TEST_TIMEOUT_SECONDS|QEMU|QEMU_IMG|IMAGE_ID|TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|BOOTART_BIN|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY|ROOT|INITRAMFS_ADAPTER|REAL_ROOT_ADAPTER|PLAN_FORMAT'
+    'TEST_TIMEOUT_SECONDS|QEMU|QEMU_IMG|IMAGE_ID|TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|BOOTART_BIN|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY'
 reject_recipe_expansion "$vm_make" \
     'IMAGE_ID|BOOTART_BIN|QEMU|QEMU_IMG|TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY|REPO_ROOT|VM_ROOT|VM_SOURCE_ROOT|LOCK_FILE|MATRIX_FILE'
 

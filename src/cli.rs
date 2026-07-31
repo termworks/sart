@@ -17,6 +17,12 @@ pub enum Command {
     /// Internal early-boot splash eligibility predicate
     #[command(name = "early-boot-enabled", hide = true)]
     EarlyBootEnabled(EarlyBootEnabledArgs),
+    /// Internal systemd ExecCondition: zero means the stock console is needed
+    #[command(name = "console-fallback-needed", hide = true)]
+    ConsoleFallbackNeeded(ConsoleFallbackNeededArgs),
+    /// Internal bounded readiness gate before acquiring a Linux virtual terminal
+    #[command(name = "vt-ready", hide = true)]
+    VtReady(VtReadyArgs),
     /// Run the foreground splash daemon
     Daemon(DaemonArgs),
     /// Show the splash view
@@ -47,14 +53,8 @@ pub enum Command {
     UpdateRootFs(UpdateRootFsArgs),
     /// Check daemon connectivity and protocol compatibility
     Ping(RuntimeArgs),
-    /// Inspect or request guarded installation operations for an alternate root
+    /// Inspect or request guarded installation operations
     Install(InstallArgs),
-    /// Read-only inspection of host root (/) install plan
-    HostPlan(HostPlanArgs),
-    /// Request confirmed host root (/) installation; requires --confirm-host-apply
-    HostApply(HostApplyArgs),
-    /// Request confirmed host root (/) uninstallation; requires --confirm-host-uninstall
-    HostUninstall(HostUninstallArgs),
     /// Internal same-ELF native broker capability probe
     #[command(name = "native-ready", hide = true)]
     NativeReady(RuntimeArgs),
@@ -76,6 +76,22 @@ pub struct EarlyBootEnabledArgs {
     /// Kernel command-line file; override only in an isolated test
     #[arg(long, hide = true, default_value = PROC_CMDLINE)]
     pub cmdline: PathBuf,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleFallbackNeededArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+    /// Bounded daemon-readiness window before failing open to the stock agent
+    #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(100..=10_000))]
+    pub wait_ms: u64,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct VtReadyArgs {
+    /// Bounded udev/VT readiness window before failing open
+    #[arg(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(100..=5_000))]
+    pub wait_ms: u64,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -233,49 +249,31 @@ pub struct InstallArgs {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum InstallAction {
-    /// Render a deterministic, read-only, non-actionable installation plan
+    /// Detect Linux capabilities and render the exact read-only installation plan
     Plan(InstallPlanArgs),
-    /// Inspect an existing alternate-root manifest without changing it
+    /// Inspect the live-root installation manifest without changing it
     Status(InstallStatusArgs),
-    /// Request installation; currently hard-locked before filesystem access
+    /// Install the detected proven backend transactionally
     Apply(InstallApplyArgs),
-    /// Request interrupted-transaction recovery; currently hard-locked
+    /// Recover an interrupted installation transaction
     Recover(InstallMutationArgs),
-    /// Request removal; currently hard-locked before filesystem access
+    /// Remove the installed backend transactionally
     Uninstall(InstallMutationArgs),
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
-pub struct HostPlanArgs {
-    /// Render the host install plan in stable machine-readable JSON format
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
-pub struct HostApplyArgs {
-    /// Explicit human confirmation flag to apply changes to host root (/)
-    #[arg(long, default_value_t = false)]
-    pub confirm_host_apply: bool,
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
-pub struct HostUninstallArgs {
-    /// Explicit human confirmation flag to uninstall bootart from host root (/)
-    #[arg(long, default_value_t = false)]
-    pub confirm_host_uninstall: bool,
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct InstallSelectionArgs {
-    /// Existing, root-owned disposable guest root; the running host root is forbidden
-    #[arg(long)]
+    /// VM-test-only root; normal release ELFs always use `/`
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, default_value = "/", hide = true)]
     pub root: PathBuf,
-    /// Exact initramfs/runtime adapter to preview
-    #[arg(long, value_enum)]
+    /// VM-test-only adapter selector; normal release ELFs discover the exact pair
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, value_enum, default_value = "dracut-systemd", hide = true)]
     pub initramfs_adapter: InitramfsAdapterSelection,
-    /// Exact real-root supervisor adapter to preview
-    #[arg(long, value_enum)]
+    /// VM-test-only supervisor selector
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, value_enum, default_value = "systemd", hide = true)]
     pub real_root_adapter: RealRootAdapterSelection,
 }
 
@@ -290,8 +288,9 @@ pub struct InstallPlanArgs {
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct InstallStatusArgs {
-    /// Existing, root-owned disposable guest root; the running host root is forbidden
-    #[arg(long)]
+    /// VM-test-only root; normal release ELFs always use `/`
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, default_value = "/", hide = true)]
     pub root: PathBuf,
 }
 
@@ -299,17 +298,22 @@ pub struct InstallStatusArgs {
 pub struct InstallApplyArgs {
     #[command(flatten)]
     pub selection: InstallSelectionArgs,
-    /// Explicit hostname acknowledgement reserved for the future host-use gate
+    /// Exact current-hostname acknowledgement
     #[arg(long, value_parser = parse_nonempty_confirmation)]
     pub confirm_host: String,
+    /// VM-test-only crash checkpoint ordinal; absent from normal release ELFs
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, hide = true)]
+    pub interrupt_at_checkpoint: Option<u16>,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct InstallMutationArgs {
-    /// Existing, root-owned disposable guest root; the running host root is forbidden
-    #[arg(long)]
+    /// VM-test-only root; normal release ELFs always use `/`
+    #[cfg(feature = "installer-test-seams")]
+    #[arg(long, default_value = "/", hide = true)]
     pub root: PathBuf,
-    /// Explicit hostname acknowledgement reserved for the future host-use gate
+    /// Exact current-hostname acknowledgement
     #[arg(long, value_parser = parse_nonempty_confirmation)]
     pub confirm_host: String,
 }
@@ -338,6 +342,8 @@ pub enum InitramfsAdapterSelection {
     MkinitcpioBusybox,
     #[value(name = "mkinitfs-busybox")]
     MkinitfsBusybox,
+    #[value(name = "mkinitfs-boot-deploy")]
+    MkinitfsBootDeploy,
 }
 
 impl From<InitramfsAdapterSelection> for crate::integration::AdapterId {
@@ -348,6 +354,7 @@ impl From<InitramfsAdapterSelection> for crate::integration::AdapterId {
             InitramfsAdapterSelection::InitramfsToolsBusybox => Self::InitramfsToolsBusybox,
             InitramfsAdapterSelection::MkinitcpioBusybox => Self::MkinitcpioBusybox,
             InitramfsAdapterSelection::MkinitfsBusybox => Self::MkinitfsBusybox,
+            InitramfsAdapterSelection::MkinitfsBootDeploy => Self::MkinitfsBootDeploy,
         }
     }
 }
@@ -394,6 +401,12 @@ pub enum NativeAskpassAdapterSelection {
     DracutClassic,
     #[value(name = "initramfs-tools-busybox")]
     InitramfsToolsBusybox,
+    #[value(name = "mkinitfs-busybox")]
+    MkinitfsBusybox,
+    #[value(name = "mkinitfs-boot-deploy")]
+    MkinitfsBootDeploy,
+    #[value(name = "mkinitcpio-busybox")]
+    MkinitcpioBusybox,
 }
 
 impl From<NativeAskpassAdapterSelection> for crate::password::NativeAdapter {
@@ -401,6 +414,9 @@ impl From<NativeAskpassAdapterSelection> for crate::password::NativeAdapter {
         match value {
             NativeAskpassAdapterSelection::DracutClassic => Self::DracutClassic,
             NativeAskpassAdapterSelection::InitramfsToolsBusybox => Self::InitramfsToolsBusybox,
+            NativeAskpassAdapterSelection::MkinitfsBusybox => Self::MkinitfsBusybox,
+            NativeAskpassAdapterSelection::MkinitfsBootDeploy => Self::MkinitfsBootDeploy,
+            NativeAskpassAdapterSelection::MkinitcpioBusybox => Self::MkinitcpioBusybox,
         }
     }
 }
@@ -532,6 +548,13 @@ mod tests {
             }))
         ));
 
+        let readiness = Cli::parse_from(["bootart", "vt-ready", "--wait-ms", "3000"]);
+        assert!(matches!(
+            readiness.command,
+            Some(Command::VtReady(VtReadyArgs { wait_ms: 3000 }))
+        ));
+        assert!(Cli::try_parse_from(["bootart", "vt-ready", "--wait-ms", "5001"]).is_err());
+
         let progress = Cli::parse_from([
             "bootart",
             "progress",
@@ -611,6 +634,54 @@ mod tests {
                 ..
             }))
         ));
+        let mkinitfs = Cli::parse_from([
+            "bootart",
+            "native-askpass",
+            "--adapter",
+            "mkinitfs-busybox",
+            "--prompt",
+            "Password for encrypted root",
+        ]);
+        assert!(matches!(
+            mkinitfs.command,
+            Some(Command::NativeAskpass(NativeAskpassArgs {
+                adapter: NativeAskpassAdapterSelection::MkinitfsBusybox,
+                attempts: 1,
+                ..
+            }))
+        ));
+        let boot_deploy = Cli::parse_from([
+            "bootart",
+            "native-askpass",
+            "--adapter",
+            "mkinitfs-boot-deploy",
+            "--prompt",
+            "Password for encrypted root",
+        ]);
+        assert!(matches!(
+            boot_deploy.command,
+            Some(Command::NativeAskpass(NativeAskpassArgs {
+                adapter: NativeAskpassAdapterSelection::MkinitfsBootDeploy,
+                attempts: 1,
+                ..
+            }))
+        ));
+        let mkinitcpio = Cli::parse_from([
+            "bootart",
+            "native-askpass",
+            "--adapter",
+            "mkinitcpio-busybox",
+            "--prompt",
+            "A password is required to access the cryptroot volume",
+        ]);
+        assert!(matches!(
+            mkinitcpio.command,
+            Some(Command::NativeAskpass(NativeAskpassArgs {
+                adapter: NativeAskpassAdapterSelection::MkinitcpioBusybox,
+                attempts: 1,
+                ..
+            }))
+        ));
         assert!(
             Cli::try_parse_from(["bootart", "native-askpass", "--prompt", "Password"]).is_err()
         );
@@ -636,8 +707,83 @@ mod tests {
             Some(Command::EarlyBootEnabled(EarlyBootEnabledArgs { cmdline }))
                 if cmdline.as_path() == std::path::Path::new("/tmp/bootart-test-cmdline")
         ));
+
+        let guard = Cli::parse_from([
+            "bootart",
+            "console-fallback-needed",
+            "--runtime-dir",
+            "/tmp/bootart-test",
+            "--wait-ms",
+            "900",
+        ]);
+        assert!(matches!(
+            guard.command,
+            Some(Command::ConsoleFallbackNeeded(ConsoleFallbackNeededArgs {
+                runtime: RuntimeArgs { runtime_dir },
+                wait_ms: 900,
+            })) if runtime_dir.as_path() == std::path::Path::new("/tmp/bootart-test")
+        ));
+        assert!(
+            Cli::try_parse_from(["bootart", "console-fallback-needed", "--wait-ms", "99",])
+                .is_err()
+        );
     }
 
+    #[cfg(not(feature = "installer-test-seams"))]
+    #[test]
+    fn production_installer_surface_is_live_root_only() {
+        let plan = Cli::parse_from(["bootart", "install", "plan", "--json"]);
+        assert!(matches!(
+            plan.command,
+            Some(Command::Install(InstallArgs {
+                action: InstallAction::Plan(InstallPlanArgs { json: true, .. })
+            }))
+        ));
+        for arguments in [
+            vec!["bootart", "install", "plan", "--root", "/guest"],
+            vec![
+                "bootart",
+                "install",
+                "plan",
+                "--initramfs-adapter",
+                "dracut-systemd",
+            ],
+            vec!["bootart", "install", "status", "--root", "/guest"],
+            vec![
+                "bootart",
+                "install",
+                "apply",
+                "--root",
+                "/guest",
+                "--confirm-host",
+                "guest",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "bootart",
+                "install",
+                "apply",
+                "--confirm-host",
+                "bootart-vm",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "bootart",
+                "install",
+                "uninstall",
+                "--confirm-host",
+                "bad confirmation",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "installer-test-seams")]
     #[test]
     fn installer_surface_requires_an_exact_pair_and_confirmation() {
         let plan = Cli::parse_from([
@@ -712,30 +858,46 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "installer-test-seams")]
     #[test]
-    fn host_commands_parse_explicit_flags() {
-        let plan = Cli::try_parse_from(["bootart", "host-plan", "--json"]).unwrap();
+    fn vm_test_apply_accepts_a_hidden_interruption_checkpoint() {
+        let parsed = Cli::try_parse_from([
+            "bootart",
+            "install",
+            "apply",
+            "--root",
+            "/",
+            "--initramfs-adapter",
+            "dracut-systemd",
+            "--real-root-adapter",
+            "systemd",
+            "--confirm-host",
+            "bootart-vm",
+            "--interrupt-at-checkpoint",
+            "17",
+        ])
+        .expect("the VM-only artifact should expose the hidden failure seam");
         assert!(matches!(
-            plan.command,
-            Some(Command::HostPlan(HostPlanArgs { json: true }))
-        ));
-
-        let apply = Cli::try_parse_from(["bootart", "host-apply", "--confirm-host-apply"]).unwrap();
-        assert!(matches!(
-            apply.command,
-            Some(Command::HostApply(HostApplyArgs {
-                confirm_host_apply: true
+            parsed.command,
+            Some(Command::Install(InstallArgs {
+                action: InstallAction::Apply(InstallApplyArgs {
+                    interrupt_at_checkpoint: Some(17),
+                    ..
+                })
             }))
         ));
 
-        let uninstall =
-            Cli::try_parse_from(["bootart", "host-uninstall", "--confirm-host-uninstall"]).unwrap();
-        assert!(matches!(
-            uninstall.command,
-            Some(Command::HostUninstall(HostUninstallArgs {
-                confirm_host_uninstall: true
-            }))
-        ));
+        let help = Cli::try_parse_from(["bootart", "install", "apply", "--help"])
+            .expect_err("help exits through clap's display-help result")
+            .to_string();
+        assert!(!help.contains("interrupt-at-checkpoint"));
+    }
+
+    #[test]
+    fn retired_duplicate_host_commands_are_rejected() {
+        for command in ["host-plan", "host-apply", "host-uninstall"] {
+            assert!(Cli::try_parse_from(["bootart", command]).is_err());
+        }
     }
 
     #[test]

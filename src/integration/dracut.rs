@@ -7,6 +7,14 @@
 //! contract; it
 //! remains unproven until its encrypted-root VM gate passes.
 
+/// Persistent dracut policy for the installed systemd adapter.  Kernel package
+/// post-install hooks invoke dracut without Bootart-specific command-line
+/// arguments, so the exact module must be selected from an embedded,
+/// transactionally installed configuration file as well as from the initial
+/// candidate-generation request.
+pub const SYSTEMD_CONFIG: &str = r#"add_dracutmodules+=" bootart-systemd "
+"#;
+
 /// `module-setup.sh` for a systemd-based dracut initramfs.
 pub const SYSTEMD_MODULE_SETUP: &str = r#"#!/bin/bash
 
@@ -40,6 +48,10 @@ install() {
     do
         inst_simple "/usr/lib/systemd/system/$unit" "$unitdir/$unit"
     done
+    inst_dir "$unitdir/systemd-ask-password-console.service.d"
+    inst_simple \
+        /usr/lib/systemd/system/systemd-ask-password-console.service.d/50-bootart.conf \
+        "$unitdir/systemd-ask-password-console.service.d/50-bootart.conf"
 
     inst_dir "$unitdir/initrd.target.wants"
     inst_dir "$unitdir/initrd-switch-root.target.wants"
@@ -481,6 +493,7 @@ mod tests {
 
     #[test]
     fn systemd_setup_enables_start_directly_and_uses_dracut_symlink_api() {
+        assert_eq!(SYSTEMD_CONFIG, "add_dracutmodules+=\" bootart-systemd \"\n");
         assert!(SYSTEMD_MODULE_SETUP.contains("ln_r \"$unitdir/bootart-start.service\""));
         assert!(
             SYSTEMD_MODULE_SETUP.contains("\"$unitdir/initrd.target.wants/bootart-start.service\"")

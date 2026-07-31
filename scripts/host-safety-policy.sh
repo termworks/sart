@@ -31,7 +31,7 @@ if [[ -d "$vm_root" ]]; then
     while IFS= read -r -d '' entry; do
         name=${entry##*/}
         case "$name" in
-            Makefile|README.md|images.lock|adapter-matrix.lock)
+            Makefile|README.md|images.lock|kernel-packages.lock|adapter-matrix.lock|postmarketos-sources.lock|ubuntu-26.04-autoinstall.user-data.in|ubuntu-26.04-autoinstall.meta-data|fedora-44-kickstart.ks.in|debian-13.6-preseed.cfg.in|alpine-3.24.1-cloud-init.user-data.in|alpine-3.24.1-cloud-init.meta-data|arch-mkinitcpio-builder.user-data.in|arch-mkinitcpio-builder.meta-data|postmarketos-qemu-aarch64-builder.user-data.in|postmarketos-qemu-aarch64-builder.meta-data)
                 [[ -f "$entry" && ! -L "$entry" ]] || \
                     die "VM data surface is unsafe: $entry"
                 ;;

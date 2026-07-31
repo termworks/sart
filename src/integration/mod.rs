@@ -9,6 +9,7 @@ pub mod dracut;
 pub mod initramfs_tools;
 pub mod mkinitcpio;
 pub mod mkinitfs;
+pub mod mkinitfs_boot_deploy;
 pub mod openrc;
 pub mod systemd;
 
@@ -34,6 +35,7 @@ define_adapter_ids! {
     InitramfsToolsBusybox,
     MkinitcpioBusybox,
     MkinitfsBusybox,
+    MkinitfsBootDeploy,
     OpenRcRealRoot,
 }
 
@@ -81,6 +83,8 @@ const DRACUT_SYSTEMD_RESOURCES: &[TemplateId] = &[
     TemplateId::SystemdStartUnit,
     TemplateId::SystemdShowUnit,
     TemplateId::SystemdSwitchRootUnit,
+    TemplateId::SystemdConsoleAgentDropIn,
+    TemplateId::DracutSystemdConfig,
     TemplateId::DracutSystemdModuleSetup,
 ];
 
@@ -105,13 +109,29 @@ const INITRAMFS_TOOLS_RESOURCES: &[TemplateId] = &[
 const MKINITCPIO_RESOURCES: &[TemplateId] = &[
     TemplateId::MkinitcpioInstallHook,
     TemplateId::MkinitcpioRuntimeHook,
+    TemplateId::MkinitcpioPlymouthBridge,
 ];
 
 const MKINITFS_RESOURCES: &[TemplateId] = &[
     TemplateId::MkinitfsFeatureFiles,
     TemplateId::MkinitfsRuntimeHook,
+    TemplateId::MkinitfsFindfsWrapper,
     TemplateId::MkinitfsEarlyCallSnippet,
     TemplateId::MkinitfsHandoffCallSnippet,
+];
+
+// This capability uses a different mkinitfs implementation together with
+// boot-deploy. It must not inherit the other mkinitfs source-patch contract.
+const MKINITFS_BOOT_DEPLOY_RESOURCES: &[TemplateId] = &[
+    TemplateId::MkinitfsBootDeployFiles,
+    TemplateId::MkinitfsBootDeployKernelCmdline,
+    TemplateId::MkinitfsBootDeployRuntime,
+    TemplateId::MkinitfsBootDeployFdeWrapper,
+    TemplateId::MkinitfsBootDeployStockFde,
+    TemplateId::MkinitfsBootDeployNativeUnl0kr,
+    TemplateId::MkinitfsBootDeployStartHook,
+    TemplateId::MkinitfsBootDeployCleanupHook,
+    TemplateId::MkinitfsBootDeployFdeCallSnippet,
 ];
 
 const OPENRC_RESOURCES: &[TemplateId] = &[
@@ -121,7 +141,7 @@ const OPENRC_RESOURCES: &[TemplateId] = &[
 
 /// Component inventory only. A component can describe how far its wiring has
 /// progressed, but only the exact pair table in `install` owns support and its
-/// three proof gates.
+/// six proof gates.
 pub const ADAPTERS: &[AdapterMetadata] = &[
     AdapterMetadata {
         id: AdapterId::DracutSystemd,
@@ -129,7 +149,7 @@ pub const ADAPTERS: &[AdapterMetadata] = &[
         kind: AdapterKind::InitramfsRuntime,
         password_broker: PasswordBrokerStatus::IntegratedUnproven,
         resources: DRACUT_SYSTEMD_RESOURCES,
-        limitation: "systemd password agent is integrated with runtime-identity-gated real-root rebinding, but encrypted-root and switch-root QEMU proof is missing",
+        limitation: "systemd password agent includes runtime-identity-gated real-root rebinding; support requires the exact proven dracut-systemd + systemd capability contract, and component metadata cannot widen it",
     },
     AdapterMetadata {
         id: AdapterId::SystemdRealRoot,
@@ -137,7 +157,7 @@ pub const ADAPTERS: &[AdapterMetadata] = &[
         kind: AdapterKind::RealRootSupervisor,
         password_broker: PasswordBrokerStatus::NotApplicable,
         resources: SYSTEMD_REAL_ROOT_RESOURCES,
-        limitation: "quit ordering and VT release are not yet proven in a real guest",
+        limitation: "support requires the exact proven dracut-systemd + systemd capability contract; component metadata cannot widen it",
     },
     AdapterMetadata {
         id: AdapterId::DracutClassic,
@@ -159,17 +179,25 @@ pub const ADAPTERS: &[AdapterMetadata] = &[
         id: AdapterId::MkinitcpioBusybox,
         name: "mkinitcpio-busybox",
         kind: AdapterKind::InitramfsRuntime,
-        password_broker: PasswordBrokerStatus::NotIntegrated,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
         resources: MKINITCPIO_RESOURCES,
-        limitation: "no mkinitcpio password broker is integrated; HOOKS ordering and lifecycle are unproven",
+        limitation: "native broker uses a structurally guarded Plymouth-compatible bridge for mkinitcpio's BusyBox encrypt hook with restore-before-console fallback; exact HOOKS ordering, encrypted-root unlock, VT ownership, and lifecycle remain VM-unproven",
     },
     AdapterMetadata {
         id: AdapterId::MkinitfsBusybox,
         name: "mkinitfs-busybox",
         kind: AdapterKind::InitramfsRuntime,
-        password_broker: PasswordBrokerStatus::NotIntegrated,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
         resources: MKINITFS_RESOURCES,
-        limitation: "no mkinitfs password broker is integrated; the exact 3.14.0-r0 structural hook patch is source-tested but lifecycle and generated-image behavior remain VM-unproven",
+        limitation: "native broker wraps the reviewed mkinitfs 3.14.0 nlplug-findfs inherited-stdin retry contract with restore-before-console fallback; lifecycle, cancellation/retry behavior, encrypted-root unlock, VT ownership, and generated-image behavior remain VM-unproven",
+    },
+    AdapterMetadata {
+        id: AdapterId::MkinitfsBootDeploy,
+        name: "mkinitfs-boot-deploy-initramfs",
+        kind: AdapterKind::InitramfsRuntime,
+        password_broker: PasswordBrokerStatus::IntegratedUnproven,
+        resources: MKINITFS_BOOT_DEPLOY_RESOURCES,
+        limitation: "native broker replaces only the reviewed unl0kr producer inside a private copy of the stock anonymous cryptsetup pipe; exact generated-image compatibility, cancellation/retry behavior, VT ownership, encrypted-root unlock, switch-root continuity, and aarch64 QEMU lifecycle remain unproven",
     },
     AdapterMetadata {
         id: AdapterId::OpenRcRealRoot,
@@ -343,7 +371,7 @@ pub fn inspect_candidate_archive(
                 return Err(InspectionError::MissingAdapterResource("mkinitcpio hook"));
             }
         }
-        AdapterId::MkinitfsBusybox => {
+        AdapterId::MkinitfsBusybox | AdapterId::MkinitfsBootDeploy => {
             let has_hook = entries
                 .iter()
                 .any(|entry| entry.name.contains("mkinitfs") || entry.name.contains("init"));
@@ -392,6 +420,9 @@ mod tests {
                         AdapterId::DracutSystemd
                             | AdapterId::DracutClassic
                             | AdapterId::InitramfsToolsBusybox
+                            | AdapterId::MkinitcpioBusybox
+                            | AdapterId::MkinitfsBusybox
+                            | AdapterId::MkinitfsBootDeploy
                     ) =>
                 {
                     assert_eq!(
@@ -400,13 +431,29 @@ mod tests {
                     );
                     if metadata.id == AdapterId::DracutSystemd {
                         assert!(metadata.limitation.contains("real-root rebinding"));
-                        assert!(metadata.limitation.contains("QEMU proof is missing"));
+                        assert!(metadata.limitation.contains("capability contract"));
                     } else if metadata.id == AdapterId::DracutClassic {
                         assert!(metadata.limitation.contains("unproven"));
                         assert!(metadata.limitation.contains("console fallback"));
                         assert!(metadata.limitation.contains("encrypted-root"));
-                    } else {
+                    } else if metadata.id == AdapterId::InitramfsToolsBusybox {
                         assert!(metadata.limitation.contains("inherited-pipe"));
+                        assert!(metadata.limitation.contains("console fallback"));
+                        assert!(metadata.limitation.contains("encrypted-root"));
+                        assert!(metadata.limitation.contains("VM-unproven"));
+                    } else if metadata.id == AdapterId::MkinitfsBootDeploy {
+                        assert!(metadata.limitation.contains("unl0kr producer"));
+                        assert!(metadata.limitation.contains("anonymous cryptsetup pipe"));
+                        assert!(metadata.limitation.contains("encrypted-root"));
+                        assert!(metadata.limitation.contains("aarch64 QEMU"));
+                    } else if metadata.id == AdapterId::MkinitcpioBusybox {
+                        assert!(metadata.limitation.contains("Plymouth-compatible"));
+                        assert!(metadata.limitation.contains("console fallback"));
+                        assert!(metadata.limitation.contains("encrypted-root"));
+                        assert!(metadata.limitation.contains("VM-unproven"));
+                    } else {
+                        assert!(metadata.limitation.contains("nlplug-findfs"));
+                        assert!(metadata.limitation.contains("inherited-stdin"));
                         assert!(metadata.limitation.contains("console fallback"));
                         assert!(metadata.limitation.contains("encrypted-root"));
                         assert!(metadata.limitation.contains("VM-unproven"));

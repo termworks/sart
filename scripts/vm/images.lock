@@ -4,8 +4,13 @@
 # id|status|url|sha256|format|arch|filename|kernel_member|initramfs_member|download_bytes|max_virtual_bytes|max_run_bytes|max_file_bytes|max_log_bytes|max_evidence_bytes
 #
 # A row is fetchable only when status=verified and sha256 is exactly 64
-# lowercase hexadecimal characters. Verified rows also require independently
-# reviewed positive byte values for all six resource fields. Blocked rows use
+# lowercase hexadecimal characters. `derived` rows describe a qcow2 produced
+# locally from the named verified HTTPS source; they are never fetchable and
+# must carry a separate authenticated provisioning lineage at runtime. A
+# derived fixture may additionally depend on a separately validated source
+# lock, whose complete digest is then part of that lineage.
+# Verified/derived rows require independently reviewed positive byte values
+# for all six resource fields. Blocked rows use
 # UNRESOLVED for every resource field, so no guessed cap can become executable
 # policy. download_bytes is the exact immutable input length. For qcow2,
 # max_virtual_bytes caps reported guest geometry; for ISO it caps the locked
@@ -15,8 +20,15 @@
 # rows use `-|-`; their immutable base is never attached directly, only through
 # a private overlay.
 alpine-virt-3.20.0-x86_64|verified|https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-virt-3.20.0-x86_64.iso|27cbb137dbf90c74856fb44f90488066c8bb7aee979365255c63ef925e1de521|iso|x86_64|alpine-virt-3.20.0-x86_64.iso|/boot/vmlinuz-virt|/boot/initramfs-virt|63963136|63963136|805306368|134217728|16777216|1048576
-fedora-dracut-image-pending-x86_64|blocked|https://blocked.invalid/fedora-dracut-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|fedora-dracut-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
+ubuntu-26.04-live-server-amd64|verified|https://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso|dec49008a71f6098d0bcfc822021f4d042d5f2db279e4d75bdd981304f1ca5d9|iso|x86_64|ubuntu-26.04-live-server-amd64.iso|/casper/vmlinuz|/casper/initrd|2918598656|3221225472|60129542144|12884901888|67108864|4194304
+ubuntu-26.04-dracut-systemd-amd64-derived|derived|https://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso|dec49008a71f6098d0bcfc822021f4d042d5f2db279e4d75bdd981304f1ca5d9|qcow2|x86_64|ubuntu-26.04-dracut-systemd-amd64.qcow2|-|-|2918598656|25769803776|60129542144|12884901888|67108864|4194304
+fedora-44-server-dvd-x86_64|verified|https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Server/x86_64/iso/Fedora-Server-dvd-x86_64-44-1.7.iso|85837793bfa36db6bc709b4cecd2ec116951b87d9c53c3d95eb2fac8dcf7cf1f|iso|x86_64|Fedora-Server-dvd-x86_64-44-1.7.iso|/images/pxeboot/vmlinuz|/images/pxeboot/initrd.img|3913023488|4294967296|68719476736|12884901888|67108864|4194304
+fedora-44-dracut-systemd-amd64-derived|derived|https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Server/x86_64/iso/Fedora-Server-dvd-x86_64-44-1.7.iso|85837793bfa36db6bc709b4cecd2ec116951b87d9c53c3d95eb2fac8dcf7cf1f|qcow2|x86_64|fedora-44-dracut-systemd-amd64.qcow2|-|-|3913023488|25769803776|68719476736|12884901888|67108864|4194304
 dracut-classic-openrc-image-pending-x86_64|blocked|https://blocked.invalid/dracut-classic-openrc-image-pending-x86_64.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|dracut-classic-openrc-image-pending-x86_64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED
-debian-initramfs-tools-image-pending-x86_64|verified|https://cloud.debian.org/images/cloud/bookworm/20260722-2547/debian-12-genericcloud-amd64-20260722-2547.qcow2|88d11c68ff13acf6202d0fd43e80e50c7bd2cffbb8d43f33ed1a1efd6ad9f59e|qcow2|x86_64|debian-12-genericcloud-amd64-20260722-2547.qcow2|-|-|348913664|21474836480|1610612736|536870912|16777216|1048576
+debian-13.6-netinst-amd64|verified|https://cdimage.debian.org/debian-cd/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso|65273beed27b2df543b68b65630ba525cfbad8df2b12035732b2dff87d6664e7|iso|x86_64|debian-13.6.0-amd64-netinst.iso|/install.amd/vmlinuz|/install.amd/initrd.gz|791674880|1073741824|68719476736|12884901888|67108864|4194304
+debian-13.6-initramfs-tools-systemd-amd64-derived|derived|https://cdimage.debian.org/debian-cd/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso|65273beed27b2df543b68b65630ba525cfbad8df2b12035732b2dff87d6664e7|qcow2|x86_64|debian-13.6-initramfs-tools-systemd-amd64.qcow2|-|-|791674880|34359738368|68719476736|12884901888|67108864|4194304
 arch-mkinitcpio-image-pending-x86_64|verified|https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg-20260715.556894.qcow2|f419d4e29aebfc017ad4c9de330a3be0d7eefba710b269108b116aaca1122926|qcow2|x86_64|Arch-Linux-x86_64-cloudimg-20260715.556894.qcow2|-|-|555267072|21474836480|2684354560|1073741824|16777216|1048576
+arch-mkinitcpio-systemd-amd64-derived|derived|https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg-20260715.556894.qcow2|f419d4e29aebfc017ad4c9de330a3be0d7eefba710b269108b116aaca1122926|qcow2|x86_64|arch-mkinitcpio-systemd-amd64.qcow2|-|-|555267072|25769803776|68719476736|12884901888|67108864|4194304
 alpine-generic-3.24.1-x86_64-bios-cloudinit-r0|verified|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|x86_64|generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|-|-|183697408|209715200|805306368|268435456|16777216|1048576
+alpine-3.24.1-mkinitfs-openrc-amd64-derived|derived|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|x86_64|alpine-3.24.1-mkinitfs-openrc-amd64.qcow2|-|-|183697408|8589934592|21474836480|8589934592|67108864|4194304
+postmarketos-qemu-aarch64-derived|derived|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|aarch64|postmarketos-qemu-aarch64.qcow2|-|-|183697408|8589934592|42949672960|12884901888|134217728|8388608

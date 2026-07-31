@@ -1,0 +1,13 @@
+# bootart postmarketOS provisioning source lock, schema v1
+#
+# Fields (pipe-separated):
+# component|revision|archive_url|sha256|download_bytes
+#
+# These are source inputs for a future normal qemu-aarch64 installation. They
+# are not a bootable image and therefore do not promote the corresponding
+# adapter-matrix rows beyond BLOCKED_UNVERIFIED.
+pmbootstrap|a45bde15e0c8ff399f512086415a581db053ebb7|https://gitlab.postmarketos.org/postmarketOS/pmbootstrap/-/archive/a45bde15e0c8ff399f512086415a581db053ebb7/pmbootstrap-a45bde15e0c8ff399f512086415a581db053ebb7.tar.gz|b8c2706a226282c506a3682c99a3e42efb0abaad1ef2fccbd5a03fe5cd8582d6|304243
+pmaports|0ceb94ab19e2263855914df35c35464b3742d096|https://gitlab.postmarketos.org/postmarketOS/pmaports/-/archive/0ceb94ab19e2263855914df35c35464b3742d096/pmaports-0ceb94ab19e2263855914df35c35464b3742d096.tar.gz|4180c7bf5ac7a5352d6683d6171b1c9ed3bd978018f6a618fd09bb33b2867988|19388747
+postmarketos-mkinitfs|2.11.1|https://gitlab.postmarketos.org/postmarketOS/postmarketos-mkinitfs/-/archive/2.11.1/postmarketos-mkinitfs-2.11.1.tar.gz|d136bcf85d83dafdcb1a92600b29bd2aae04292cd1075fb0ea49c7bada1f4505|36576
+boot-deploy|0.23.0|https://gitlab.postmarketos.org/postmarketOS/boot-deploy/-/archive/0.23.0/boot-deploy-0.23.0.tar.gz|a3ec203e3f0de938b6ea8fcc4fed67f4f1672b9529d6cc5f93ddb9e3b6435888|33287
+buffybox|3.5.1|https://gitlab.postmarketos.org/postmarketOS/buffybox/-/archive/3.5.1/buffybox-3.5.1.tar.gz|abb35ea6043ea11ded3747b237f089f83d4e122d58bca8fcd75c6b3d2d7408bf|2053640

@@ -358,7 +358,8 @@ impl<'art, B: DisplayBackend> SplashEngine<'art, B> {
             let mut result = Ok(());
             prompt.with_visible_text(&mut |text| {
                 let (visible, cells) = visible_prefix(text, usize::from(layout.columns));
-                let column = (usize::from(layout.columns).saturating_sub(cells)) / 2;
+                let column = usize::from(layout.column)
+                    + (usize::from(layout.columns).saturating_sub(cells)) / 2;
                 result = self.backend.render_sensitive_text(
                     layout.row,
                     column as u16,
@@ -419,6 +420,7 @@ fn animation_position(elapsed: Duration, cycle: Duration) -> (f32, usize) {
 #[derive(Debug, Clone, Copy)]
 struct SensitiveLayout {
     row: u16,
+    column: u16,
     columns: u16,
     style: Style,
 }
@@ -429,88 +431,54 @@ fn apply_overlays(
     feedback: Option<InputFeedback>,
 ) -> Result<Option<SensitiveLayout>, DisplayError> {
     let dimensions = scene.dimensions();
-    let mut lines: Vec<(String, Style)> = Vec::with_capacity(4);
-    let input_style = Style {
-        foreground: Color::BrightWhite,
-        background: Color::Default,
-        bold: true,
-    };
-    let mut visible_input_offset = None;
-
     if let Some(prompt) = state.view().prompt() {
-        match feedback.map(InputFeedback::echo_mode) {
-            Some(EchoMode::Obscured) => lines.push((
-                "•".repeat(
-                    feedback
-                        .map(InputFeedback::character_count)
-                        .unwrap_or(0)
-                        .min(usize::from(dimensions.columns())),
-                ),
-                input_style,
-            )),
-            Some(EchoMode::Visible) => {
-                visible_input_offset = Some(lines.len());
-                // Clear/reserve the row in the ordinary scene, but never put
-                // plaintext in it. The backend receives plaintext later via
-                // its non-retaining sensitive-text seam.
-                lines.push((String::new(), input_style));
-            }
-            Some(EchoMode::Silent) | None => {}
-        }
+        return apply_prompt_overlay(scene, prompt.text(), feedback);
+    }
+
+    let mut lines: Vec<(String, Style)> = Vec::with_capacity(4);
+    if let Some(message) = state.message() {
         lines.push((
-            prompt.text().to_owned(),
+            message.to_owned(),
             Style {
-                foreground: Color::BrightWhite,
-                background: Color::Blue,
-                bold: true,
-            },
-        ));
-    } else {
-        if let Some(message) = state.message() {
-            lines.push((
-                message.to_owned(),
-                Style {
-                    foreground: Color::BrightYellow,
-                    background: Color::Default,
-                    bold: true,
-                },
-            ));
-        }
-        if let Some(status) = state.status() {
-            lines.push((
-                status.to_owned(),
-                Style {
-                    foreground: Color::White,
-                    background: Color::Default,
-                    bold: false,
-                },
-            ));
-        }
-        if let Some(progress) = state.progress() {
-            lines.push((
-                progress_line(progress, usize::from(dimensions.columns())),
-                Style {
-                    foreground: Color::BrightCyan,
-                    background: Color::Default,
-                    bold: false,
-                },
-            ));
-        }
-        // Mode is normal presentation context, not operational information.
-        // Append it last so the bounded row selection drops it before a
-        // message, status, or progress update on short displays.
-        let (mode_label, mode_color) = mode_presentation(state.mode());
-        lines.push((
-            mode_label.to_owned(),
-            Style {
-                foreground: mode_color,
+                foreground: Color::BrightYellow,
                 background: Color::Default,
                 bold: true,
             },
         ));
     }
+    if let Some(status) = state.status() {
+        lines.push((
+            status.to_owned(),
+            Style {
+                foreground: Color::White,
+                background: Color::Default,
+                bold: false,
+            },
+        ));
+    }
+    if let Some(progress) = state.progress() {
+        lines.push((
+            progress_line(progress, usize::from(dimensions.columns())),
+            Style {
+                foreground: Color::BrightCyan,
+                background: Color::Default,
+                bold: false,
+            },
+        ));
+    }
+    // Mode is normal presentation context, not operational information.
+    // Append it last so the bounded row selection drops it before a
+    // message, status, or progress update on short displays.
+    let (mode_label, mode_color) = mode_presentation(state.mode());
+    lines.push((
+        mode_label.to_owned(),
+        Style {
+            foreground: mode_color,
+            background: Color::Default,
+            bold: true,
+        },
+    ));
 
-    let mut sensitive = None;
     for (offset, (text, style)) in lines
         .into_iter()
         .take(usize::from(dimensions.rows()))
@@ -519,15 +487,153 @@ fn apply_overlays(
         let row = dimensions.rows() - 1 - offset as u16;
         clear_row(scene, row)?;
         write_centered(scene, row, &text, style)?;
-        if visible_input_offset == Some(offset) {
-            sensitive = Some(SensitiveLayout {
-                row,
-                columns: dimensions.columns(),
-                style,
-            });
-        }
     }
-    Ok(sensitive)
+    Ok(None)
+}
+
+fn apply_prompt_overlay(
+    scene: &mut Scene,
+    prompt: &str,
+    feedback: Option<InputFeedback>,
+) -> Result<Option<SensitiveLayout>, DisplayError> {
+    const BOX_ROWS: usize = 4;
+    const MIN_BOX_COLUMNS: usize = 28;
+    const MAX_BOX_COLUMNS: usize = 54;
+    const MAX_FIELD_COLUMNS: usize = 24;
+
+    let dimensions = scene.dimensions();
+    let screen_columns = usize::from(dimensions.columns());
+    let screen_rows = usize::from(dimensions.rows());
+    let panel_style = Style {
+        foreground: Color::BrightWhite,
+        background: Color::Black,
+        bold: true,
+    };
+
+    // Tiny consoles cannot contain a useful rectangle. Keep the prompt and
+    // input centered and bounded rather than drawing a broken partial box.
+    if screen_columns < 8 || screen_rows < BOX_ROWS {
+        let prompt_row = screen_rows.saturating_sub(1) / 2;
+        let input_row = (prompt_row + 1).min(screen_rows.saturating_sub(1));
+        clear_row(scene, prompt_row as u16)?;
+        write_centered(scene, prompt_row as u16, prompt, panel_style)?;
+        clear_row(scene, input_row as u16)?;
+        return match feedback.map(InputFeedback::echo_mode) {
+            Some(EchoMode::Obscured) => {
+                let stars = "*".repeat(
+                    feedback
+                        .map(InputFeedback::character_count)
+                        .unwrap_or(0)
+                        .min(screen_columns),
+                );
+                write_centered(scene, input_row as u16, &stars, panel_style)?;
+                Ok(None)
+            }
+            Some(EchoMode::Visible) => Ok(Some(SensitiveLayout {
+                row: input_row as u16,
+                column: 0,
+                columns: dimensions.columns(),
+                style: panel_style,
+            })),
+            Some(EchoMode::Silent) | None => Ok(None),
+        };
+    }
+
+    let prompt_columns = prompt.chars().count().saturating_add(4);
+    let box_columns = prompt_columns
+        .clamp(MIN_BOX_COLUMNS, MAX_BOX_COLUMNS)
+        .min(screen_columns);
+    let left = (screen_columns - box_columns) / 2;
+    let top = (screen_rows - BOX_ROWS) / 2;
+    let inner_columns = box_columns - 2;
+    let top_border = format!("╭{}╮", "─".repeat(inner_columns));
+    let bottom_border = format!("╰{}╯", "─".repeat(inner_columns));
+
+    for row in top..top + BOX_ROWS {
+        clear_row(scene, row as u16)?;
+        write_repeated_span(
+            scene,
+            row as u16,
+            left as u16,
+            box_columns,
+            ' ',
+            panel_style,
+        )?;
+    }
+    write_text_at(scene, top as u16, left as u16, &top_border, panel_style)?;
+    write_text_at(
+        scene,
+        (top + BOX_ROWS - 1) as u16,
+        left as u16,
+        &bottom_border,
+        panel_style,
+    )?;
+    write_text_at(scene, (top + 1) as u16, left as u16, "│", panel_style)?;
+    write_text_at(
+        scene,
+        (top + 1) as u16,
+        (left + box_columns - 1) as u16,
+        "│",
+        panel_style,
+    )?;
+    write_centered_in_span(
+        scene,
+        (top + 1) as u16,
+        (left + 1) as u16,
+        inner_columns,
+        prompt,
+        panel_style,
+    )?;
+
+    let field_columns = inner_columns.saturating_sub(2).clamp(2, MAX_FIELD_COLUMNS);
+    let field_left = left + 1 + (inner_columns - field_columns) / 2;
+    let field_inner_columns = field_columns - 2;
+    let input_row = top + 2;
+    write_text_at(scene, input_row as u16, left as u16, "│", panel_style)?;
+    write_text_at(
+        scene,
+        input_row as u16,
+        (left + box_columns - 1) as u16,
+        "│",
+        panel_style,
+    )?;
+    write_text_at(scene, input_row as u16, field_left as u16, "[", panel_style)?;
+    write_text_at(
+        scene,
+        input_row as u16,
+        (field_left + field_columns - 1) as u16,
+        "]",
+        panel_style,
+    )?;
+
+    match feedback.map(InputFeedback::echo_mode) {
+        Some(EchoMode::Obscured) => {
+            let stars = "*".repeat(
+                feedback
+                    .map(InputFeedback::character_count)
+                    .unwrap_or(0)
+                    .min(field_inner_columns),
+            );
+            write_centered_in_span(
+                scene,
+                input_row as u16,
+                (field_left + 1) as u16,
+                field_inner_columns,
+                &stars,
+                panel_style,
+            )?;
+            Ok(None)
+        }
+        // The ordinary scene contains only the empty ASCII field. Plaintext
+        // still crosses only the backend's non-retaining sensitive seam.
+        Some(EchoMode::Visible) => Ok(Some(SensitiveLayout {
+            row: input_row as u16,
+            column: (field_left + 1) as u16,
+            columns: field_inner_columns as u16,
+            style: panel_style,
+        })),
+        Some(EchoMode::Silent) | None => Ok(None),
+    }
 }
 
 /// Stable text-VT presentation for every lifecycle mode.
@@ -570,6 +676,54 @@ fn clear_row(scene: &mut Scene, row: u16) -> Result<(), DisplayError> {
     Ok(())
 }
 
+fn write_repeated_span(
+    scene: &mut Scene,
+    row: u16,
+    column: u16,
+    columns: usize,
+    glyph: char,
+    style: Style,
+) -> Result<(), DisplayError> {
+    for offset in 0..columns {
+        scene.set(column + offset as u16, row, Cell::styled(glyph, style)?)?;
+    }
+    Ok(())
+}
+
+fn write_text_at(
+    scene: &mut Scene,
+    row: u16,
+    column: u16,
+    text: &str,
+    style: Style,
+) -> Result<(), DisplayError> {
+    let available = usize::from(scene.dimensions().columns().saturating_sub(column));
+    for (offset, glyph) in text.chars().take(available).enumerate() {
+        scene.set(column + offset as u16, row, Cell::styled(glyph, style)?)?;
+    }
+    Ok(())
+}
+
+fn write_centered_in_span(
+    scene: &mut Scene,
+    row: u16,
+    column: u16,
+    columns: usize,
+    text: &str,
+    style: Style,
+) -> Result<(), DisplayError> {
+    let glyphs: Vec<char> = text.chars().take(columns).collect();
+    let start = (columns.saturating_sub(glyphs.len())) / 2;
+    for (offset, glyph) in glyphs.into_iter().enumerate() {
+        scene.set(
+            column + (start + offset) as u16,
+            row,
+            Cell::styled(glyph, style)?,
+        )?;
+    }
+    Ok(())
+}
+
 fn write_centered(
     scene: &mut Scene,
     row: u16,
@@ -577,12 +731,7 @@ fn write_centered(
     style: Style,
 ) -> Result<(), DisplayError> {
     let width = usize::from(scene.dimensions().columns());
-    let glyphs: Vec<char> = text.chars().take(width).collect();
-    let start = (width.saturating_sub(glyphs.len())) / 2;
-    for (offset, glyph) in glyphs.into_iter().enumerate() {
-        scene.set((start + offset) as u16, row, Cell::styled(glyph, style)?)?;
-    }
-    Ok(())
+    write_centered_in_span(scene, row, 0, width, text, style)
 }
 
 fn progress_line(progress: u8, width: usize) -> String {
@@ -1017,6 +1166,47 @@ mod tests {
 
         assert_eq!(prompt.feedback().unwrap().character_count(), 2);
         assert!(matches!(state.view(), View::Prompt { .. }));
+    }
+
+    #[test]
+    fn obscured_password_is_centered_inside_a_rounded_box() {
+        let art = Art::parse("X").unwrap();
+        let backend = BufferBackend::new(Dimensions::new(40, 11).unwrap());
+        let mut engine = SplashEngine::new(backend, &art, None, EngineConfig::default()).unwrap();
+        let clock = FakeClock::default();
+        let mut state = running_state();
+        state
+            .apply(StateAction::BeginPrompt(
+                PromptMetadata::new(7, "Disk password").unwrap(),
+            ))
+            .unwrap();
+        let mut prompt = EnginePrompt::new(false, false, "abc");
+        engine.start(&mut state).unwrap();
+
+        engine
+            .tick_with_prompt(&mut state, &clock, &mut prompt)
+            .unwrap();
+
+        let scene = engine.backend().frames().last().unwrap();
+        let top_border = "╭──────────────────────────╮";
+        let bottom_border = "╰──────────────────────────╯";
+        let top = scene_row(scene, 3);
+        let prompt_row = scene_row(scene, 4);
+        let input_row = scene_row(scene, 5);
+        let bottom = scene_row(scene, 6);
+        assert_eq!(top.chars().skip(6).take(28).collect::<String>(), top_border);
+        assert_eq!(
+            bottom.chars().skip(6).take(28).collect::<String>(),
+            bottom_border
+        );
+        assert_eq!(scene.get(6, 3).unwrap().style().background, Color::Black);
+        assert!(prompt_row.contains("Disk password"));
+        assert_eq!(prompt_row.chars().position(|glyph| glyph == 'D'), Some(13));
+        assert_eq!(input_row.chars().position(|glyph| glyph == '*'), Some(18));
+        let boxed_input = input_row.chars().skip(6).take(28).collect::<String>();
+        assert!(boxed_input.starts_with('│'));
+        assert!(boxed_input.ends_with('│'));
+        assert!(!input_row.contains('•'));
     }
 
     #[test]

@@ -76,6 +76,10 @@ fixture="$(new_fixture indirect-launch)"
 write_runner "$fixture" 'exec "$launcher"' >/dev/null
 expect_rejected "$fixture" indirect-launch
 
+fixture="$(new_fixture feature-gated-product-seam)"
+write_runner "$fixture" 'bootart install apply --interrupt-at-checkpoint 7' >/dev/null
+expect_rejected "$fixture" feature-gated-product-seam
+
 fixture="$(new_fixture forged-result)"
 write_runner "$fixture" 'printf PASS > "$3/lane.result"' >/dev/null
 expect_rejected "$fixture" forged-result

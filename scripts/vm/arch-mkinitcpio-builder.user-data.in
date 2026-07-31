@@ -1,0 +1,151 @@
+#cloud-config
+hostname: bootart-arch-builder
+manage_etc_hosts: true
+ssh_pwauth: false
+users:
+  - default
+write_files:
+  - path: /usr/local/sbin/bootart-provision-arch
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/bash
+      set -Eeuo pipefail
+      umask 077
+
+      fail() {
+          status=$?
+          printf 'BOOTART_VM_ARCH_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
+          poweroff -f || :
+          exit "$status"
+      }
+      trap fail EXIT
+
+      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'
+      target=/dev/vdb
+      boot=${target}1
+      encrypted=${target}2
+      test -b "$target"
+      test ! -b /dev/vdc
+
+      pacman -Sy --noconfirm --needed arch-install-scripts cryptsetup e2fsprogs grub
+      printf 'label: dos\n,4G,83,*\n,,83\n' | sfdisk --wipe always "$target"
+      udevadm settle
+      test -b "$boot"
+      test -b "$encrypted"
+      mkfs.ext4 -F -q "$boot"
+      printf '%s' "$bootart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
+          --pbkdf pbkdf2 --iter-time 100 --key-file - "$encrypted"
+      printf '%s' "$bootart_luks" | cryptsetup open --key-file - "$encrypted" cryptroot
+      unset bootart_luks
+      cryptsetup status cryptroot >/dev/null
+      mkfs.ext4 -F -q /dev/mapper/cryptroot
+
+      mount /dev/mapper/cryptroot /mnt
+      mkdir -p /mnt/boot
+      mount "$boot" /mnt/boot
+      pacstrap -K /mnt base linux linux-firmware mkinitcpio cryptsetup grub sudo
+      # The builder runs with umask 077. pacstrap preserves several already
+      # created top-level directories rather than replacing their modes with
+      # the filesystem package's modes, so normalize only those target-root
+      # mount/layout directories before the installed system is sealed.
+      chmod 0755 /mnt /mnt/boot /mnt/dev /mnt/etc /mnt/home /mnt/mnt /mnt/opt \
+          /mnt/proc /mnt/run /mnt/srv /mnt/sys /mnt/usr /mnt/var \
+          /mnt/var/cache /mnt/var/lib
+      chmod 1777 /mnt/tmp
+      chmod 0700 /mnt/root
+      genfstab -U /mnt > /mnt/etc/fstab
+      grep -Eq '^[^#]+[[:space:]]+/boot[[:space:]]+ext4[[:space:]]' /mnt/etc/fstab
+
+      cat > /mnt/etc/mkinitcpio.conf <<'MKINITCPIO_EOF'
+      MODULES=(virtio_pci virtio_blk)
+      BINARIES=()
+      FILES=()
+      HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)
+      COMPRESSION="zstd"
+      MKINITCPIO_EOF
+      chmod 0644 /mnt/etc/mkinitcpio.conf
+
+      luks_uuid=$(cryptsetup luksUUID "$encrypted")
+      test -n "$luks_uuid"
+      cat > /mnt/etc/default/grub <<GRUB_EOF
+      GRUB_DEFAULT=0
+      GRUB_TIMEOUT=1
+      GRUB_DISTRIBUTOR='Bootart VM'
+      GRUB_CMDLINE_LINUX="cryptdevice=UUID=${luks_uuid}:cryptroot root=/dev/mapper/cryptroot rw console=ttyS0,115200n8 console=tty0"
+      GRUB_PRELOAD_MODULES="part_msdos"
+      GRUB_TERMINAL_INPUT="console serial"
+      GRUB_TERMINAL_OUTPUT="console serial"
+      GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
+      GRUB_DISABLE_RECOVERY=true
+      GRUB_EOF
+      chmod 0644 /mnt/etc/default/grub
+      arch-chroot /mnt mkinitcpio -P
+      grub-install --target=i386-pc --boot-directory=/mnt/boot "$target"
+      arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+      printf '%s\n' bootart-vm > /mnt/etc/hostname
+      printf '%s\n' 'root:arch' | arch-chroot /mnt chpasswd
+      arch-chroot /mnt useradd -m -G wheel bootart
+      printf '%s\n' 'bootart:ubuntu' | arch-chroot /mnt chpasswd
+      install -d -m 0755 /mnt/etc/sudoers.d
+      printf '%s\n' 'bootart ALL=(ALL:ALL) NOPASSWD: ALL' > /mnt/etc/sudoers.d/50-bootart-vm
+      chmod 0440 /mnt/etc/sudoers.d/50-bootart-vm
+      arch-chroot /mnt systemctl enable serial-getty@ttyS0.service
+
+      seed_mount=/media/bootart-kernel-seed
+      package_cache=/mnt/var/cache/bootart-kernel-update
+      mkdir -p "$seed_mount" "$package_cache"
+      mount -o ro /dev/sr0 "$seed_mount"
+      (cd "$seed_mount/kernel-packages" && sha256sum -c SHA256SUMS)
+      cp "$seed_mount/kernel-packages/linux-lts-6.18.41-1-x86_64.pkg.tar.zst" "$package_cache/"
+      cp "$seed_mount/kernel-packages/SHA256SUMS" "$package_cache/"
+      chmod 0400 "$package_cache/linux-lts-6.18.41-1-x86_64.pkg.tar.zst" \
+          "$package_cache/SHA256SUMS"
+      (cd "$package_cache" && sha256sum -c SHA256SUMS)
+      umount "$seed_mount"
+      rmdir "$seed_mount"
+
+      test -x /mnt/usr/bin/mkinitcpio
+      test -x /mnt/usr/bin/lsinitcpio
+      test -x /mnt/usr/bin/grub-mkconfig
+      test -x /mnt/usr/bin/grub-probe
+      test -f /mnt/usr/lib/initcpio/hooks/encrypt
+      test -f /mnt/usr/lib/initcpio/install/encrypt
+      grep -Fxq 'HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)' /mnt/etc/mkinitcpio.conf
+      test -f /mnt/boot/vmlinuz-linux
+      test -f /mnt/boot/initramfs-linux.img
+      test "$(stat -c %a /mnt/etc)" = 755
+      test "$(stat -c %a /mnt/usr)" = 755
+      test "$(stat -c %a /mnt/var)" = 755
+      arch-chroot /mnt sudo -u bootart test -r /etc/profile
+      grep -Fq "cryptdevice=UUID=${luks_uuid}:cryptroot" /mnt/boot/grub/grub.cfg
+      cryptsetup luksDump "$encrypted" | grep -Eq '^Version:[[:space:]]+2$'
+
+      scan=112
+      scan=${scan}358
+      if printf '%s\n' "$scan" | grep -r -a -F -l --devices=skip -f - \
+          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/bootart-secret-paths; then
+          sed 's|^/mnt||' /tmp/bootart-secret-paths >/dev/ttyS0 || :
+          exit 1
+      fi
+      rm -f /tmp/bootart-secret-paths
+      unset scan
+
+      # pacstrap initializes a target-specific pacman keyring.  Its gpg-agent
+      # may outlive pacstrap and retain the target mount as its homedir.
+      # Terminate only those guest/keyring agents before the strict unmount.
+      gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill all || :
+      arch-chroot /mnt gpgconf --kill all || :
+      sync
+      # arch-chroot may leave private API-filesystem mounts below /mnt even
+      # after its command exits.  Tear down the complete guest-only mount tree
+      # before closing the disposable target's encrypted mapping.
+      umount -R /mnt
+      cryptsetup close cryptroot
+      printf '%s\n' BOOTART_VM_ARCH_PROVISION_PASS_V1 >/dev/ttyS0
+      trap - EXIT
+      poweroff
+runcmd:
+  - [ /usr/local/sbin/bootart-provision-arch ]
+final_message: bootart Arch provisioning cloud-init completed

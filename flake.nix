@@ -39,56 +39,87 @@
             ./tests/installer_tests.rs
           ];
         };
-        bootartStatic = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
-          pname = cargoPackage.name;
-          version = cargoPackage.version;
-          src = bootartSource;
+        mkBootartStatic =
+          {
+            rustPlatform,
+            buildPackages,
+            expectedArchitecture,
+            readelfProgram,
+          }:
+          rustPlatform.buildRustPackage {
+            pname = cargoPackage.name;
+            version = cargoPackage.version;
+            src = bootartSource;
 
-          cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [
-            "--no-default-features"
-            "--bin"
-            "bootart"
-          ];
-
-          # The repository's Make verification runs tests before packaging.
-          # pkgsStatic is a cross package set even when CPU architectures match,
-          # so executing Cargo test binaries here would be toolchain-dependent.
-          doCheck = false;
-          strictDeps = true;
-
-          nativeBuildInputs = with pkgs.buildPackages; [
-            bash
-            binutils
-            coreutils
-            findutils
-            gnugrep
-            gnused
-          ];
-
-          # Inspect the final, stripped Nix output. Never use ldd here: ldd can
-          # execute an untrusted ELF on some systems.
-          postFixup = ''
-            READELF=${pkgs.buildPackages.binutils}/bin/readelf \
-              ${pkgs.buildPackages.bash}/bin/bash \
-              ${./scripts/artifact-inspect.sh} \
-              ${lib.escapeShellArg expectedElfArch} \
-              "$out/bin/bootart" "$out/bin"
-          '';
-
-          meta = {
-            description = "Self-contained Plymouth-style text boot splash";
-            license = lib.licenses.mit;
-            mainProgram = "bootart";
-            platforms = [
-              "x86_64-linux"
-              "aarch64-linux"
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--no-default-features"
+              "--bin"
+              "bootart"
             ];
+
+            # The repository's Make verification runs tests before packaging.
+            # pkgsStatic is a cross package set even when CPU architectures
+            # match, so executing test binaries here is toolchain-dependent.
+            doCheck = false;
+            strictDeps = true;
+
+            # rustc otherwise embeds Nix's per-build temporary directory in
+            # panic/source-location strings from vendored crates.
+            preBuild = ''
+              export RUSTFLAGS="''${RUSTFLAGS:-} --remap-path-prefix=$NIX_BUILD_TOP=/build"
+            '';
+
+            nativeBuildInputs = with buildPackages; [
+              bash
+              binutils
+              coreutils
+              findutils
+              gnugrep
+              gnused
+            ];
+
+            # Inspect the final, stripped Nix output. Never use ldd here: ldd
+            # can execute an untrusted ELF on some systems.
+            postFixup = ''
+              READELF=${readelfProgram} \
+                ${buildPackages.bash}/bin/bash \
+                ${./scripts/artifact-inspect.sh} \
+                ${lib.escapeShellArg expectedArchitecture} \
+                "$out/bin/bootart" "$out/bin"
+            '';
+
+            meta = {
+              description = "Self-contained Plymouth-style text boot splash";
+              license = lib.licenses.mit;
+              mainProgram = "bootart";
+              platforms = [
+                "x86_64-linux"
+                "aarch64-linux"
+              ];
+            };
           };
+        bootartStatic = mkBootartStatic {
+          rustPlatform = pkgs.pkgsStatic.rustPlatform;
+          buildPackages = pkgs.buildPackages;
+          expectedArchitecture = expectedElfArch;
+          readelfProgram = "${pkgs.buildPackages.binutils}/bin/readelf";
         };
+        aarch64StaticPackageSet = pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
+        bootartStaticAarch64 =
+          if system == "aarch64-linux" then
+            bootartStatic
+          else
+            mkBootartStatic {
+              rustPlatform = aarch64StaticPackageSet.rustPlatform;
+              buildPackages = aarch64StaticPackageSet.buildPackages;
+              expectedArchitecture = "aarch64";
+              readelfProgram = "${pkgs.buildPackages.binutils}/bin/readelf";
+            };
       in
       (lib.optionalAttrs supportedLinux {
         packages.bootart-static = bootartStatic;
+        packages.bootart-static-aarch64 = bootartStaticAarch64;
         packages.default = bootartStatic;
         checks.bootart-static = bootartStatic;
       })
@@ -123,6 +154,7 @@
             # instead of immediately execing an unpinned hidden executable.
             qemu_test
             qemu-utils
+            cryptsetup
             curl
             cacert
             jq

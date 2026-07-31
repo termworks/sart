@@ -1,0 +1,107 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  timezone: Europe/Amsterdam
+  refresh-installer:
+    update: false
+  identity:
+    hostname: bootart-vm
+    username: bootart
+    # Test account password: ubuntu. This is unrelated to the LUKS passphrase.
+    password: "$6$exDY1mhS4KUYCE/2$zmn9ToZwTKLhCw.b4/b.ZRTIZM30JZ4QrOQ2aOXJ8yk96xpcCof0kxKwuX1kqLG/ygbJ1f8wxED22bTL4F46P0"
+  ssh:
+    install-server: false
+  packages:
+    - cryptsetup
+    - dracut
+  storage:
+    swap:
+      size: 0
+    config:
+      - type: disk
+        id: disk0
+        path: /dev/vda
+        ptable: gpt
+        wipe: superblock-recursive
+        preserve: false
+        grub_device: false
+      - type: partition
+        id: partition-efi
+        device: disk0
+        number: 1
+        size: 1G
+        flag: boot
+        wipe: superblock
+        preserve: false
+        grub_device: true
+      - type: format
+        id: format-efi
+        volume: partition-efi
+        fstype: fat32
+        label: EFI
+      - type: mount
+        id: mount-efi
+        device: format-efi
+        path: /boot/efi
+      - type: partition
+        id: partition-boot
+        device: disk0
+        number: 2
+        size: 2G
+        wipe: superblock
+        preserve: false
+      - type: format
+        id: format-boot
+        volume: partition-boot
+        fstype: ext4
+        label: boot
+      - type: mount
+        id: mount-boot
+        device: format-boot
+        path: /boot
+      - type: partition
+        id: partition-root-encrypted
+        device: disk0
+        number: 3
+        size: -1
+        wipe: superblock
+        preserve: false
+      - type: dm_crypt
+        id: crypt-root
+        volume: partition-root-encrypted
+        dm_name: crypt-root
+        key: __BOOTART_VM_LUKS_PASSPHRASE__
+        options:
+          - luks
+      - type: format
+        id: format-root
+        volume: crypt-root
+        fstype: ext4
+        label: root
+      - type: mount
+        id: mount-root
+        device: format-root
+        path: /
+  late-commands:
+    # Cache the independently locked future kernel while provisioning media
+    # and networking are still allowed. Every proof boot is networkless, and
+    # its BOOTART transport remains a separate one-file ISO.
+    - mkdir -p /run/bootart-kernel-seed /target/var/cache/bootart-kernel-update
+    - mount -o ro /dev/disk/by-label/CIDATA /run/bootart-kernel-seed
+    - cp /run/bootart-kernel-seed/kernel-packages/SHA256SUMS /run/bootart-kernel-seed/kernel-packages/*.deb /target/var/cache/bootart-kernel-update/
+    - sh -c 'cd /target/var/cache/bootart-kernel-update && sha256sum -c SHA256SUMS'
+    - chmod 0400 /target/var/cache/bootart-kernel-update/SHA256SUMS /target/var/cache/bootart-kernel-update/*.deb
+    - umount /run/bootart-kernel-seed
+    - curtin in-target -- mkdir -p /etc/dracut.conf.d
+    - curtin in-target -- sh -c 'printf "%s\n" "hostonly=yes" "add_dracutmodules+=\" systemd crypt \"" > /etc/dracut.conf.d/60-bootart-vm.conf'
+    - curtin in-target -- dracut --regenerate-all --force
+    - curtin in-target -- mkdir -p /etc/default/grub.d
+    # Keep serial as an evidence console, but make tty0 the primary /dev/console
+    # so QMP keyboard events exercise the same graphical VT as a real keyboard.
+    - curtin in-target -- sh -c 'printf "%s\n" "GRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=tty0\"" "GRUB_TERMINAL=\"serial console\"" "GRUB_SERIAL_COMMAND=\"serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\"" > /etc/default/grub.d/60-bootart-vm.cfg'
+    - curtin in-target -- update-grub
+    - rm -rf /target/var/log/installer /target/var/lib/cloud/instances
+  shutdown: poweroff

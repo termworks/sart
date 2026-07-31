@@ -68,21 +68,24 @@ matrix_pairs=$(awk -F '|' '
     $0 !~ /^#/ && NF {
         pair = $1
         lane = $5
-        if (lane != "lifecycle" && lane != "install" && lane != "password") exit 3
-        rows[pair]++
-        pair_lanes[pair SUBSEP lane]++
+        if (lane != "lifecycle" && lane != "install" && lane != "password" &&
+            lane != "recovery" && lane != "uninstall" && lane != "kernel-update") exit 3
+        pair_lanes[pair SUBSEP lane] = 1
+        pairs[pair] = 1
         print pair
     }
     END {
-        for (pair in rows) {
-            if (rows[pair] != 3 ||
-                pair_lanes[pair SUBSEP "lifecycle"] != 1 ||
+        for (pair in pairs) {
+            if (pair_lanes[pair SUBSEP "lifecycle"] != 1 ||
                 pair_lanes[pair SUBSEP "install"] != 1 ||
-                pair_lanes[pair SUBSEP "password"] != 1) exit 3
+                pair_lanes[pair SUBSEP "password"] != 1 ||
+                pair_lanes[pair SUBSEP "recovery"] != 1 ||
+                pair_lanes[pair SUBSEP "uninstall"] != 1 ||
+                pair_lanes[pair SUBSEP "kernel-update"] != 1) exit 3
         }
     }
 ' "$matrix" | sort -u) ||
-    die 'every matrix pair must own exactly one lifecycle, install, and password row'
+    die 'every matrix pair must own all six proof lanes'
 [[ "$root_pairs" == "$matrix_pairs" ]] ||
     die 'Make and adapter-matrix pair sets differ'
 
@@ -100,19 +103,19 @@ rust_pair_count=$(wc -l <<< "$rust_pairs" | tr -d '[:space:]')
     die 'Make/matrix and Rust exact-pair sets differ'
 
 for pair in $rust_pairs; do
-    for lane in lifecycle install password; do
+    for lane in lifecycle install password recovery uninstall kernel-update; do
         count=$(grep -Fc "\"make vm-test-$lane-$pair\"," <<< "$registry" || true)
         [[ "$count" -eq 1 ]] ||
             die "Rust pair $pair must own exactly one $lane proof gate"
     done
-    total=$(grep -Ec "make vm-test-(lifecycle|install|password)-$pair\"" <<< "$registry" || true)
-    [[ "$total" -eq 3 ]] || die "Rust pair $pair has an unexpected proof-gate set"
+    total=$(grep -Ec "make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-$pair\"" <<< "$registry" || true)
+    [[ "$total" -eq 6 ]] || die "Rust pair $pair has an unexpected proof-gate set"
 done
 
-proof_gate_count=$(grep -Ec '"make vm-test-(lifecycle|install|password)-[a-z0-9-]+",' \
+proof_gate_count=$(grep -Ec '"make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-[a-z0-9-]+",' \
     <<< "$registry" || true)
-[[ "$proof_gate_count" -eq $((row_count * 3)) ]] ||
+[[ "$proof_gate_count" -eq $((row_count * 6)) ]] ||
     die 'Rust registry contains an unowned or malformed proof gate'
 
-printf 'bootart-adapter-pairs: PASS: %s exact pairs share one 3-lane proof surface\n' \
+printf 'bootart-adapter-pairs: PASS: %s exact pairs share one 6-lane proof surface\n' \
     "$row_count"

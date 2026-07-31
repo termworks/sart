@@ -439,6 +439,91 @@ vm_lock_record() {
     ' "$lock_file" || vm_die "lock must contain exactly one row for $wanted"
 }
 
+vm_kernel_package_lock_record() {
+    local lock_file=$1 wanted=$2
+    awk -F '|' -v wanted="$wanted" '
+        $0 !~ /^#/ && NF && $1 == wanted { print; found++ }
+        END { if (found != 1) exit 3 }
+    ' "$lock_file" || vm_die "kernel package lock must contain exactly one row for $wanted"
+}
+
+vm_validate_kernel_package_lock() {
+    local lock_file=$1 line id status url sha download_bytes filename package version arch fixture extra
+    local rows=0 expected_ids actual_ids
+    [[ -f "$lock_file" && ! -L "$lock_file" ]] ||
+        vm_die "kernel package lock is missing or symlinked: $lock_file"
+    awk -F '|' '
+        $0 !~ /^#/ && NF {
+            if (NF != 10 || seen[$1]++) exit 1
+            rows++
+        }
+        END { if (rows != 10) exit 1 }
+    ' "$lock_file" || vm_die 'kernel package lock must contain ten unique ten-field rows'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        IFS='|' read -r id status url sha download_bytes filename package version arch fixture extra <<< "$line"
+        [[ -z "${extra:-}" ]] || vm_die "too many kernel package lock fields for $id"
+        [[ "$status" == verified ]] || vm_die "unverified kernel package row: $id"
+        [[ ${#sha} -eq 64 && "$sha" != *[!0-9a-f]* ]] ||
+            vm_die "kernel package has no lowercase SHA-256: $id"
+        vm_is_positive_byte_count "$download_bytes" ||
+            vm_die "kernel package has an invalid byte length: $id"
+        vm_decimal_at_most "$download_bytes" 536870912 ||
+            vm_die "kernel package exceeds the reviewed 512 MiB ceiling: $id"
+        [[ "$url" != *..* && "$url" == */"$filename" ]] ||
+            vm_die "kernel package URL does not end in its safe locked filename: $id"
+        case "$fixture" in
+            ubuntu-26.04-dracut-systemd)
+                [[ "$id" =~ ^ubuntu-7\.1\.0-5-[a-z0-9-]+-amd64$ &&
+                   "$url" == https://archive.ubuntu.com/ubuntu/pool/main/l/* &&
+                   "$filename" =~ ^linux-[A-Za-z0-9.+_-]+_amd64\.deb$ &&
+                   "$package" =~ ^linux-[a-z0-9.+-]+$ &&
+                   "$version" =~ ^7\.1\.0-5\.5(\+1)?$ && "$arch" == amd64 ]] ||
+                    vm_die "invalid reviewed Ubuntu kernel package contract: $id"
+                ;;
+            fedora-44-dracut-systemd)
+                [[ "$id" =~ ^fedora-7\.1\.5-[a-z0-9-]+-x86_64$ &&
+                   "$url" == https://kojipkgs.fedoraproject.org/packages/kernel/7.1.5/200.fc44/x86_64/* &&
+                   "$filename" =~ ^kernel(-core|-modules|-modules-core)?-7\.1\.5-200\.fc44\.x86_64\.rpm$ &&
+                   "$package" =~ ^kernel(-core|-modules|-modules-core)?$ &&
+                   "$version" == 7.1.5-200.fc44 && "$arch" == x86_64 ]] ||
+                    vm_die "invalid reviewed Fedora kernel package contract: $id"
+                ;;
+            alpine-mkinitfs-openrc)
+                [[ "$id" == alpine-7.1.5-stable-x86_64 &&
+                   "$url" == https://dl-cdn.alpinelinux.org/alpine/edge/community/x86_64/linux-stable-7.1.5-r0.apk &&
+                   "$filename" == linux-stable-7.1.5-r0.apk &&
+                   "$package" == linux-stable && "$version" == 7.1.5-r0 &&
+                   "$arch" == x86_64 ]] ||
+                    vm_die "invalid reviewed Alpine kernel package contract: $id"
+                ;;
+            debian-13.6-initramfs-tools-systemd)
+                [[ "$id" == debian-6.12.95-image-amd64 &&
+                   "$url" == https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb &&
+                   "$filename" == linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb &&
+                   "$package" == linux-image-6.12.95+deb13-amd64 &&
+                   "$version" == 6.12.95-1 && "$arch" == amd64 ]] ||
+                    vm_die "invalid reviewed Debian kernel package contract: $id"
+                ;;
+            arch-mkinitcpio-systemd)
+                [[ "$id" == arch-6.18.41-lts-x86_64 &&
+                   "$url" == https://archive.archlinux.org/packages/l/linux-lts/linux-lts-6.18.41-1-x86_64.pkg.tar.zst &&
+                   "$filename" == linux-lts-6.18.41-1-x86_64.pkg.tar.zst &&
+                   "$package" == linux-lts && "$version" == 6.18.41-1 &&
+                   "$arch" == x86_64 ]] ||
+                    vm_die "invalid reviewed Arch kernel package contract: $id"
+                ;;
+            *) vm_die "unknown kernel package fixture: $id" ;;
+        esac
+        ((rows += 1))
+    done < "$lock_file"
+    [[ "$rows" == 10 ]] || vm_die 'kernel package lock row count changed during validation'
+    expected_ids=$'alpine-7.1.5-stable-x86_64\narch-6.18.41-lts-x86_64\ndebian-6.12.95-image-amd64\nfedora-7.1.5-core-x86_64\nfedora-7.1.5-kernel-x86_64\nfedora-7.1.5-modules-core-x86_64\nfedora-7.1.5-modules-x86_64\nubuntu-7.1.0-5-image-amd64\nubuntu-7.1.0-5-modules-amd64\nubuntu-7.1.0-5-zfs-amd64'
+    actual_ids="$(awk -F '|' '$0 !~ /^#/ && NF { print $1 }' "$lock_file" | sort)"
+    [[ "$actual_ids" == "$expected_ids" ]] ||
+        vm_die 'kernel package lock does not contain the exact reviewed Ubuntu, Fedora, Alpine, Debian, and Arch sets'
+}
+
 vm_validate_lock() {
     local lock_file=$1 line id status url sha format arch filename kernel initrd
     local download_bytes max_virtual_bytes max_run_bytes max_file_bytes
@@ -462,7 +547,8 @@ vm_validate_lock() {
         [[ "$url" == https://* ]] || vm_die "image URL must use HTTPS: $id"
         [[ "$filename" =~ ^[A-Za-z0-9][A-Za-z0-9._-]+$ ]] || \
             vm_die "unsafe image filename: $id"
-        [[ "$arch" == x86_64 ]] || vm_die "unsupported locked image architecture: $id"
+        [[ "$arch" == x86_64 || "$arch" == aarch64 ]] ||
+            vm_die "unsupported locked image architecture: $id"
         case "$format" in
             iso)
                 [[ "$kernel" == /* && "$initrd" == /* ]] || \
@@ -477,21 +563,23 @@ vm_validate_lock() {
             *) vm_die "unsupported locked image format: $id" ;;
         esac
         case "$status" in
-            verified)
+            verified|derived)
                 [[ ${#sha} -eq 64 && "$sha" != *[!0-9a-f]* ]] || \
-                    vm_die "verified row has no lowercase SHA-256: $id"
+                    vm_die "$status row has no lowercase source SHA-256: $id"
                 [[ "$url" != https://blocked.invalid/* ]] || \
-                    vm_die "verified row still uses the blocked placeholder origin: $id"
+                    vm_die "$status row still uses the blocked placeholder origin: $id"
                 for resource in \
                     "$download_bytes" "$max_virtual_bytes" "$max_run_bytes" \
                     "$max_file_bytes" "$max_log_bytes" "$max_evidence_bytes"
                 do
                     vm_is_positive_byte_count "$resource" ||
-                        vm_die "verified row has an invalid or unresolved resource cap: $id"
+                        vm_die "$status row has an invalid or unresolved resource cap: $id"
                 done
                 (( max_log_bytes <= max_file_bytes && max_evidence_bytes <= max_file_bytes )) ||
                     vm_die "log/evidence cap exceeds per-file cap: $id"
                 if [[ "$format" == iso ]]; then
+                    [[ "$status" == verified ]] ||
+                        vm_die "derived input cannot be an ISO row: $id"
                     (( download_bytes <= max_virtual_bytes )) ||
                         vm_die "ISO medium size exceeds its virtual-medium cap: $id"
                 fi
@@ -527,6 +615,60 @@ vm_validate_lock() {
             *) vm_die "invalid image lock status for $id: $status" ;;
         esac
     done < "$lock_file"
+}
+
+vm_validate_postmarketos_source_lock() {
+    local lock_file=$1 line component revision url sha download_bytes extra expected_url
+    local -A seen=()
+    [[ -f "$lock_file" && ! -L "$lock_file" ]] ||
+        vm_die "postmarketOS source lock is missing or symlinked: $lock_file"
+    awk -F '|' '
+        $0 !~ /^#/ && NF {
+            if (NF != 5 || seen[$1]++) exit 1
+            rows++
+        }
+        END { if (rows != 5) exit 1 }
+    ' "$lock_file" || vm_die 'invalid or duplicate postmarketOS source lock rows'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        IFS='|' read -r component revision url sha download_bytes extra <<< "$line"
+        [[ -z "${extra:-}" ]] || vm_die "too many postmarketOS source fields: $component"
+        [[ -z "${seen[$component]:-}" ]] ||
+            vm_die "duplicate postmarketOS source component: $component"
+        seen[$component]=1
+        case "$component" in
+            pmbootstrap|pmaports)
+                [[ "$revision" =~ ^[0-9a-f]{40}$ ]] ||
+                    vm_die "postmarketOS source revision is not an exact Git object id: $component"
+                ;;
+            postmarketos-mkinitfs)
+                [[ "$revision" == 2.11.1 ]] ||
+                    vm_die 'postmarketos-mkinitfs source version is not the reviewed 2.11.1'
+                ;;
+            boot-deploy)
+                [[ "$revision" == 0.23.0 ]] ||
+                    vm_die 'boot-deploy source version is not the reviewed 0.23.0'
+                ;;
+            buffybox)
+                [[ "$revision" == 3.5.1 ]] ||
+                    vm_die 'buffybox source version is not the reviewed 3.5.1'
+                ;;
+            *) vm_die "unexpected postmarketOS source component: $component" ;;
+        esac
+        expected_url="https://gitlab.postmarketos.org/postmarketOS/$component/-/archive/$revision/$component-$revision.tar.gz"
+        [[ "$url" == "$expected_url" ]] ||
+            vm_die "postmarketOS source archive origin does not match its revision: $component"
+        [[ "$sha" =~ ^[0-9a-f]{64}$ ]] ||
+            vm_die "postmarketOS source archive lacks a lowercase SHA-256: $component"
+        vm_is_positive_byte_count "$download_bytes" ||
+            vm_die "postmarketOS source archive has an invalid byte count: $component"
+        (( download_bytes <= 67108864 )) ||
+            vm_die "postmarketOS source archive exceeds the reviewed 64 MiB cap: $component"
+    done < "$lock_file"
+    [[ ${seen[pmbootstrap]:-0} -eq 1 && ${seen[pmaports]:-0} -eq 1 && \
+       ${seen[postmarketos-mkinitfs]:-0} -eq 1 && \
+       ${seen[boot-deploy]:-0} -eq 1 && ${seen[buffybox]:-0} -eq 1 ]] ||
+        vm_die 'postmarketOS source lock must contain every reviewed component exactly once'
 }
 
 vm_wait_direct_child_bounded() {

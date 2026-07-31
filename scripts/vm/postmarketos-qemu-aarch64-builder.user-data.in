@@ -1,0 +1,396 @@
+#cloud-config
+hostname: bootart-pmos-builder
+manage_etc_hosts: true
+ssh_pwauth: false
+users:
+  - default
+write_files:
+  - path: /usr/local/sbin/bootart-provision-postmarketos
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      set -eu
+      umask 077
+
+      fail() {
+          status=$?
+          trap - EXIT
+          if [ -n "${partition_settle_pid:-}" ]; then
+              kill "$partition_settle_pid" 2>/dev/null || :
+              wait "$partition_settle_pid" 2>/dev/null || :
+          fi
+          if [ -n "${hotplug_saved:-}" ]; then
+              printf '%s\n' "$hotplug_saved" > /proc/sys/kernel/hotplug 2>/dev/null || :
+          fi
+          if [ "${mdev_was_running:-no}" = yes ]; then
+              rc-service mdev start >/dev/null 2>&1 || :
+          fi
+          if [ -n "${post_root:-}" ] && mountpoint -q "$post_root" 2>/dev/null; then
+              umount "$post_root" 2>/dev/null || :
+          fi
+          if [ -n "${post_mapper:-}" ] && [ -e "/dev/mapper/$post_mapper" ]; then
+              cryptsetup close "$post_mapper" 2>/dev/null || :
+          fi
+          printf 'BOOTART_VM_POSTMARKETOS_PROVISION_FAIL_V1|stage=%s|status=%s\n' \
+              "${stage:-startup}" "$status" >/dev/ttyS0 || :
+          poweroff -f || :
+          exit "$status"
+      }
+      trap fail EXIT
+
+      target=/dev/vdb
+      input=/mnt/bootart-pmos-input
+      work=/var/lib/pmbootstrap
+      config=/etc/pmbootstrap_v3.cfg
+      rootfs=$work/chroot_rootfs_qemu-aarch64
+      secret=/dev/virtio-ports/bootart.fde
+      partition_settle_pid=
+      hotplug_saved=
+      mdev_was_running=no
+      post_root=/mnt/bootart-postinstall
+      post_mapper=bootart_postinstall
+
+      stage=builder-disk
+      test -b /dev/vda
+      stage=target-disk
+      test -b "$target"
+      test ! -b /dev/vdc
+      stage=source-media
+      test -b /dev/sr0
+      stage=secret-device
+      test -c "$secret"
+
+      stage=mount-source-media
+      mkdir -p "$input"
+      mount -o ro /dev/sr0 "$input"
+      test "$(blkid -s LABEL -o value /dev/sr0)" = CIDATA
+      stage=source-digests
+      printf '%s  %s\n' '__PMBOOTSTRAP_SHA256__' "$input/pmbootstrap.tar.gz" | sha256sum -c -
+      printf '%s  %s\n' '__PMAPORTS_SHA256__' "$input/pmaports.tar.gz" | sha256sum -c -
+      printf '%s  %s\n' '__MKINITFS_SHA256__' "$input/postmarketos-mkinitfs.tar.gz" | sha256sum -c -
+      printf '%s  %s\n' '__BOOT_DEPLOY_SHA256__' "$input/boot-deploy.tar.gz" | sha256sum -c -
+      printf '%s  %s\n' '__BUFFYBOX_SHA256__' "$input/buffybox.tar.gz" | sha256sum -c -
+
+      stage=builder-packages
+      apk add --no-cache python3 git kpartx util-linux cryptsetup openssl tar coreutils e2fsprogs
+      stage=extract-sources
+      mkdir -p /opt/pmbootstrap /opt/pmaports "$work/cache_git"
+      tar -xzf "$input/pmbootstrap.tar.gz" -C /opt/pmbootstrap --strip-components=1
+      tar -xzf "$input/pmaports.tar.gz" -C /opt/pmaports --strip-components=1
+      test -f /opt/pmbootstrap/pmbootstrap.py
+      test -f /opt/pmaports/pmaports.cfg
+      test "$(sed -n 's/^channel=//p' /opt/pmaports/pmaports.cfg)" = edge
+      test "$(sed -n 's/^version=//p' /opt/pmaports/pmaports.cfg)" = 7
+      printf '%s\n' 8 > "$work/version"
+
+      stage=write-config
+      cat > "$config" <<'BOOTART_PMOS_CONFIG'
+      [pmbootstrap]
+      aports = /opt/pmaports
+      boot_size = 2048
+      build_pkgs_on_install = False
+      ccache_size = 0
+      device = qemu-aarch64
+      extra_packages = none
+      extra_space = 0
+      hostname = bootart-pmos
+      is_default_channel = False
+      jobs = 2
+      kernel = stable
+      locale = en_US.UTF-8
+      service_manager = openrc
+      ssh_keys = False
+      timezone = GMT
+      ui = console
+      ui_extras = False
+      user = user
+      work = /var/lib/pmbootstrap
+      BOOTART_PMOS_CONFIG
+      chmod 0600 "$config"
+
+      # Every prompt except cryptsetup is fixed by the config, -y, and the
+      # public VM login password below. The LUKS password is read once from the
+      # private virtio-serial stream into a non-exported shell variable, then
+      # replayed only to cryptsetup stdin. It never enters argv, environment,
+      # or a file and is unset immediately after the final use.
+      # Alpine's cloud fixture runs mdev as a netlink daemon. It can still
+      # consume queued partition remove events after partprobe even when the
+      # legacy kernel hotplug helper is empty. Pause both guest mechanisms and
+      # keep materializing the current sysfs partition identities until
+      # pmbootstrap has finished with them. No host device is ever involved.
+      stage=guest-hotplug-contract
+      test -x /etc/init.d/mdev
+      rc-service mdev status >/dev/null
+      mdev_was_running=yes
+      rc-service mdev stop >/dev/null
+      hotplug_saved=$(cat /proc/sys/kernel/hotplug)
+      case "$hotplug_saved" in
+          '' | /sbin/mdev) ;;
+          *) exit 1 ;;
+      esac
+      : > /proc/sys/kernel/hotplug
+      stage=pmbootstrap-install
+      (
+          while :; do
+              if [ -f /sys/class/block/vdb1/dev ] && \
+                 [ -f /sys/class/block/vdb2/dev ]; then
+                  for suffix in 1 2; do
+                      node="${target}${suffix}"
+                      identity=$(cat "/sys/class/block/vdb${suffix}/dev")
+                      major=${identity%:*}
+                      minor=${identity#*:}
+                      case "$major:$minor" in
+                          *[!0-9:]* | :* | *:) exit 1 ;;
+                      esac
+                      if [ -e "$node" ]; then
+                          [ -b "$node" ] || exit 1
+                      else
+                          mknod -m 0600 "$node" b "$major" "$minor"
+                      fi
+                  done
+              fi
+              sleep 0.02
+          done
+      ) &
+      partition_settle_pid=$!
+      IFS= read -r install_passphrase < "$secret"
+      test -n "$install_passphrase"
+      printf '%s\n%s\n%s\n' \
+          "$install_passphrase" "$install_passphrase" "$install_passphrase" |
+      PMB_CHANNELS_CFG=/opt/pmaports/channels.cfg \
+      python3 /opt/pmbootstrap/pmbootstrap.py \
+          --as-root --config "$config" --aports /opt/pmaports --work "$work" \
+          --assume-yes --details-to-stdout --timeout 1200 \
+          install --disk="$target" --fde --filesystem ext4 \
+          --password bootart --no-local-pkgs \
+          > /dev/ttyS0 2>&1
+      kill "$partition_settle_pid" 2>/dev/null || :
+      wait "$partition_settle_pid" 2>/dev/null || :
+      partition_settle_pid=
+      printf '%s\n' "$hotplug_saved" > /proc/sys/kernel/hotplug
+      hotplug_saved=
+      rc-service mdev start >/dev/null
+      mdev_was_running=no
+
+      package_version() {
+          awk -v wanted="$1" '
+              BEGIN { RS=""; FS="\\n"; found=0 }
+              {
+                  package=""; version=""
+                  for (i=1; i<=NF; i++) {
+                      if ($i ~ /^P:/) package=substr($i, 3)
+                      if ($i ~ /^V:/) version=substr($i, 3)
+                  }
+                  if (package == wanted) { print version; found++ }
+              }
+              END { if (found != 1) exit 1 }
+          ' "$rootfs/lib/apk/db/installed"
+      }
+
+      stage=installed-package-mkinitfs
+      test "$(package_version postmarketos-mkinitfs)" = 2.11.1-r0
+      stage=installed-package-boot-deploy
+      test "$(package_version boot-deploy)" = 0.23.0-r0
+      stage=installed-package-unl0kr
+      test "$(package_version unl0kr)" = 3.5.1-r1
+      stage=installed-executable-mkinitfs
+      test -x "$rootfs/usr/sbin/mkinitfs"
+      stage=installed-executable-boot-deploy
+      test -x "$rootfs/usr/bin/boot-deploy"
+      stage=installed-executable-openrc
+      test -x "$rootfs/sbin/openrc"
+      stage=installed-executable-fde-unlock
+      test -x "$rootfs/usr/bin/fde-unlock"
+      stage=installed-executable-unl0kr
+      test -x "$rootfs/usr/bin/unl0kr"
+      stage=installed-file-init-sh
+      test -f "$rootfs/usr/share/initramfs/init.sh"
+      stage=installed-file-init-2nd
+      test -f "$rootfs/usr/share/initramfs/init_2nd.sh"
+      stage=installed-file-init-functions-2nd
+      test -f "$rootfs/usr/share/initramfs/init_functions_2nd.sh"
+      stage=installed-file-boot-deploy-functions
+      test -f "$rootfs/usr/share/boot-deploy/boot-deploy-functions.sh"
+      stage=installed-file-os-customization
+      test -f "$rootfs/usr/share/boot-deploy/os-customization"
+      stage=installed-version-marker
+      grep -Fqx 'INITRAMFS_PKG_VERSION="3.12.0-r0"' \
+          "$rootfs/usr/share/initramfs/init.sh"
+      stage=installed-fde-contract
+      grep -Fq 'unl0kr | cryptsetup' "$rootfs/usr/bin/fde-unlock"
+
+      # Cache a signed, exact alternate kernel track inside the sealed base.
+      # Acceptance lanes have no network and transport only the Bootart ELF;
+      # the kernel-update proof therefore consumes these guest-local APKs.
+      stage=kernel-update-cache
+      kernel_repository="$rootfs/var/cache/bootart-kernel-update"
+      kernel_cache="$kernel_repository/aarch64"
+      mkdir -p "$kernel_cache"
+      mount --bind "$work/config_apk_keys" "$rootfs/etc/apk/keys"
+      # Use the same pmbootstrap APK client, target root, verified indexes and
+      # bind-mounted trust store used while constructing the installed image.
+      "$work/apk.static" --no-progress --update-cache \
+          --root "$rootfs" --arch aarch64 \
+          --cache-dir "$work/cache_apk_aarch64" \
+          fetch --output "$kernel_cache" \
+          device-qemu-aarch64-kernel-mainline linux-postmarketos-mainline \
+          > /dev/ttyS0 2>&1
+      umount "$rootfs/etc/apk/keys"
+      # Directly adding these downloaded APKs would require their ephemeral
+      # build-job keys. Preserve the official signed repository index instead,
+      # exactly as a normal online apk transaction uses it to authenticate the
+      # package checksums. The acceptance VM can then remain fully offline.
+      stage=kernel-update-cache-index-select
+      kernel_index=
+      kernel_index_candidate_sha=
+      kernel_index_matches=0
+      for candidate_index in "$work/cache_apk_aarch64"/APKINDEX.*.tar.gz; do
+          test -f "$candidate_index" || continue
+          device_index_matches=$(busybox tar -xzOf "$candidate_index" APKINDEX |
+              awk 'BEGIN { RS=""; FS="\n" }
+                  { package=""; version=""; for (i=1; i<=NF; i++) {
+                      if ($i ~ /^P:/) package=substr($i,3)
+                      if ($i ~ /^V:/) version=substr($i,3)
+                    }
+                    if (package == "device-qemu-aarch64-kernel-mainline" &&
+                        version == "16-r1") found++ }
+                  END { print found + 0 }')
+          mainline_index_matches=$(busybox tar -xzOf "$candidate_index" APKINDEX |
+              awk 'BEGIN { RS=""; FS="\n" }
+                  { package=""; version=""; for (i=1; i<=NF; i++) {
+                      if ($i ~ /^P:/) package=substr($i,3)
+                      if ($i ~ /^V:/) version=substr($i,3)
+                    }
+                    if (package == "linux-postmarketos-mainline" &&
+                        version == "7.2_rc5-r0") found++ }
+                  END { print found + 0 }')
+          candidate_index_sha=$(sha256sum "$candidate_index" | awk '{ print $1 }')
+          printf 'BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_CANDIDATE_V1|%s|%s|%s|%s\n' \
+              "${candidate_index##*/}" "$device_index_matches" \
+              "$mainline_index_matches" "$candidate_index_sha" >/dev/ttyS0
+          if test "$device_index_matches" = 1 &&
+             test "$mainline_index_matches" = 1
+          then
+              if test -z "$kernel_index"; then
+                  kernel_index=$candidate_index
+                  kernel_index_candidate_sha=$candidate_index_sha
+              else
+                  test "$candidate_index_sha" = "$kernel_index_candidate_sha"
+              fi
+              kernel_index_matches=$((kernel_index_matches + 1))
+          fi
+      done
+      test "$kernel_index_matches" -ge 1
+      stage=kernel-update-cache-index-inventory
+      cp "$kernel_index" "$kernel_cache/APKINDEX.tar.gz"
+      kernel_index_size=$(stat -c %s "$kernel_cache/APKINDEX.tar.gz")
+      kernel_index_sha=$(sha256sum "$kernel_cache/APKINDEX.tar.gz" |
+          awk '{ print $1 }')
+      case "$kernel_index_size:$kernel_index_sha" in
+          *[!0-9:a-f]* | :* | *:) exit 1 ;;
+      esac
+      printf 'BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_V1|%s|%s|%s\n' \
+          APKINDEX.tar.gz "$kernel_index_size" "$kernel_index_sha" \
+          >/dev/ttyS0
+      unset candidate_index candidate_index_sha device_index_matches \
+          mainline_index_matches kernel_index kernel_index_candidate_sha \
+          kernel_index_matches kernel_index_size kernel_index_sha
+      stage=kernel-update-cache-inventory
+      test -f "$kernel_cache/device-qemu-aarch64-kernel-mainline-16-r1.apk"
+      test -f "$kernel_cache/linux-postmarketos-mainline-7.2_rc5-r0.apk"
+      test "$(find "$kernel_cache" -maxdepth 1 -type f -name '*.apk' | wc -l)" = 2
+      for kernel_apk in "$kernel_cache"/*.apk; do
+          kernel_apk_size=$(stat -c %s "$kernel_apk")
+          kernel_apk_sha=$(sha256sum "$kernel_apk" | awk '{ print $1 }')
+          case "$kernel_apk_size:$kernel_apk_sha" in
+              *[!0-9:a-f]* | :* | *:) exit 1 ;;
+          esac
+          printf 'BOOTART_VM_POSTMARKETOS_KERNEL_APK_V1|%s|%s|%s\n' \
+              "${kernel_apk##*/}" "$kernel_apk_size" "$kernel_apk_sha" \
+              >/dev/ttyS0
+      done
+      unset kernel_apk kernel_apk_size kernel_apk_sha
+
+      # pmbootstrap copied the prepared rootfs to the encrypted target before
+      # returning. Reopen only that disposable guest disk and copy the already
+      # verified APKs into its offline cache; never retain the passphrase.
+      stage=kernel-update-cache-target-open
+      printf '%s' "$install_passphrase" |
+          cryptsetup open "${target}2" "$post_mapper" --key-file -
+      unset install_passphrase
+      stage=kernel-update-cache-target-copy
+      mkdir -p "$post_root"
+      mount "/dev/mapper/$post_mapper" "$post_root"
+      mkdir -p "$post_root/var/cache/bootart-kernel-update/aarch64"
+      cp -a "$kernel_cache"/. \
+          "$post_root/var/cache/bootart-kernel-update/aarch64/"
+      chmod 0400 "$post_root"/var/cache/bootart-kernel-update/aarch64/*.apk
+      chmod 0400 \
+          "$post_root/var/cache/bootart-kernel-update/aarch64/APKINDEX.tar.gz"
+      sync -f "$post_root/var/cache/bootart-kernel-update/aarch64"
+      umount "$post_root"
+      cryptsetup close "$post_mapper"
+      unset kernel_repository
+
+      stage=disk-contract-root-node
+      test -b "${target}2"
+      stage=disk-contract-luks
+      cryptsetup isLuks "${target}2"
+      stage=disk-contract-luks-version
+      cryptsetup luksDump "${target}2" | grep -Eq '^Version:[[:space:]]+2$'
+      stage=disk-contract-boot-node
+      test -b "${target}1"
+      stage=disk-contract-boot-filesystem
+      test "$(blkid -s TYPE -o value "${target}1")" = vfat
+      stage=disk-contract-boot-files
+      for relative in \
+          initramfs \
+          EFI/BOOT/BOOTAA64.EFI \
+          loader/entries/pmos.conf; do
+          boot_file="$rootfs/boot/$relative"
+          test -f "$boot_file"
+          boot_size=$(stat -c %s "$boot_file")
+          case "$boot_size" in
+              '' | *[!0-9]*) exit 1 ;;
+          esac
+          test "$boot_size" -gt 0
+          printf 'BOOTART_VM_POSTMARKETOS_BOOT_FILE_V1|%s|%s\n' \
+              "$relative" "$boot_size" >/dev/ttyS0
+      done
+
+      # The generic product correctly refuses a merged or unmounted /boot.
+      # Persist the exact installer-created ESP mount so the normally booted
+      # guest exposes the same writable boot-deploy layout used at install.
+      stage=installed-boot-fstab
+      boot_uuid=$(blkid -s UUID -o value "${target}1")
+      case "$boot_uuid" in
+          '' | *[!0-9A-Fa-f-]*) exit 1 ;;
+      esac
+      test -f "$rootfs/etc/fstab"
+      ! awk '$1 !~ /^#/ && $2 == "/boot" { found=1 } END { exit found ? 0 : 1 }' \
+          "$rootfs/etc/fstab"
+      printf 'UUID=%s /boot vfat defaults,noatime 0 2\n' "$boot_uuid" \
+          >> "$rootfs/etc/fstab"
+      grep -Fqx "UUID=$boot_uuid /boot vfat defaults,noatime 0 2" \
+          "$rootfs/etc/fstab"
+      unset boot_uuid
+
+      # Keep the stock locked root account.  The adapter runner must exercise
+      # the same installed-user privilege escalation path used on a normal
+      # machine instead of creating a test-only root-login configuration.
+      stage=installed-admin-console
+      test -x "$rootfs/usr/bin/sudo"
+
+      stage=pmbootstrap-shutdown
+      python3 /opt/pmbootstrap/pmbootstrap.py \
+          --as-root --config "$config" --aports /opt/pmaports --work "$work" \
+          --assume-yes shutdown
+      sync
+      umount "$input"
+      printf '%s\n' BOOTART_VM_POSTMARKETOS_PROVISION_PASS_V1 >/dev/ttyS0
+      trap - EXIT
+      poweroff
+runcmd:
+  - [ /usr/local/sbin/bootart-provision-postmarketos ]
+final_message: bootart postmarketOS builder cloud-init completed

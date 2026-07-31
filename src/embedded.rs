@@ -8,7 +8,7 @@
 ///
 /// This is independent of the daemon control-protocol version.  Increment it
 /// when a materialized integration resource changes incompatibly.
-pub const RESOURCE_SET_VERSION: u16 = 3;
+pub const RESOURCE_SET_VERSION: u16 = 12;
 
 /// Full-size art used when no valid user override is available.
 pub const DEFAULT_ART: &str = r#"              ▄▄▄▄▄▄▄▄              
@@ -104,6 +104,8 @@ define_template_ids! {
     SystemdSwitchRootUnit => "systemd.switch-root-unit",
     SystemdQuitUnit => "systemd.quit-unit",
     SystemdQuitWaitUnit => "systemd.quit-wait-unit",
+    SystemdConsoleAgentDropIn => "systemd.console-agent-drop-in",
+    DracutSystemdConfig => "dracut.systemd-config",
     DracutSystemdModuleSetup => "dracut.systemd-module-setup",
     DracutClassicModuleSetup => "dracut.classic-module-setup",
     DracutClassicStartHook => "dracut.classic-start-hook",
@@ -112,14 +114,25 @@ define_template_ids! {
     DracutClassicPrePivotHook => "dracut.classic-pre-pivot-hook",
     MkinitcpioInstallHook => "mkinitcpio.install-hook",
     MkinitcpioRuntimeHook => "mkinitcpio.runtime-hook",
+    MkinitcpioPlymouthBridge => "mkinitcpio.plymouth-bridge",
     InitramfsToolsBuildHook => "initramfs-tools.build-hook",
     InitramfsToolsAskpassWrapper => "initramfs-tools.askpass-wrapper",
     InitramfsToolsEarlyHook => "initramfs-tools.early-hook",
     InitramfsToolsBottomHook => "initramfs-tools.bottom-hook",
     MkinitfsFeatureFiles => "mkinitfs.feature-files",
     MkinitfsRuntimeHook => "mkinitfs.runtime-hook",
+    MkinitfsFindfsWrapper => "mkinitfs.findfs-wrapper",
     MkinitfsEarlyCallSnippet => "mkinitfs.early-call-snippet",
     MkinitfsHandoffCallSnippet => "mkinitfs.handoff-call-snippet",
+    MkinitfsBootDeployFiles => "mkinitfs-boot-deploy.files-extra",
+    MkinitfsBootDeployKernelCmdline => "mkinitfs-boot-deploy.kernel-cmdline-override",
+    MkinitfsBootDeployRuntime => "mkinitfs-boot-deploy.runtime-hook",
+    MkinitfsBootDeployFdeWrapper => "mkinitfs-boot-deploy.fde-wrapper",
+    MkinitfsBootDeployStockFde => "mkinitfs-boot-deploy.stock-fde-unlock",
+    MkinitfsBootDeployNativeUnl0kr => "mkinitfs-boot-deploy.native-unl0kr",
+    MkinitfsBootDeployStartHook => "mkinitfs-boot-deploy.start-hook",
+    MkinitfsBootDeployCleanupHook => "mkinitfs-boot-deploy.cleanup-hook",
+    MkinitfsBootDeployFdeCallSnippet => "mkinitfs-boot-deploy.fde-call-snippet",
     OpenRcSupervisorScript => "openrc.supervisor-script",
     OpenRcQuitScript => "openrc.quit-script",
 }
@@ -182,7 +195,9 @@ pub const fn art(id: ArtId) -> &'static str {
 /// resource. Availability does not mean support; every entry remains marked
 /// experimental/unproven until its exact VM lane passes.
 pub const fn template_resource(id: TemplateId) -> TemplateResource {
-    use crate::integration::{dracut, initramfs_tools, mkinitcpio, mkinitfs, openrc, systemd};
+    use crate::integration::{
+        dracut, initramfs_tools, mkinitcpio, mkinitfs, mkinitfs_boot_deploy, openrc, systemd,
+    };
 
     let (materialization, contents) = match id {
         TemplateId::SystemdStartUnit => (
@@ -220,12 +235,26 @@ pub const fn template_resource(id: TemplateId) -> TemplateResource {
             },
             systemd::QUIT_WAIT_UNIT,
         ),
+        TemplateId::SystemdConsoleAgentDropIn => (
+            TemplateMaterialization::File {
+                path: "/usr/lib/systemd/system/systemd-ask-password-console.service.d/50-bootart.conf",
+                mode: 0o644,
+            },
+            systemd::CONSOLE_AGENT_DROP_IN,
+        ),
         TemplateId::DracutSystemdModuleSetup => (
             TemplateMaterialization::File {
                 path: "/usr/lib/dracut/modules.d/60bootart-systemd/module-setup.sh",
                 mode: 0o755,
             },
             dracut::SYSTEMD_MODULE_SETUP,
+        ),
+        TemplateId::DracutSystemdConfig => (
+            TemplateMaterialization::File {
+                path: "/etc/dracut.conf.d/60-bootart-systemd.conf",
+                mode: 0o644,
+            },
+            dracut::SYSTEMD_CONFIG,
         ),
         TemplateId::DracutClassicModuleSetup => (
             TemplateMaterialization::File {
@@ -276,6 +305,13 @@ pub const fn template_resource(id: TemplateId) -> TemplateResource {
             },
             mkinitcpio::RUNTIME_HOOK,
         ),
+        TemplateId::MkinitcpioPlymouthBridge => (
+            TemplateMaterialization::File {
+                path: "/usr/lib/bootart/mkinitcpio-plymouth",
+                mode: 0o755,
+            },
+            mkinitcpio::PLYMOUTH_BRIDGE,
+        ),
         TemplateId::InitramfsToolsBuildHook => (
             TemplateMaterialization::File {
                 path: "/usr/share/initramfs-tools/hooks/bootart",
@@ -318,10 +354,17 @@ pub const fn template_resource(id: TemplateId) -> TemplateResource {
             },
             mkinitfs::RUNTIME_HOOK,
         ),
+        TemplateId::MkinitfsFindfsWrapper => (
+            TemplateMaterialization::File {
+                path: "/usr/libexec/bootart/mkinitfs-findfs",
+                mode: 0o755,
+            },
+            mkinitfs::FINDFS_WRAPPER,
+        ),
         TemplateId::MkinitfsEarlyCallSnippet => (
             TemplateMaterialization::ManagedSnippet {
                 target: "/usr/share/mkinitfs/initramfs-init",
-                insertion_point: "post-cmdline-and-runtime-mounts",
+                insertion_point: "post-boot-drivers-before-root-discovery",
             },
             mkinitfs::EARLY_CALL_SNIPPET,
         ),
@@ -331,6 +374,69 @@ pub const fn template_resource(id: TemplateId) -> TemplateResource {
                 insertion_point: "post-initramfs-mount-move-before-switch-root",
             },
             mkinitfs::HANDOFF_CALL_SNIPPET,
+        ),
+        TemplateId::MkinitfsBootDeployFiles => (
+            TemplateMaterialization::File {
+                path: "/etc/mkinitfs/files-extra/bootart",
+                mode: 0o644,
+            },
+            mkinitfs_boot_deploy::FILES_EXTRA,
+        ),
+        TemplateId::MkinitfsBootDeployKernelCmdline => (
+            TemplateMaterialization::File {
+                path: "/etc/kernel-cmdline.d/90-bootart.conf",
+                mode: 0o644,
+            },
+            mkinitfs_boot_deploy::KERNEL_CMDLINE_OVERRIDE,
+        ),
+        TemplateId::MkinitfsBootDeployRuntime => (
+            TemplateMaterialization::File {
+                path: "/usr/libexec/bootart/mkinitfs-boot-deploy-runtime",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::RUNTIME_HOOK,
+        ),
+        TemplateId::MkinitfsBootDeployFdeWrapper => (
+            TemplateMaterialization::File {
+                path: "/usr/libexec/bootart/mkinitfs-boot-deploy-fde",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::FDE_WRAPPER,
+        ),
+        TemplateId::MkinitfsBootDeployStockFde => (
+            TemplateMaterialization::File {
+                path: "/usr/libexec/bootart/fde-unlock-stock",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::STOCK_FDE_UNLOCK,
+        ),
+        TemplateId::MkinitfsBootDeployNativeUnl0kr => (
+            TemplateMaterialization::File {
+                path: "/usr/libexec/bootart/native-bin/unl0kr",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::NATIVE_UNL0KR,
+        ),
+        TemplateId::MkinitfsBootDeployStartHook => (
+            TemplateMaterialization::File {
+                path: "/etc/mkinitfs/hooks-extra/50-bootart-start.sh",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::START_HOOK,
+        ),
+        TemplateId::MkinitfsBootDeployCleanupHook => (
+            TemplateMaterialization::File {
+                path: "/etc/mkinitfs/hooks-cleanup/90-bootart-handoff.sh",
+                mode: 0o755,
+            },
+            mkinitfs_boot_deploy::CLEANUP_HOOK,
+        ),
+        TemplateId::MkinitfsBootDeployFdeCallSnippet => (
+            TemplateMaterialization::ManagedSnippet {
+                target: "/usr/share/initramfs/init_functions_2nd.sh",
+                insertion_point: "reviewed-unlock-root-password-producer-call",
+            },
+            mkinitfs_boot_deploy::FDE_CALL_SNIPPET,
         ),
         TemplateId::OpenRcSupervisorScript => (
             TemplateMaterialization::OpenRcService {

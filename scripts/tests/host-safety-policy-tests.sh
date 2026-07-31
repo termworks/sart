@@ -163,6 +163,14 @@ mkdir -p -- "$fixture/scripts/vm/guest"
 printf '#!/bin/sh\n%s -f\n' 'power''off' > "$fixture/scripts/vm/guest/lifecycle"
 printf 'guest may use %s inside the VM\n' 'mou''nt' > "$fixture/scripts/vm/README.md"
 printf 'tool=%s\n' 'mkinit''cpio' > "$fixture/scripts/vm/adapter-matrix.lock"
+printf '#cloud-config\npackages: [%s]\n' 'dra''cut' \
+    > "$fixture/scripts/vm/ubuntu-26.04-autoinstall.user-data.in"
+printf 'instance-id: fixture\n' \
+    > "$fixture/scripts/vm/ubuntu-26.04-autoinstall.meta-data"
+printf '%%packages\n%s\n%%end\n' 'dra''cut' \
+    > "$fixture/scripts/vm/fedora-44-kickstart.ks.in"
+printf 'd-i fixture string %s\n' 'initramfs-''tools' \
+    > "$fixture/scripts/vm/debian-13.6-preseed.cfg.in"
 bash "$policy" "$fixture" >/dev/null
 
 for destination in boot etc usr; do

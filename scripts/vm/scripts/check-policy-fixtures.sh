@@ -54,6 +54,13 @@ exit 99
 EOF
 cat > "$mock_bin/qemu-img" <<'EOF'
 #!/bin/sh
+last=
+for argument in "$@"; do last=$argument; done
+if [ "${1:-}" = info ] && [ -n "${BOOTART_FIXTURE_TARGET:-}" ] &&
+   [ "$last" = "$BOOTART_FIXTURE_TARGET" ]; then
+    printf '%s\n' '{"format":"qcow2","virtual-size":8589934592}'
+    exit 0
+fi
 if [ "${1:-}" = info ] && [ -n "${BOOTART_FIXTURE_BASE:-}" ]; then
     printf '{"format":"qcow2","backing-filename":"%s","backing-filename-format":"qcow2"}\n' \
         "$BOOTART_FIXTURE_BASE"
@@ -235,6 +242,145 @@ expect_generic_rejected network-forwarding
 write_generic_args "$qemu" none -daemonize
 expect_generic_rejected daemonize
 
+# The stock Ubuntu proof has a separate disk-only policy: no seed, installer
+# medium, network, host share, or direct write to the sealed base is admitted.
+stock_checker="$repo_root/scripts/vm/scripts/check-stock-installed-command.sh"
+provisioned_dir="$vm_root/cache/provisioned"
+stock_base="$provisioned_dir/base.qcow2"
+stock_overlay="$run_dir/stock-overlay.qcow2"
+stock_code="$fixture/OVMF_CODE.fd"
+stock_vars="$run_dir/OVMF_VARS.fd"
+stock_serial="$run_dir/stock-serial.log"
+mkdir -p -- "$provisioned_dir"
+chmod 0700 -- "$provisioned_dir"
+: > "$stock_base"
+: > "$stock_overlay"
+: > "$stock_code"
+: > "$stock_vars"
+chmod 0400 -- "$stock_base"
+chmod 0444 -- "$stock_code"
+chmod 0600 -- "$stock_overlay" "$stock_vars"
+export BOOTART_FIXTURE_BASE="$stock_base"
+
+write_stock_args() {
+    local nic=${1:-none}
+    shift || true
+    rm -f -- "$run_dir/qmp.sock" "$run_dir/serial.sock" \
+        "$run_dir/stock-qemu.policy.sha256"
+    : > "$stock_serial"
+    chmod 0600 -- "$stock_serial"
+    printf '%s\n' \
+        "$qemu" -nodefaults -no-user-config -machine q35,accel=tcg -cpu max \
+        -smp 2 -m 4096M -display none -vga std \
+        -chardev "socket,id=serial0,path=$run_dir/serial.sock,server=on,wait=off,logfile=$stock_serial,logappend=off" \
+        -serial chardev:serial0 -monitor none \
+        -qmp "unix:$run_dir/qmp.sock,server=on,wait=off" \
+        -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
+        -nic "$nic" \
+        -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
+        -boot c,strict=on \
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$stock_code" \
+        -drive "if=pflash,format=raw,unit=1,file=$stock_vars" \
+        -drive "file=$stock_overlay,format=qcow2,if=virtio,cache=none,aio=threads" \
+        "$@" > "$run_dir/stock-qemu.args"
+    chmod 0600 -- "$run_dir/stock-qemu.args"
+}
+expect_stock_rejected() {
+    local label=$1
+    if QEMU="$qemu" QEMU_IMG="$mock_bin/qemu-img" bash "$stock_checker" \
+        "$fake_repo" "$vm_root" "$run_dir" "$run_dir/stock-qemu.args" \
+        "$stock_base" "$stock_overlay" "$stock_code" "$stock_vars" \
+        "$stock_serial" >/dev/null 2>&1; then
+        vm_die "stock Ubuntu command policy accepted forbidden fixture: $label"
+    fi
+}
+write_stock_args none
+QEMU="$qemu" QEMU_IMG="$mock_bin/qemu-img" bash "$stock_checker" \
+    "$fake_repo" "$vm_root" "$run_dir" "$run_dir/stock-qemu.args" \
+    "$stock_base" "$stock_overlay" "$stock_code" "$stock_vars" "$stock_serial" \
+    >/dev/null
+write_stock_args user
+expect_stock_rejected network
+write_stock_args none -drive "file=$fixture/installer.iso,format=raw,media=cdrom"
+expect_stock_rejected installer-medium
+
+# The postmarketOS provisioner has a distinct builder-only policy. Network is
+# admitted only for package provisioning, while both disks, the source ISO,
+# and the secret transport remain exact private regular files/FIFOs.
+builder_checker="$repo_root/scripts/vm/scripts/check-postmarketos-builder-command.sh"
+builder_overlay="$run_dir/builder-overlay.qcow2"
+builder_target="$run_dir/overlay.qcow2"
+builder_seed="$run_dir/seed.iso"
+builder_serial_fifo="$run_dir/serial.fifo"
+builder_serial_log="$run_dir/provision-serial.log"
+secret_in="$run_dir/fde-secret.in"
+secret_out="$run_dir/fde-secret.out"
+: > "$builder_overlay"
+: > "$builder_target"
+: > "$builder_seed"
+chmod 0600 -- "$builder_overlay" "$builder_target"
+chmod 0400 -- "$builder_seed"
+export BOOTART_FIXTURE_BASE="$base_image"
+export BOOTART_FIXTURE_TARGET="$builder_target"
+
+write_builder_args() {
+    local secret_path=${1:-$run_dir/fde-secret}
+    shift || true
+    rm -f -- "$run_dir/qmp.sock" "$builder_serial_fifo" "$builder_serial_log" \
+        "$secret_in" "$secret_out" "$run_dir/provision-qemu.policy.sha256"
+    mkfifo -m 0600 -- "$builder_serial_fifo" "$secret_in" "$secret_out"
+    : > "$builder_serial_log"
+    chmod 0600 -- "$builder_serial_log"
+    printf '%s\n' \
+        "$qemu" -nodefaults -no-user-config -machine q35,accel=kvm:tcg \
+        -smp 4 -m 4096M -display none \
+        -serial "file:$builder_serial_fifo" -monitor none \
+        -qmp "unix:$run_dir/qmp.sock,server=on,wait=off" \
+        -object rng-builtin,id=rng0 -device virtio-rng-pci,rng=rng0 \
+        -nic user,model=virtio-net-pci \
+        -device virtio-serial-pci \
+        -chardev "pipe,id=fde,path=$secret_path" \
+        -device virtserialport,chardev=fde,name=bootart.fde \
+        -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
+        -no-reboot -boot c,strict=on \
+        -drive "file=$builder_overlay,format=qcow2,if=virtio,cache=none,aio=threads" \
+        -drive "file=$builder_target,format=qcow2,if=virtio,cache=none,aio=threads" \
+        -drive "file=$builder_seed,format=raw,media=cdrom,readonly=on,cache=none,aio=threads" \
+        "$@" > "$run_dir/provision-qemu.args"
+    chmod 0600 -- "$run_dir/provision-qemu.args"
+}
+expect_builder_rejected() {
+    local label=$1
+    if QEMU="$qemu" QEMU_IMG="$mock_bin/qemu-img" bash "$builder_checker" \
+        "$fake_repo" "$vm_root" "$run_dir" "$run_dir/provision-qemu.args" \
+        "$base_image" "$builder_overlay" "$builder_target" "$builder_seed" \
+        "$builder_serial_fifo" "$builder_serial_log" "$secret_in" "$secret_out" \
+        >/dev/null 2>&1; then
+        vm_die "postmarketOS builder policy accepted forbidden fixture: $label"
+    fi
+}
+write_builder_args
+QEMU="$qemu" QEMU_IMG="$mock_bin/qemu-img" bash "$builder_checker" \
+    "$fake_repo" "$vm_root" "$run_dir" "$run_dir/provision-qemu.args" \
+    "$base_image" "$builder_overlay" "$builder_target" "$builder_seed" \
+    "$builder_serial_fifo" "$builder_serial_log" "$secret_in" "$secret_out" \
+    >/dev/null
+write_builder_args "$run_dir/not-the-secret"
+expect_builder_rejected changed-secret-path
+write_builder_args "$run_dir/fde-secret" -drive /dev/"sda"
+expect_builder_rejected raw-host-disk
+write_builder_args "$run_dir/fde-secret" -virtfs \
+    'local,path=/tmp,mount_tag=host,security_model=none'
+expect_builder_rejected host-share
+write_builder_args
+rm -f -- "$secret_in"
+ln -s -- "$fixture/outside-secret" "$secret_in"
+expect_builder_rejected symlinked-secret-input
+rm -f -- "$run_dir/provision-qemu.args" "$builder_serial_fifo" \
+    "$builder_serial_log" "$secret_in" "$secret_out" "$builder_overlay" \
+    "$builder_target" "$builder_seed"
+unset BOOTART_FIXTURE_TARGET
+
 wrapper="$repo_root/scripts/vm/scripts/run-adapter-lane.sh"
 runner_policy_line="$(grep -nF 'bash "$SCRIPT_DIR/check-runner-policy.sh"' "$wrapper" | head -n 1 | cut -d: -f1)"
 prepare_line="$(grep -nF '"$runner" prepare' "$wrapper" | head -n 1 | cut -d: -f1)"
@@ -252,9 +398,12 @@ done
 grep -F 'unset QEMU QEMU_IMG' "$wrapper" >/dev/null ||
     vm_die 'common adapter wrapper must clear inherited QEMU variables'
 [[ "$(grep -Fxc '        "${runner_env[@]}" "$runner_bin/bash" "$runner" drive \' "$wrapper")" -eq 1 ]] ||
-    vm_die 'non-password driver must cross the clean runner environment'
+    vm_die 'unencrypted driver must cross the clean runner environment'
 [[ "$(grep -Fxc '        "${runner_env[@]}" BOOTART_VM_SECRET_FD=9 "$runner_bin/bash" "$runner" drive \' "$wrapper")" -eq 1 ]] ||
-    vm_die 'password driver must expose only its fd number through the clean runner environment'
+    vm_die 'encrypted driver must expose only its fd number through the clean runner environment'
+[[ "$(grep -Fxc 'if [[ "$pair" == dracut-systemd || "$pair" == initramfs-tools ||' "$wrapper")" -eq 2 &&
+   "$(grep -Fxc '      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ]]; then' "$wrapper")" -eq 2 ]] ||
+    vm_die 'every exact encrypted lane must use and scan the anonymous secret fd'
 grep -F '"${runner_env[@]}" "$runner_bin/bash" "$runner" prepare \' "$wrapper" >/dev/null ||
     vm_die 'prepare must cross the clean runner environment'
 
@@ -319,6 +468,9 @@ expect_adapter_oracle_rejected() {
 printf '%s\n%s\n%s\n' "$adapter_provisioned" "$adapter_early" "$adapter_pass" \
     > "$adapter_serial"
 chmod 0600 -- "$adapter_serial"
+bash "$adapter_oracle_checker" "$adapter_serial" "$adapter_pass"
+printf '%s\r\n%s\r\n%s\r\n' \
+    "$adapter_provisioned" "$adapter_early" "$adapter_pass" > "$adapter_serial"
 bash "$adapter_oracle_checker" "$adapter_serial" "$adapter_pass"
 printf '%s\n%s\n' "$adapter_provisioned" "$adapter_pass" > "$adapter_serial"
 expect_adapter_oracle_rejected missing-early

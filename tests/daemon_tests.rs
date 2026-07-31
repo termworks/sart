@@ -194,6 +194,22 @@ fn hidden_early_boot_predicate_has_silent_fail_open_process_contract() {
 }
 
 #[test]
+fn hidden_vt_readiness_gate_is_silent_and_bounded() {
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_bootart"))
+        .arg("vt-ready")
+        .arg("--wait-ms")
+        .arg("100")
+        .output()
+        .unwrap();
+
+    assert!(matches!(output.status.code(), Some(0 | 1)));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
 fn daemon_owns_state_rejects_duplicates_and_cleans_up() {
     let tree = TestTree::new("quiet");
     let mut daemon = DaemonChild::spawn(&tree);

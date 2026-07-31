@@ -33,9 +33,15 @@ EOF
 alpha-pair|a|b|image|lifecycle|1|none|overlay|seed|ORACLE|blocked-unverified
 alpha-pair|a|b|image|install|1|none|overlay|seed|ORACLE|blocked-unverified
 alpha-pair|a|b|image|password|1|none|overlay|seed|ORACLE|blocked-unverified
+alpha-pair|a|b|image|recovery|1|none|overlay|seed|ORACLE|blocked-unverified
+alpha-pair|a|b|image|uninstall|1|none|overlay|seed|ORACLE|blocked-unverified
+alpha-pair|a|b|image|kernel-update|1|none|overlay|seed|ORACLE|blocked-unverified
 betapair|a|b|image|lifecycle|1|none|overlay|seed|ORACLE|blocked-unverified
 betapair|a|b|image|install|1|none|overlay|seed|ORACLE|blocked-unverified
 betapair|a|b|image|password|1|none|overlay|seed|ORACLE|blocked-unverified
+betapair|a|b|image|recovery|1|none|overlay|seed|ORACLE|blocked-unverified
+betapair|a|b|image|uninstall|1|none|overlay|seed|ORACLE|blocked-unverified
+betapair|a|b|image|kernel-update|1|none|overlay|seed|ORACLE|blocked-unverified
 EOF
     cat > "$fixture/repo/src/install/mod.rs" <<'EOF'
 pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
@@ -45,6 +51,9 @@ pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
             "make vm-test-lifecycle-alpha-pair",
             "make vm-test-install-alpha-pair",
             "make vm-test-password-alpha-pair",
+            "make vm-test-recovery-alpha-pair",
+            "make vm-test-uninstall-alpha-pair",
+            "make vm-test-kernel-update-alpha-pair",
         ],
     },
     AdapterPairMetadata {
@@ -53,6 +62,9 @@ pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
             "make vm-test-lifecycle-betapair",
             "make vm-test-install-betapair",
             "make vm-test-password-betapair",
+            "make vm-test-recovery-betapair",
+            "make vm-test-uninstall-betapair",
+            "make vm-test-kernel-update-betapair",
         ],
     },
 ];

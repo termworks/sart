@@ -220,12 +220,20 @@ if [ -e "$bootart_guard" ] || \
     exit 0
 fi
 
+# Preserve fail-open startup when /dev/kmsg is unavailable, but keep bounded
+# lifecycle and acquisition errors observable on ordinary Linux initramfs
+# consoles. The daemon never logs password bytes.
+bootart_stderr=/dev/null
+if [ -w /dev/kmsg ]; then
+    bootart_stderr=/dev/kmsg
+fi
+
 (
     if [ "$bootart_native" = yes ]; then
         /usr/bin/bootart daemon --mode boot --password-broker native \
-            </dev/null >/dev/null 2>&1
+            </dev/null >/dev/null 2>"$bootart_stderr"
     else
-        /usr/bin/bootart daemon --mode boot </dev/null >/dev/null 2>&1
+        /usr/bin/bootart daemon --mode boot </dev/null >/dev/null 2>"$bootart_stderr"
     fi
     bootart_daemon_ret=$?
     # Exit 77 and signal-style/unknown exits retain the guard because display
@@ -256,7 +264,7 @@ if [ "$bootart_native" = yes ]; then
     unset bootart_ready_wait
 fi
 
-unset bootart_guard bootart_native
+unset bootart_guard bootart_native bootart_stderr
 exit 0
 "#;
 
@@ -353,6 +361,9 @@ mod tests {
             .find("/usr/bin/bootart daemon")
             .expect("daemon start");
         assert!(early_predicate < startup_guard && startup_guard < daemon);
+        assert!(EARLY_HOOK.contains("bootart_stderr=/dev/null"));
+        assert!(EARLY_HOOK.contains("[ -w /dev/kmsg ]"));
+        assert!(EARLY_HOOK.contains("2>\"$bootart_stderr\""));
 
         assert!(!BUILD_HOOK.contains("early-boot-enabled"));
         assert!(!BOTTOM_HOOK.contains("early-boot-enabled"));

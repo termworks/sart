@@ -84,7 +84,10 @@ expect_rejected() {
     fi
 }
 
-bash "$policy" "$(new_fixture valid)" >/dev/null
+fixture="$(new_fixture valid)"
+printf '.PHONY: vm-test-uninstall-dracut-systemd\nvm-test-uninstall-dracut-systemd:\n\t@true\n' \
+    >>"$fixture/Makefile"
+bash "$policy" "$fixture" >/dev/null
 
 fixture="$(new_fixture direct-dependency)"
 add_path_package "$fixture" zbus

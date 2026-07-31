@@ -133,6 +133,18 @@ mkdir -p -- "$fixture/src/bin"
 printf 'fn main() {}\n' >"$fixture/src/bin/helper.rs"
 expect_rejected "$fixture" hidden-src-bin
 
+fixture="$(new_fixture distribution-installer-module)"
+mkdir -p -- "$fixture/src/install"
+printf 'pub fn install() {}\n' >"$fixture/src/install/ubuntu.rs"
+expect_rejected_with "$fixture" distribution-installer-module \
+    'distribution-named product installer module is forbidden'
+
+fixture="$(new_fixture distribution-identity-backend)"
+mkdir -p -- "$fixture/src/install"
+printf 'pub const REQUIRED_OS: &str = "Fedora";\n' >"$fixture/src/install/dracut_systemd.rs"
+expect_rejected_with "$fixture" distribution-identity-backend \
+    'distribution identity is forbidden in product installer source'
+
 fixture="$(new_fixture symlinked-main)"
 mv -- "$fixture/src/main.rs" "$fixture/main-real.rs"
 ln -s -- ../main-real.rs "$fixture/src/main.rs"
@@ -220,6 +232,15 @@ const RAW: &str = r##"#[cfg_attr(any(), path = "../raw.rs")]"##;
 fn main() { let _ = (NORMAL, RAW); }
 EOF
 bash "$policy" "$fixture" >/dev/null
+
+for vm_fixture_token in 'bootart.vm.gui-password=1' '112358' 'encrypted-drive.qcow2'; do
+    fixture="$(new_fixture vm-fixture-token)"
+    printf 'const VM_FIXTURE: &str = "%s";\nfn main() { let _ = VM_FIXTURE; }\n' \
+        "$vm_fixture_token" > "$fixture/src/main.rs"
+    expect_rejected_with "$fixture" vm-fixture-token \
+        'VM fixture token is forbidden below src/'
+done
+unset vm_fixture_token
 
 fixture="$(new_fixture local-path-dependency)"
 mkdir -p -- "$fixture/helper/src"

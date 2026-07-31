@@ -59,11 +59,6 @@ sed -i '/^artifact-check:/,/^_artifact-check-locked:/s#^\t@bash scripts/artifact
 expect_rejected publisher-lock-name-only-in-echo
 
 fresh_makefile
-sed -i '/^guest-install-plan:/,/^guest-install-status:/s#scripts/artifact-lock.sh#scripts/missing-lock.sh#' \
-    "$tmp/Makefile"
-expect_rejected installer-consumer-bypasses-lock
-
-fresh_makefile
 sed -i '/^vm-test:$/,/^vm-policy-check:/s#scripts/artifact-lock.sh#scripts/missing-lock.sh#' \
     "$tmp/Makefile"
 expect_rejected vm-consumer-bypasses-lock

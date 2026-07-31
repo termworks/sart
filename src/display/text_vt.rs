@@ -40,6 +40,21 @@ pub enum VtSelection {
     Configured(u16),
 }
 
+/// Result of asking the kernel to discard an inactive VT's backing storage.
+///
+/// `VT_OPENQRY` only reports a VT that is unused at that instant; it does not
+/// reserve the VT against later users.  During a long initramfs-to-real-root
+/// handoff, a console manager can legitimately open the splash VT before
+/// Bootart exits.  In that case Linux returns `EBUSY` from `VT_DISALLOCATE`
+/// even after Bootart has closed its own descriptor and switched back to the
+/// original VT.  That is successful release by Bootart, but not deallocation
+/// of a VT that is now independently owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VtDeallocation {
+    Deallocated,
+    InUse,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextVtConfig {
     selection: VtSelection,
@@ -129,7 +144,7 @@ pub trait VtIo {
         number: u16,
         timeout: Duration,
     ) -> io::Result<()>;
-    fn disallocate(&mut self, control: &Self::Device, number: u16) -> io::Result<()>;
+    fn disallocate(&mut self, control: &Self::Device, number: u16) -> io::Result<VtDeallocation>;
     fn write_all(&mut self, vt: &mut Self::Device, bytes: &[u8]) -> io::Result<()>;
     /// Bounded best-effort restoration output. The real implementation must
     /// continue attempting this write after a shutdown signal instead of
@@ -318,11 +333,25 @@ impl VtIo for LinuxVtIo {
         }
     }
 
-    fn disallocate(&mut self, control: &Self::Device, number: u16) -> io::Result<()> {
+    fn disallocate(&mut self, control: &Self::Device, number: u16) -> io::Result<VtDeallocation> {
         // SAFETY: VT_DISALLOCATE consumes a validated, inactive VT number.
         let result =
             unsafe { libc::ioctl(control.as_raw_fd(), VT_DISALLOCATE, number as libc::c_int) };
-        ioctl_failed(result)
+        if result != -1 {
+            return Ok(VtDeallocation::Deallocated);
+        }
+
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EBUSY) {
+            // Linux rejects deallocation when the VT is open elsewhere,
+            // foreground, or owns a console selection. The backend closes
+            // its splash descriptor before this call and separately records
+            // any failure to reactivate the original VT, so EBUSY here means
+            // another kernel/user-space owner has legitimately claimed it.
+            Ok(VtDeallocation::InUse)
+        } else {
+            Err(error)
+        }
     }
 
     fn write_all(&mut self, vt: &mut Self::Device, bytes: &[u8]) -> io::Result<()> {

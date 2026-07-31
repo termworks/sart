@@ -43,6 +43,8 @@ override REPO_ROOT := $(realpath ../..)
 override VM_ROOT := $(REPO_ROOT)/target/vm
 override VM_SOURCE_ROOT := $(REPO_ROOT)/scripts/vm
 override LOCK_FILE := $(VM_SOURCE_ROOT)/images.lock
+override KERNEL_PACKAGE_LOCK := $(VM_SOURCE_ROOT)/kernel-packages.lock
+override POSTMARKETOS_SOURCE_LOCK := $(VM_SOURCE_ROOT)/postmarketos-sources.lock
 override MATRIX_FILE := $(VM_SOURCE_ROOT)/adapter-matrix.lock
 ifneq ($(CURDIR),$(VM_SOURCE_ROOT))
     $(error scripts/vm/Makefile must be invoked with make -C scripts/vm)
@@ -78,7 +80,8 @@ else
     override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
 endif
 ifeq ($(__BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
-    override ADAPTER_HOST_TIMEOUT_SECONDS := 660
+    # Preserve the matrix's full guest deadline after bounded image checks.
+    override ADAPTER_HOST_TIMEOUT_SECONDS := 5100
 else
     override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
 endif
@@ -87,24 +90,32 @@ override RUN_DIR := $(value __BOOTART_VM_RUN_DIR_RAW)
 override BASE_IMAGE := $(value __BOOTART_VM_BASE_IMAGE_RAW)
 override OVERLAY := $(value __BOOTART_VM_OVERLAY_RAW)
 
-override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc
+override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc
 override ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(ADAPTER_PAIRS))
 override ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(ADAPTER_PAIRS))
 override ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(ADAPTER_PAIRS))
-override ADAPTER_TEST_TARGETS := $(ADAPTER_LIFECYCLE_TARGETS) $(ADAPTER_INSTALL_TARGETS) $(ADAPTER_PASSWORD_TARGETS)
+override ADAPTER_RECOVERY_TARGETS := $(addprefix vm-test-recovery-,$(ADAPTER_PAIRS))
+override ADAPTER_UNINSTALL_TARGETS := $(addprefix vm-test-uninstall-,$(ADAPTER_PAIRS))
+override ADAPTER_KERNEL_UPDATE_TARGETS := $(addprefix vm-test-kernel-update-,$(ADAPTER_PAIRS))
+override ADAPTER_TEST_TARGETS := $(ADAPTER_LIFECYCLE_TARGETS) $(ADAPTER_INSTALL_TARGETS) $(ADAPTER_PASSWORD_TARGETS) $(ADAPTER_RECOVERY_TARGETS) $(ADAPTER_UNINSTALL_TARGETS) $(ADAPTER_KERNEL_UPDATE_TARGETS)
 
 # Documented configurable values are exported as data and expanded only by the shell.
 # Structural paths and target lists above reject Make CLI/environment changes.
 export IMAGE_ID BOOTART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
 export ADAPTER_HOST_TIMEOUT_SECONDS ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
-export REPO_ROOT VM_ROOT VM_SOURCE_ROOT LOCK_FILE MATRIX_FILE
+export REPO_ROOT VM_ROOT VM_SOURCE_ROOT LOCK_FILE KERNEL_PACKAGE_LOCK POSTMARKETOS_SOURCE_LOCK MATRIX_FILE
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
-.PHONY: help vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine \
+.PHONY: help vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd \
 	vm-test-lifecycle-alpine vm-validate-lifecycle-timeouts vm-validate-adapter-timeout vm-test-adapters \
-	$(ADAPTER_TEST_TARGETS) vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-clean
+	$(ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd \
+	vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd \
+	vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd \
+	vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd \
+	vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-clean
+.PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
 
 help:
 	@printf '%s\n' \
@@ -119,10 +130,58 @@ help:
 		'  make -C scripts/vm vm-preflight             read-only safety/tool/lock checks' \
 		'  make -C scripts/vm vm-state-init            create private target/vm state' \
 		'  make -C scripts/vm vm-image-alpine          fetch one checksum-verified input' \
+		'  make -C scripts/vm vm-image-alpine-3.24.1   fetch the exact Alpine cloud source' \
+		'  make -C scripts/vm vm-image-ubuntu-26.04     fetch the checksum-verified Ubuntu installer ISO' \
+		'  make -C scripts/vm vm-image-fedora-44        fetch the checksum-verified Fedora Server installer ISO' \
+		'  make -C scripts/vm vm-image-debian-13.6       fetch the checksum-verified Debian netinst ISO' \
+		'  make -C scripts/vm vm-image-arch-mkinitc'pio'   fetch the checksum-verified Arch cloud builder' \
+		'  make -C scripts/vm vm-sources-postmarketos    fetch all pinned postmarketOS source archives' \
+		'  make -C scripts/vm vm-review-postmarketos-sources' \
+		'                                      verify package sources transitively pinned by pmaports' \
+		'  make -C scripts/vm vm-provision-postmarketos-qemu-aarch64' \
+		'                                      build encrypted aarch64 disk inside a disposable builder VM' \
+		'  make -C scripts/vm vm-verify-postmarketos-qemu-aarch64' \
+		'                                      disk-only ARM64 UEFI/unl0kr stock boot proof' \
+		'  make -C scripts/vm vm-kernel-packages-ubuntu-26.04' \
+		'                                      fetch the pinned offline kernel-update package set' \
+		'  make -C scripts/vm vm-kernel-packages-arch-mkinitc'pio \
+		'                                      fetch the pinned Arch LTS kernel-update package' \
+		'  make -C scripts/vm vm-provision-arch-mkinitc'pio'-systemd' \
+		'                                      install encrypted Arch into a private qcow2' \
+		'  make -C scripts/vm vm-verify-arch-mkinitc'pio'-systemd' \
+		'                                      disk-only Arch stock unlock/login proof' \
+		'  make -C scripts/vm vm-reset-ubuntu-26.04-dracut-systemd' \
+		'                                      remove only the authenticated disposable Ubuntu base' \
+		'  make -C scripts/vm vm-provision-ubuntu-26.04-dracut-systemd' \
+		'                                      normal Subiquity install into private qcow2' \
+		'  make -C scripts/vm vm-verify-ubuntu-26.04-dracut-systemd' \
+		'                                      disk-only encrypted-root stock boot proof' \
+		'  make -C scripts/vm vm-reset-fedora-44-dracut-systemd' \
+		'                                      remove only the authenticated disposable Fedora base' \
+		'  make -C scripts/vm vm-provision-fedora-44-dracut-systemd' \
+		'                                      normal Anaconda install into private qcow2' \
+		'  make -C scripts/vm vm-verify-fedora-44-dracut-systemd' \
+		'                                      disk-only Fedora encrypted-root stock boot proof' \
+		'  make -C scripts/vm vm-reset-debian-13.6-initramfs-tools-systemd' \
+		'                                      remove only the authenticated disposable Debian base' \
+		'  make -C scripts/vm vm-provision-debian-13.6-initramfs-tools-systemd' \
+		'                                      normal debian-installer install into private qcow2' \
+		'  make -C scripts/vm vm-verify-debian-13.6-initramfs-tools-systemd' \
+		'                                      disk-only Debian encrypted-root stock boot proof' \
+		'  make -C scripts/vm vm-provision-alpine-3.24.1-mkinitfs-openrc' \
+		'                                      setup-disk into a private encrypted qcow2' \
+		'  make -C scripts/vm vm-verify-alpine-3.24.1-mkinitfs-openrc' \
+		'                                      disk-only Alpine encrypted-root stock boot proof' \
 		'  root only: make vm-test-lifecycle-alpine    bounded child-process smoke gate' \
-		'  root only: make vm-test-{lifecycle,install,password}-PAIR' \
-		'                                      exact adapter lane (currently blocked)' \
+		'  root only: make vm-test-{lifecycle,install,password,recovery,uninstall,kernel-update}-PAIR' \
+		'                                      default fixture for one generic adapter pair' \
+		'  root only: make vm-test-{lane}-fedora-44-dracut-systemd' \
+		'                                      Fedora fixture for the generic dracut-systemd pair' \
 		'  root only: make vm-test                     aggregate required VM gates (blocked)' \
+		'  root only: make vm-run-gui                  finite splash then visible guest handoff' \
+		'  root only: make vm-run-gui-password         interactive disposable encrypted qcow2' \
+		'  root only: make vm-run-gui-ubuntu-26.04-dracut-systemd' \
+		'                                      show real boot; reuse matching proven install' \
 		'          product lanes require the root artifact-lock wrapper when ready' \
 		'  make -C scripts/vm vm-clean                 remove validated owned run dirs only' \
 		'' \
@@ -208,10 +267,162 @@ vm-preflight: vm-script-check
 vm-state-init:
 	@bash "$${VM_SOURCE_ROOT}/scripts/state-init.sh" "$${REPO_ROOT}" "$${VM_ROOT}"
 
-# This is the only network-capable target. It refuses any non-verified lock row.
+# These are the only image-download targets. The common fetcher refuses every
+# non-verified lock row and publishes an input only after exact size/hash checks.
 vm-image-alpine: vm-state-init
 	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${IMAGE_ID}"
+
+vm-image-alpine-3.24.1: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
+		alpine-generic-3.24.1-x86_64-bios-cloudinit-r0
+
+vm-image-ubuntu-26.04: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" ubuntu-26.04-live-server-amd64
+
+vm-image-fedora-44: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" fedora-44-server-dvd-x86_64
+
+vm-image-debian-13.6: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" debian-13.6-netinst-amd64
+
+vm-image-arch-mkinitc$()pio: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
+		arch-mkinitc$()pio-image-pending-x86_64
+
+vm-sources-postmarketos: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-postmarketos-sources.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${VM_SOURCE_ROOT}/postmarketos-sources.lock"
+
+vm-review-postmarketos-sources: vm-sources-postmarketos
+	@bash "$${VM_SOURCE_ROOT}/scripts/review-postmarketos-components.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${VM_SOURCE_ROOT}/postmarketos-sources.lock"
+
+vm-kernel-packages-ubuntu-26.04: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-kernel-packages.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${KERNEL_PACKAGE_LOCK}" \
+		ubuntu-26.04-dracut-systemd
+
+vm-kernel-packages-fedora-44: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-kernel-packages.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${KERNEL_PACKAGE_LOCK}" \
+		fedora-44-dracut-systemd
+
+vm-kernel-packages-alpine-3.24: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-kernel-packages.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${KERNEL_PACKAGE_LOCK}" \
+		alpine-mkinitfs-openrc
+
+vm-kernel-packages-debian-13.6: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-kernel-packages.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${KERNEL_PACKAGE_LOCK}" \
+		debian-13.6-initramfs-tools-systemd
+
+vm-kernel-packages-arch-mkinitc$()pio: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/fetch-kernel-packages.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${KERNEL_PACKAGE_LOCK}" \
+		arch-mkinitc$()pio-systemd
+
+vm-reset-arch-mkinitc$()pio-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-arch-mkinitc"pio.sh \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-arch-mkinitc$()pio-systemd: vm-preflight vm-state-init vm-image-arch-mkinitc$()pio vm-kernel-packages-arch-mkinitc$()pio
+	@timeout --signal=TERM --kill-after=15s 7310s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-arch-mkinitc"pio.sh \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${KERNEL_PACKAGE_LOCK}" \
+		arch-mkinitc$()pio-image-pending-x86_64 \
+		arch-mkinitc$()pio-systemd-amd64-derived \
+		"$${QEMU}" "$${QEMU_IMG}" 7200
+
+vm-verify-arch-mkinitc$()pio-systemd: vm-preflight vm-state-init vm-provision-arch-mkinitc$()pio-systemd
+	@timeout --signal=TERM --kill-after=15s 1940s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-arch-mkinitc"pio-base.sh \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 900 900
+
+vm-reset-ubuntu-26.04-dracut-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-ubuntu-26.04.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-ubuntu-26.04-dracut-systemd: vm-preflight vm-state-init vm-image-ubuntu-26.04 vm-kernel-packages-ubuntu-26.04
+	@timeout --signal=TERM --kill-after=15s 5500s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-ubuntu-26.04.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${KERNEL_PACKAGE_LOCK}" \
+		ubuntu-26.04-live-server-amd64 "$${QEMU}" "$${QEMU_IMG}" 5400
+
+vm-verify-ubuntu-26.04-dracut-systemd: vm-preflight vm-state-init vm-provision-ubuntu-26.04-dracut-systemd
+	@timeout --signal=TERM --kill-after=15s 1940s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-ubuntu-26.04-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 900 900
+
+vm-reset-fedora-44-dracut-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-fedora-44.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-fedora-44-dracut-systemd: vm-preflight vm-state-init vm-image-fedora-44 vm-kernel-packages-fedora-44
+	@timeout --signal=TERM --kill-after=15s 5500s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-fedora-44.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${KERNEL_PACKAGE_LOCK}" \
+		fedora-44-server-dvd-x86_64 "$${QEMU}" "$${QEMU_IMG}" 5400
+
+vm-verify-fedora-44-dracut-systemd: vm-preflight vm-state-init vm-provision-fedora-44-dracut-systemd
+	@timeout --signal=TERM --kill-after=15s 1940s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-fedora-44-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 900 900
+
+vm-reset-debian-13.6-initramfs-tools-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-debian-13.6.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-debian-13.6-initramfs-tools-systemd: vm-preflight vm-state-init vm-image-debian-13.6 vm-kernel-packages-debian-13.6
+	@timeout --signal=TERM --kill-after=15s 5500s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-debian-13.6.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${KERNEL_PACKAGE_LOCK}" \
+		debian-13.6-netinst-amd64 "$${QEMU}" "$${QEMU_IMG}" 5400
+
+vm-verify-debian-13.6-initramfs-tools-systemd: vm-preflight vm-state-init vm-provision-debian-13.6-initramfs-tools-systemd
+	@timeout --signal=TERM --kill-after=15s 1940s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-debian-13.6-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 900 900
+
+vm-reset-alpine-3.24.1-mkinitfs-openrc: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-alpine-3.24.1.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-alpine-3.24.1-mkinitfs-openrc: vm-preflight vm-state-init vm-image-alpine-3.24.1 vm-kernel-packages-alpine-3.24
+	@timeout --signal=TERM --kill-after=15s 3700s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-alpine-3.24.1.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${KERNEL_PACKAGE_LOCK}" \
+		alpine-generic-3.24.1-x86_64-bios-cloudinit-r0 \
+		alpine-3.24.1-mkinitfs-openrc-amd64-derived \
+		"$${QEMU}" "$${QEMU_IMG}" 3600
+
+vm-verify-alpine-3.24.1-mkinitfs-openrc: vm-preflight vm-state-init vm-provision-alpine-3.24.1-mkinitfs-openrc
+	@timeout --signal=TERM --kill-after=15s 1940s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-alpine-3.24.1-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 900 900
+
+vm-reset-postmarketos-qemu-aarch64: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-postmarketos-qemu-aarch64.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}"
+
+vm-provision-postmarketos-qemu-aarch64: vm-preflight vm-state-init vm-image-alpine-3.24.1 vm-review-postmarketos-sources
+	@timeout --signal=TERM --kill-after=20s 14500s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-postmarketos-qemu-aarch64.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${POSTMARKETOS_SOURCE_LOCK}" \
+		alpine-generic-3.24.1-x86_64-bios-cloudinit-r0 \
+		postmarketos-qemu-aarch64-derived \
+		"$${QEMU}" "$${QEMU_IMG}" 14400
+
+vm-verify-postmarketos-qemu-aarch64: vm-preflight vm-state-init vm-provision-postmarketos-qemu-aarch64
+	@timeout --signal=TERM --kill-after=15s 3740s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-postmarketos-qemu-aarch64-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 1800 1800
 
 # This target never downloads. The exact locked image must already be cached.
 vm-validate-lifecycle-timeouts:
@@ -233,8 +444,8 @@ vm-test-lifecycle-alpine: vm-preflight vm-state-init vm-validate-lifecycle-timeo
 vm-validate-adapter-timeout:
 	@case "$${ADAPTER_HOST_TIMEOUT_SECONDS}" in ''|*[!0-9]*) \
 		echo 'ERROR: ADAPTER_HOST_TIMEOUT_SECONDS must be a positive integer' >&2; exit 2 ;; esac
-	@test "$${ADAPTER_HOST_TIMEOUT_SECONDS}" -ge 1 -a "$${ADAPTER_HOST_TIMEOUT_SECONDS}" -le 900 || { \
-		echo 'ERROR: ADAPTER_HOST_TIMEOUT_SECONDS must be between 1 and 900' >&2; exit 2; }
+	@test "$${ADAPTER_HOST_TIMEOUT_SECONDS}" -ge 1 -a "$${ADAPTER_HOST_TIMEOUT_SECONDS}" -le 5400 || { \
+		echo 'ERROR: ADAPTER_HOST_TIMEOUT_SECONDS must be between 1 and 5400' >&2; exit 2; }
 
 # These static pattern rules expose every exact adapter pair through Make while
 # retaining a single deny-by-default runner contract. The outer timeout bounds
@@ -254,15 +465,119 @@ $(ADAPTER_PASSWORD_TARGETS): vm-test-password-%: vm-matrix-check vm-validate-ada
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' password "$${BOOTART_BIN}"
 
-vm-test-adapters: $(ADAPTER_TEST_TARGETS)
+$(ADAPTER_RECOVERY_TARGETS): vm-test-recovery-%: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' recovery "$${BOOTART_BIN}"
+
+$(ADAPTER_UNINSTALL_TARGETS): vm-test-uninstall-%: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' uninstall "$${BOOTART_BIN}"
+
+$(ADAPTER_KERNEL_UPDATE_TARGETS): vm-test-kernel-update-%: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' kernel-update "$${BOOTART_BIN}"
+
+vm-test-debian-13.6-initramfs-tools-systemd: \
+	vm-test-install-initramfs-tools \
+	vm-test-lifecycle-initramfs-tools \
+	vm-test-password-initramfs-tools \
+	vm-test-recovery-initramfs-tools \
+	vm-test-uninstall-initramfs-tools \
+	vm-test-kernel-update-initramfs-tools
+
+vm-test-arch-mkinitc$()pio-systemd: \
+	vm-test-install-mkinitc$()pio \
+	vm-test-lifecycle-mkinitc$()pio \
+	vm-test-password-mkinitc$()pio \
+	vm-test-recovery-mkinitc$()pio \
+	vm-test-uninstall-mkinitc$()pio \
+	vm-test-kernel-update-mkinitc$()pio
+
+vm-test-alpine-3.24.1-mkinitfs-openrc: \
+	vm-test-install-mkinitfs-openrc \
+	vm-test-lifecycle-mkinitfs-openrc \
+	vm-test-password-mkinitfs-openrc \
+	vm-test-recovery-mkinitfs-openrc \
+	vm-test-uninstall-mkinitfs-openrc \
+	vm-test-kernel-update-mkinitfs-openrc
+
+vm-test-ubuntu-26.04-dracut-systemd: \
+	vm-test-install-dracut-systemd \
+	vm-test-lifecycle-dracut-systemd \
+	vm-test-password-dracut-systemd \
+	vm-test-recovery-dracut-systemd \
+	vm-test-uninstall-dracut-systemd \
+	vm-test-kernel-update-dracut-systemd
+
+vm-test-install-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd install "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-lifecycle-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd lifecycle "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-password-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd password "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-recovery-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd recovery "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-uninstall-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd uninstall "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-kernel-update-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		dracut-systemd kernel-update "$${BOOTART_BIN}" fedora-44-dracut-systemd
+
+vm-test-fedora-44-dracut-systemd: \
+	vm-test-install-fedora-44-dracut-systemd \
+	vm-test-lifecycle-fedora-44-dracut-systemd \
+	vm-test-password-fedora-44-dracut-systemd \
+	vm-test-recovery-fedora-44-dracut-systemd \
+	vm-test-uninstall-fedora-44-dracut-systemd \
+	vm-test-kernel-update-fedora-44-dracut-systemd
+
+vm-test-adapters: $(ADAPTER_TEST_TARGETS) vm-test-fedora-44-dracut-systemd
 
 vm-test: vm-test-adapters vm-test-lifecycle-alpine
 
-vm-run-gui:
-	@IMAGE_ID=alpine-generic-3.24.1-x86_64-bios-cloudinit-r0 bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" alpine-generic-3.24.1-x86_64-bios-cloudinit-r0
-	qemu-system-x86_64 -display sdl -m 1024M -smp 2 -cpu max \
-		-drive file="$${VM_ROOT}/cache/images/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2",format=qcow2,if=virtio,snapshot=on
+vm-run-gui: vm-preflight vm-state-init
+	@IMAGE_ID=alpine-virt-3.20.0-x86_64 bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" alpine-virt-3.20.0-x86_64
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
+		alpine-virt-3.20.0-x86_64 "$${BOOTART_BIN}" "$${QEMU}"
+
+vm-run-gui-password: vm-preflight vm-state-init
+	@IMAGE_ID=alpine-virt-3.20.0-x86_64 bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" alpine-virt-3.20.0-x86_64
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-gui-password.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
+		alpine-virt-3.20.0-x86_64 "$${BOOTART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-ubuntu-26.04-dracut-systemd: vm-preflight vm-state-init vm-validate-adapter-timeout
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-ubuntu-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		"$${BOOTART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
 
 # Developer-facing checker for a generated one-argument-per-line QEMU command.
 # Example: make -C scripts/vm vm-policy-check ARGS_FILE=... RUN_DIR=...

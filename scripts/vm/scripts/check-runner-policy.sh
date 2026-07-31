@@ -90,12 +90,16 @@ for runner in "${runners[@]}"; do
             {
                 text = $0
                 lower = tolower(text)
-                if (lower ~ /(^|[^[:alnum:]_])(qemu([_-](system|img|kvm))?(-[[:alnum:]_.-]+)?|kvm)([^[:alnum:]_]|$)/) {
+                if (text != "qemu-xhci,id=xhci" && lower ~ /(^|[^[:alnum:]_])(qemu([_-](system|img|kvm))?(-[[:alnum:]_.-]+)?|kvm)([^[:alnum:]_]|$)/) {
                     report("virtual-machine executable reference is forbidden")
                     next
                 }
                 if (text ~ /(^|[^[:alnum:]_])(QEMU|QEMU_IMG)([^[:alnum:]_]|$)/) {
                     report("virtual-machine environment variable is forbidden")
+                    next
+                }
+                if (lower ~ /(interrupt-at-checkpoint|installer-test-seams|bootart-vm-test-static)/) {
+                    report("feature-gated product test seam is forbidden in real-VM runners")
                     next
                 }
                 if (lower ~ indirect ||

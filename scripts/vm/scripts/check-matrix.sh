@@ -17,21 +17,21 @@ vm_validate_matrix "$matrix_file" "$lock_file"
 
 while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" == \#* ]] && continue
-    IFS='|' read -r pair _ _ image_id lane _ _ _ _ oracle status <<< "$line"
+    IFS='|' read -r pair _ _ image_id lane _ _ _ _ oracle status fixture <<< "$line"
     case "$status" in
         blocked-unverified)
-            vm_emit_lane_status "$pair" "$lane" BLOCKED_UNVERIFIED \
+            vm_emit_lane_status "$fixture" "$pair" "$lane" BLOCKED_UNVERIFIED \
                 "$image_id" "$oracle" immutable-image-not-pinned
             ;;
         blocked-unimplemented)
             vm_require_missing_matrix_runner "$repo_root" "$pair" "$lane"
-            vm_emit_lane_status "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
+            vm_emit_lane_status "$fixture" "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
                 "$image_id" "$oracle" adapter-runner-missing
             ;;
         ready-unproven)
             vm_require_ready_matrix_runner "$repo_root" "$pair" "$lane" \
                 "$SCRIPT_DIR/check-runner-policy.sh"
-            vm_emit_lane_status "$pair" "$lane" READY_UNPROVEN \
+            vm_emit_lane_status "$fixture" "$pair" "$lane" READY_UNPROVEN \
                 "$image_id" "$oracle" runtime-proof-required
             ;;
     esac

@@ -18,7 +18,7 @@ use crate::process::{Pid1Refused, ensure_current_process_not_pid1};
 use crate::{DEFAULT_LOGO, SMALL_LOGO, cmdline, signals};
 use std::error::Error;
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -37,7 +37,12 @@ const REQUEST_QUEUE_CAPACITY: usize = 32;
 const MAX_ACCEPTS_PER_TICK: usize = 16;
 const MAX_REQUESTS_PER_TICK: usize = 32;
 const SYSTEMD_REBIND_INTERVAL: Duration = Duration::from_millis(250);
-const SYSTEMD_REBIND_TIMEOUT: Duration = Duration::from_secs(5);
+// The initramfs systemd can finish switch-root well before real-root systemd
+// has recreated its absolute ask-password namespace. Keep animating and
+// accepting the already-open control socket during that bounded gap; the
+// normal real-root quit unit usually wins first. A genuinely stalled handoff
+// still restores the VT after this deadline.
+const SYSTEMD_REBIND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -74,8 +79,8 @@ impl Default for DaemonConfig {
 pub enum PasswordBroker {
     #[default]
     None,
-    /// Experimental systemd password-agent adapter; VM validation is still
-    /// required before this can be called supported.
+    /// Systemd password-agent adapter. End-to-end support is owned by the
+    /// exact initramfs/real-root pair table, not this component selector.
     Systemd,
     /// Experimental init-neutral native adapter over a separate authenticated
     /// SOCK_SEQPACKET carrier. Exact adapters remain VM-unproven.
@@ -133,6 +138,10 @@ fn run_with_backend<B: DisplayBackend>(
     // Keep the library entry point as strict as the binary entry point. This
     // check precedes command-line reads, signals, display, sockets, and files.
     ensure_current_process_not_pid1().map_err(DaemonError::Pid1)?;
+    let emit_lifecycle_events = config.runtime.is_production();
+    if emit_lifecycle_events {
+        lifecycle_event("daemon-enter");
+    }
 
     if cmdline::splash_disabled_at(&config.cmdline_path).map_err(|source| DaemonError::Cmdline {
         path: config.cmdline_path.clone(),
@@ -209,6 +218,9 @@ fn run_with_backend<B: DisplayBackend>(
     let mut engine = SplashEngine::new(backend, &art, Some(&small_art), config.engine)
         .map_err(DaemonError::Engine)?;
     engine.start(&mut state).map_err(DaemonError::Engine)?;
+    if emit_lifecycle_events {
+        lifecycle_event("display-acquired");
+    }
 
     let clock = SystemClock::start();
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -229,6 +241,7 @@ fn run_with_backend<B: DisplayBackend>(
             &clock,
             runtime.required_client_uid(),
             root_transition,
+            emit_lifecycle_events,
         )
     }));
 
@@ -264,6 +277,9 @@ fn run_with_backend<B: DisplayBackend>(
     };
 
     let restore_result = engine.shutdown(exit.retain_splash);
+    if emit_lifecycle_events && restore_result.is_ok() {
+        lifecycle_event("display-restored");
+    }
     if !matches!(state.lifecycle(), super::state::Lifecycle::Quitting) {
         let _ = state.apply(StateAction::Quit);
     }
@@ -296,7 +312,37 @@ fn run_with_backend<B: DisplayBackend>(
         }),
         (Some(failure), Ok(())) => Err(failure),
         (None, Err(restoration)) => Err(DaemonError::Engine(restoration)),
-        (None, Ok(())) => Ok(DaemonOutcome::Stopped),
+        (None, Ok(())) => {
+            if emit_lifecycle_events {
+                lifecycle_event("daemon-exit");
+            }
+            Ok(DaemonOutcome::Stopped)
+        }
+    }
+}
+
+fn lifecycle_event(event: &'static str) {
+    event_record("BOOTART_LIFECYCLE_V1", event);
+}
+
+fn password_event(event: &'static str) {
+    event_record("BOOTART_PASSWORD_V1", event);
+}
+
+fn event_record(prefix: &'static str, event: &'static str) {
+    // A formatted `eprintln!` may issue several writes. `/dev/kmsg` treats
+    // each write as a separate record, which split the machine-readable VM
+    // oracle at `event=`. Build one bounded line before touching stderr so a
+    // normal kernel-log sink receives one complete record.
+    let record = format!("{prefix}|event={event}|pid={}\n", std::process::id());
+    let _ = io::stderr().lock().write_all(record.as_bytes());
+}
+
+fn emit_prompt_transition(was_active: bool, is_active: bool) {
+    match (was_active, is_active) {
+        (false, true) => password_event("prompt-open"),
+        (true, false) => password_event("prompt-close"),
+        _ => {}
     }
 }
 
@@ -315,6 +361,7 @@ fn event_loop<B: DisplayBackend>(
     clock: &SystemClock,
     required_mutation_uid: u32,
     root_transition: &mut dyn RootTransition,
+    emit_lifecycle_events: bool,
 ) -> Result<LoopExit, DaemonError> {
     let mut next_systemd_rebind = Duration::ZERO;
     let mut systemd_rebind_started = None;
@@ -334,14 +381,22 @@ fn event_loop<B: DisplayBackend>(
             config.connection_timeout,
         )?;
 
-        if let Some(exit) = process_requests(
+        let root_stage_before = state.root_stage();
+        let request_exit = process_requests(
             request_receiver,
             state,
             required_mutation_uid,
             root_transition,
             password_broker,
             prompt_coordinator,
-        )? {
+        )?;
+        if emit_lifecycle_events
+            && root_stage_before != super::state::RootStage::RealRoot
+            && state.root_stage() == super::state::RootStage::RealRoot
+        {
+            lifecycle_event("root-handoff");
+        }
+        if let Some(exit) = request_exit {
             return Ok(exit);
         }
 
@@ -375,6 +430,7 @@ fn event_loop<B: DisplayBackend>(
             &mut systemd_rebind_started,
         )? {
             PasswordBrokerRuntimeAction::Poll => {
+                let prompt_was_active = state.view().prompt().is_some();
                 if let Some(coordinator) = prompt_coordinator.as_deref_mut() {
                     coordinator.poll(state);
                     if !coordinator.enabled() {
@@ -387,6 +443,9 @@ fn event_loop<B: DisplayBackend>(
                         .map_err(DaemonError::Engine)?;
                 } else {
                     engine.tick(state, clock).map_err(DaemonError::Engine)?;
+                }
+                if emit_lifecycle_events {
+                    emit_prompt_transition(prompt_was_active, state.view().prompt().is_some());
                 }
             }
             PasswordBrokerRuntimeAction::WaitForSystemdRebind => {
@@ -1026,7 +1085,7 @@ mod tests {
                 PasswordBroker::Systemd,
                 RootStage::RealRoot,
                 false,
-                Duration::from_secs(14),
+                Duration::from_secs(39),
                 &mut started,
             )
             .unwrap(),
@@ -1037,7 +1096,7 @@ mod tests {
                 PasswordBroker::Systemd,
                 RootStage::RealRoot,
                 false,
-                Duration::from_secs(15),
+                Duration::from_secs(40),
                 &mut started,
             ),
             Err(DaemonError::PasswordBrokerUnavailable {
@@ -1050,7 +1109,7 @@ mod tests {
                 PasswordBroker::Systemd,
                 RootStage::RealRoot,
                 true,
-                Duration::from_secs(15),
+                Duration::from_secs(40),
                 &mut started,
             )
             .unwrap(),

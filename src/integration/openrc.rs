@@ -4,7 +4,7 @@
 /// Starting a fresh splash in the real root would replay early presentation
 /// after boot is already underway and hide a failed continuity handoff, so an
 /// absent daemon is always a fail-open no-op. This remains experimental until
-/// the Alpine VM lifecycle lane passes.
+/// the corresponding installed-system VM lifecycle lane passes.
 pub const SUPERVISOR_SCRIPT: &str = r#"#!/sbin/openrc-run
 
 description="Adopt the Bootart splash carried from the initramfs"

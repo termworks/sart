@@ -1,24 +1,41 @@
-use bootart::embedded::{RESOURCE_SET_VERSION, TemplateId};
+use bootart::embedded::{
+    RESOURCE_SET_VERSION, TemplateId, TemplateMaterialization, template_resource,
+};
 use bootart::install::{
     ADAPTER_PAIRS, ActivationRelation, ActivationScope, AdapterDiscovery, AdapterRequest,
-    AdapterSelection, AdapterSelectionReason, AlternateRoot, ApplyOutcome, BackupSubjectKind,
-    DirectoryScope, ExpectedPreviousState, FailurePoint, FaultInjector, FileStatusState,
-    GeneratorInvocation, GeneratorKind, ImageVerificationStatus, InstallError, Installer,
-    MAX_INSTALL_FILE_BYTES, MAX_STATE_DOCUMENT_BYTES, ManifestInventoryStatus, MetadataSource,
-    NoAdapterDiscovery, NodeKind, NodeMetadata, PlanSource, PlannedHashState, PlannedValue,
-    RecoveryOutcome, RejectCommands, RollbackAction, RootPolicy, SafetyRecord, SupportPolicy,
-    aggregate_known_space_requirements_for_tests, build_install_plan,
-    check_known_space_requirements_for_tests, validate_static_elf,
+    AdapterSelection, AdapterSelectionReason, AlternateRoot, ApplyOutcome, ArchiveEntryKind,
+    ArchiveInspection, BackupSubjectKind, CRYPTSETUP_EXECUTABLE, CRYPTSETUP_USR_BIN_EXECUTABLE,
+    CommandOutput, CommandRunner, CryptsetupLocation, DRACUT_EXECUTABLE, DirectoryScope,
+    DracutImageLayout, DracutSystemdFacts, ExpectedPreviousState, FINDMNT_EXECUTABLE, FailurePoint,
+    FaultInjector, FileStatusState, GRUB_PROBE_EXECUTABLE, GRUB2_MKCONFIG_EXECUTABLE,
+    GRUB2_PROBE_EXECUTABLE, GeneratorInvocation, GeneratorKind, GeneratorRequest, GrubRegeneration,
+    INITRAMFS_TOOLS_CONTRACT_FILES, ImageVerificationStatus, InitramfsToolsPathFact,
+    InitramfsToolsSystemdFacts, InstallError, Installer, LSINITRD_EXECUTABLE,
+    MAX_GENERATOR_OUTPUT_BYTES, MAX_INSTALL_FILE_BYTES, MAX_STATE_DOCUMENT_BYTES,
+    MIN_BOOT_FREE_BYTES, MIN_BOOT_FREE_INODES, MKINITFS_BOOT_DEPLOY_OPENRC_CONTRACT_FILES,
+    MKINITFS_BOOT_DEPLOY_OPENRC_TOOLS, ManifestInventoryStatus, MetadataSource,
+    MkinitfsBootDeployOpenRcFacts, MkinitfsBootDeployPathFact, NoAdapterDiscovery, NodeKind,
+    NodeMetadata, OsCommandRunner, PlanSource, PlannedHashState, PlannedValue, RecoveryOutcome,
+    RejectCommands, RollbackAction, RootPolicy, SYSTEMD_EXECUTABLE, SafetyRecord, SupportPolicy,
+    ToolFact, UPDATE_GRUB_EXECUTABLE, aggregate_known_space_requirements_for_tests,
+    build_install_plan, check_known_space_requirements_for_tests,
+    collect_unpacked_dracut_inventory, dracut_systemd_required_tools,
+    initramfs_tools_systemd_required_tools, inspect_dracut_inventory, plan_dracut_systemd_for_root,
+    plan_initramfs_tools_systemd_for_root, plan_mkinitfs_boot_deploy_openrc_for_root,
+    reviewed_dracut_character_device_for_tests, sha256, validate_static_elf,
+    verified_dracut_systemd_image_record,
 };
-use bootart::integration::{AdapterId, AdapterKind, SupportStatus};
+use bootart::integration::mkinitfs_boot_deploy;
+use bootart::integration::{AdapterId, AdapterKind, SupportStatus, build_cpio_archive};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -114,7 +131,9 @@ impl MetadataSource for TestMetadata {
             owner_uid: unsafe { libc::geteuid() },
             // Preserve meaningful modes while treating sticky /tmp ancestors
             // as trusted test scaffolding rather than a production tree.
-            mode: if path.starts_with(std::env::temp_dir()) {
+            mode: if path.starts_with(std::env::temp_dir())
+                || std::env::temp_dir().starts_with(path)
+            {
                 (metadata.mode() & 0o7777) & !0o022
             } else {
                 metadata.mode() & 0o7777
@@ -188,6 +207,18 @@ fn manifest_hex(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn manifest_file_record(
+    path: &str,
+    mode: u32,
+    digest: bootart::install::Sha256Digest,
+    preimage: &str,
+) -> String {
+    format!(
+        "file\t{}\t{mode:o}\t{digest}\t{preimage}",
+        manifest_hex(path)
+    )
 }
 
 fn remove_manifest_file_record(contents: &str, path: &str) -> String {
@@ -399,10 +430,6 @@ fn self_install_payload_contract_copies_exactly_one_bootart_elf() {
         .filter(|operation| operation.source() == PlanSource::BootartElf)
         .collect::<Vec<_>>();
     assert_eq!(binary_operations.len(), 1);
-    assert_eq!(
-        plan.operations().first(),
-        binary_operations.first().copied()
-    );
     assert_eq!(binary_operations[0].path(), "/usr/bin/bootart");
     assert_eq!(binary_operations[0].mode(), 0o755);
     assert_eq!(
@@ -582,7 +609,7 @@ fn fresh_plan_preflight_reads_existing_shared_targets_without_mutating_them() {
     root.mkdir_parent("/usr/share/mkinitfs/initramfs-init");
     fs::write(
         &target,
-        b"#!/bin/sh\nVERSION=3.14.0-r0\n\n# set default values\n: \"${KOPT_init:=/sbin/init}\"\n\n# pick first keymap\n\n\t\t\t$MOCK mount -o move \"$DIR\" \"$sysroot/$DIR\"\n\t\tfi\n\tdone\n\t$MOCK sync\n\t# shellcheck disable=SC2093\n\texec switch_root\n",
+        b"#!/bin/sh\nVERSION=3.14.0-r0\n\n# load available drivers to get access to modloop media\n$MOCK modprobe -a loop squashfs simpledrm\n\n# check if root=... was set\nif [ -n \"$KOPT_root\" ]; then\n\t# run nlplug-findfs before SINGLEMODE so we load keyboard drivers\n\t$MOCK nlplug-findfs\n\n\t\t\t$MOCK mount -o move \"$DIR\" \"$sysroot/$DIR\"\n\t\tfi\n\tdone\n\t$MOCK sync\n\t# shellcheck disable=SC2093\n\texec switch_root\n",
     )
     .unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
@@ -768,7 +795,9 @@ fn section_6_1_safety_records_are_deterministic_explicit_and_non_actionable() {
     assert!(matches!(
         generator.2,
         GeneratorInvocation::Unresolved { blocker }
-            if blocker.contains("no embedded absolute generator path")
+            if blocker.contains(
+                "generic preview cannot substitute for the descriptor-validated live dracut-systemd generator contract"
+            )
     ));
 
     let candidate = plan
@@ -782,7 +811,7 @@ fn section_6_1_safety_records_are_deterministic_explicit_and_non_actionable() {
             path: PlannedValue::Unresolved { blocker },
             separately_named: true,
             ..
-        } if blocker.contains("candidate initramfs path")
+        } if blocker.contains("generic preview has no live dracut-systemd candidate path identity")
     ));
     assert!(plan.safety_records().iter().any(|record| matches!(
         record,
@@ -871,7 +900,7 @@ fn section_6_1_safety_records_are_deterministic_explicit_and_non_actionable() {
 }
 
 #[test]
-fn every_exact_pair_owns_three_unproven_proof_gates_and_an_unresolved_generator() {
+fn every_exact_pair_owns_six_proof_gates_and_declares_its_support_status() {
     let root = TempRoot::new();
     let installer = installer(&root, NeverFail);
     let pairs = [
@@ -905,6 +934,12 @@ fn every_exact_pair_owns_three_unproven_proof_gates_and_an_unresolved_generator(
             GeneratorKind::Mkinitfs,
             "mkinitfs-openrc",
         ),
+        (
+            AdapterId::MkinitfsBootDeploy,
+            AdapterId::OpenRcRealRoot,
+            GeneratorKind::MkinitfsBootDeploy,
+            "mkinitfs-boot-deploy-openrc",
+        ),
     ];
 
     assert_eq!(ADAPTER_PAIRS.len(), pairs.len());
@@ -922,8 +957,22 @@ fn every_exact_pair_owns_three_unproven_proof_gates_and_an_unresolved_generator(
         let selected = selection_for(installer.root(), initramfs, real_root);
         let metadata = selected.pair_metadata();
         assert_eq!(metadata.proof_slug, slug);
-        assert_eq!(metadata.status, SupportStatus::ExperimentalUnproven);
-        assert_eq!(metadata.proof_gates.len(), 3);
+        assert_eq!(
+            metadata.status,
+            if matches!(
+                slug,
+                "dracut-systemd"
+                    | "initramfs-tools"
+                    | "mkinitcpio"
+                    | "mkinitfs-openrc"
+                    | "mkinitfs-boot-deploy-openrc"
+            ) {
+                SupportStatus::ProvenSupported
+            } else {
+                SupportStatus::ExperimentalUnproven
+            }
+        );
+        assert_eq!(metadata.proof_gates.len(), 6);
         assert_eq!(
             metadata.proof_gates[0],
             format!("make vm-test-lifecycle-{slug}")
@@ -935,6 +984,18 @@ fn every_exact_pair_owns_three_unproven_proof_gates_and_an_unresolved_generator(
         assert_eq!(
             metadata.proof_gates[2],
             format!("make vm-test-password-{slug}")
+        );
+        assert_eq!(
+            metadata.proof_gates[3],
+            format!("make vm-test-recovery-{slug}")
+        );
+        assert_eq!(
+            metadata.proof_gates[4],
+            format!("make vm-test-uninstall-{slug}")
+        );
+        assert_eq!(
+            metadata.proof_gates[5],
+            format!("make vm-test-kernel-update-{slug}")
         );
         let plan = build_install_plan(installer.root(), selected, &test_elf()).unwrap();
         assert!(plan.safety_records().iter().any(|record| matches!(
@@ -1097,7 +1158,7 @@ fn mkinitfs_openrc_plan_models_managed_snippets_without_executing_them() {
     assert_eq!(plan.activation_operations().len(), 2);
     let expected = [
         (
-            "post-cmdline-and-runtime-mounts",
+            "post-boot-drivers-before-root-discovery",
             TemplateId::MkinitfsEarlyCallSnippet,
         ),
         (
@@ -1128,11 +1189,11 @@ fn mkinitfs_openrc_plan_models_managed_snippets_without_executing_them() {
         "\"kind\":\"insert_managed_snippet\",\"target\":\"/usr/share/mkinitfs/initramfs-init\""
     ));
     assert!(plan.render_human().contains(
-        "managed-snippet /usr/share/mkinitfs/initramfs-init at=post-cmdline-and-runtime-mounts"
+        "managed-snippet /usr/share/mkinitfs/initramfs-init at=post-boot-drivers-before-root-discovery"
     ));
 
     let original_init =
-        "#!/bin/sh\nVERSION=3.14.0-r0\n# set default values\n: \"${KOPT_init:=/sbin/init}\"\n# pick first keymap\n\n\t\t\t$MOCK mount -o move \"$DIR\" \"$sysroot/$DIR\"\n\t\tfi\n\tdone\n\t$MOCK sync\n\t# shellcheck disable=SC2093\n\texec switch_root\n"
+        "#!/bin/sh\nVERSION=3.14.0-r0\n# load available drivers to get access to modloop media\n$MOCK modprobe -a loop squashfs simpledrm\n# check if root=... was set\nif [ -n \"$KOPT_root\" ]; then\n\t# run nlplug-findfs before SINGLEMODE so we load keyboard drivers\n\t$MOCK nlplug-findfs\n\n\t\t\t$MOCK mount -o move \"$DIR\" \"$sysroot/$DIR\"\n\t\tfi\n\tdone\n\t$MOCK sync\n\t# shellcheck disable=SC2093\n\texec switch_root\n"
             .to_string();
     let target_host = root.guest("/usr/share/mkinitfs/initramfs-init");
     root.mkdir_parent("/usr/share/mkinitfs/initramfs-init");
@@ -1303,20 +1364,22 @@ fn root_selection_and_adapter_ambiguity_fail_closed() {
         ),
         Err(InstallError::IncompatibleAdapterPair { .. })
     ));
-    assert!(matches!(
-        AdapterSelection::resolve(
-            &validated,
-            AdapterRequest::Explicit(AdapterId::DracutSystemd),
-            AdapterRequest::Explicit(AdapterId::SystemdRealRoot),
-            SupportPolicy::ProvenOnly,
-            &NoAdapterDiscovery,
-        ),
-        Err(InstallError::UnsupportedAdapterPair {
-            initramfs: AdapterId::DracutSystemd,
-            real_root: AdapterId::SystemdRealRoot,
-            ..
-        })
-    ));
+    let explicit_proven = AdapterSelection::resolve(
+        &validated,
+        AdapterRequest::Explicit(AdapterId::DracutSystemd),
+        AdapterRequest::Explicit(AdapterId::SystemdRealRoot),
+        SupportPolicy::ProvenOnly,
+        &NoAdapterDiscovery,
+    )
+    .unwrap();
+    assert_eq!(
+        explicit_proven.initramfs_reason(),
+        AdapterSelectionReason::ExplicitRequest
+    );
+    assert_eq!(
+        explicit_proven.real_root_reason(),
+        AdapterSelectionReason::ExplicitRequest
+    );
 
     struct Unique;
     impl AdapterDiscovery for Unique {
@@ -1331,16 +1394,22 @@ fn root_selection_and_adapter_ambiguity_fail_closed() {
             }])
         }
     }
-    assert!(matches!(
-        AdapterSelection::resolve(
-            &validated,
-            AdapterRequest::Discover,
-            AdapterRequest::Discover,
-            SupportPolicy::AllowExplicitExperimental,
-            &Unique,
-        ),
-        Err(InstallError::UnsupportedAdapterPair { .. })
-    ));
+    let discovered_proven = AdapterSelection::resolve(
+        &validated,
+        AdapterRequest::Discover,
+        AdapterRequest::Discover,
+        SupportPolicy::ProvenOnly,
+        &Unique,
+    )
+    .unwrap();
+    assert_eq!(
+        discovered_proven.initramfs_reason(),
+        AdapterSelectionReason::UniqueDiscovery
+    );
+    assert_eq!(
+        discovered_proven.real_root_reason(),
+        AdapterSelectionReason::UniqueDiscovery
+    );
 }
 
 #[test]
@@ -1733,6 +1802,7 @@ fn durable_bootstrap_precedes_every_state_directory_mutation() {
 struct CrashWithAtomicTemporary {
     root: PathBuf,
     done: bool,
+    as_symlink: bool,
 }
 
 impl FaultInjector for CrashWithAtomicTemporary {
@@ -1754,10 +1824,15 @@ impl FaultInjector for CrashWithAtomicTemporary {
                 .unwrap()
                 .to_path_buf();
             let temporary = parent.join(format!(".bootart-tmp-{transaction}"));
-            fs::write(&temporary, b"interrupted atomic temporary")
-                .map_err(|error| error.to_string())?;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-                .map_err(|error| error.to_string())?;
+            if self.as_symlink {
+                symlink("interrupted-atomic-target", &temporary)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                fs::write(&temporary, b"interrupted atomic temporary")
+                    .map_err(|error| error.to_string())?;
+                fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+                    .map_err(|error| error.to_string())?;
+            }
             return Err("simulate crash during atomic write".into());
         }
         Ok(())
@@ -1776,6 +1851,29 @@ fn recovery_retires_transaction_derived_atomic_temporaries() {
         CrashWithAtomicTemporary {
             root: root.path.clone(),
             done: false,
+            as_symlink: false,
+        },
+    );
+    let plan =
+        build_install_plan(crashing.root(), selection(crashing.root()), &test_elf()).unwrap();
+    let before = snapshot(&root.path);
+
+    assert!(crashing.apply(&plan).is_err());
+    assert!(root.guest("/.bootart-installer-journal.v1").is_file());
+    let recovery = installer(&root, NeverFail);
+    assert_eq!(recovery.recover().unwrap(), RecoveryOutcome::RolledBack);
+    assert_eq!(snapshot(&root.path), before);
+}
+
+#[test]
+fn recovery_unlinks_transaction_derived_atomic_symlink_temporaries_without_following() {
+    let root = TempRoot::new();
+    let mut crashing = installer(
+        &root,
+        CrashWithAtomicTemporary {
+            root: root.path.clone(),
+            done: false,
+            as_symlink: true,
         },
     );
     let plan =
@@ -2315,4 +2413,1799 @@ fn static_elf_validation_rejects_malformed_dynamic_and_wrong_arch_payloads() {
     needed[160..168].copy_from_slice(&32_u64.to_le_bytes());
     needed[176..184].copy_from_slice(&1_i64.to_le_bytes());
     assert!(validate_static_elf(&needed).is_err());
+}
+
+#[derive(Clone)]
+struct RecordingCommands {
+    calls: Arc<Mutex<Vec<GeneratorRequest>>>,
+    output: CommandOutput,
+}
+
+type CommandInstaller = (
+    Installer<TestMetadata, RecordingCommands, NeverFail>,
+    Arc<Mutex<Vec<GeneratorRequest>>>,
+);
+
+impl CommandRunner for RecordingCommands {
+    fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError> {
+        self.calls.lock().unwrap().push(request.clone());
+        Ok(self.output.clone())
+    }
+}
+
+fn dracut_systemd_facts() -> DracutSystemdFacts {
+    DracutSystemdFacts {
+        architecture: std::env::consts::ARCH.into(),
+        pid1_comm: "systemd".into(),
+        kernel_versions: vec!["7.0.0-28-generic".into()],
+        root_filesystem_device: 1,
+        boot_filesystem_device: 2,
+        boot_writable: true,
+        boot_free_bytes: MIN_BOOT_FREE_BYTES,
+        boot_free_inodes: MIN_BOOT_FREE_INODES,
+        dracut_modules: vec!["systemd".into(), "crypt".into()],
+        image_layout: DracutImageLayout::InitrdImg,
+        grub_regeneration: GrubRegeneration::UpdateGrub,
+        cryptsetup_location: CryptsetupLocation::UsrSbin,
+        tools: [
+            DRACUT_EXECUTABLE,
+            LSINITRD_EXECUTABLE,
+            UPDATE_GRUB_EXECUTABLE,
+            GRUB_PROBE_EXECUTABLE,
+            FINDMNT_EXECUTABLE,
+            CRYPTSETUP_EXECUTABLE,
+            SYSTEMD_EXECUTABLE,
+        ]
+        .into_iter()
+        .map(ToolFact::exact)
+        .collect(),
+        known_good_path: "/boot/initrd.img-7.0.0-28-generic".into(),
+        known_good_digest: sha256(b"known-good"),
+        known_good_bytes: 64 * 1024 * 1024,
+        boot_filesystem_uuid: "1625-E85D".into(),
+        kernel_command_line: "root=/dev/mapper/crypt-root ro quiet".into(),
+    }
+}
+
+fn dracut_systemd_grub2_facts() -> DracutSystemdFacts {
+    let mut facts = dracut_systemd_facts();
+    facts.image_layout = DracutImageLayout::InitramfsImg;
+    facts.grub_regeneration = GrubRegeneration::Grub2Mkconfig;
+    facts.tools =
+        dracut_systemd_required_tools(GrubRegeneration::Grub2Mkconfig, facts.cryptsetup_location)
+            .map(ToolFact::exact)
+            .collect();
+    facts.known_good_path = "/boot/initramfs-7.0.0-28-generic.img".into();
+    facts
+}
+
+fn initramfs_tools_systemd_facts() -> InitramfsToolsSystemdFacts {
+    InitramfsToolsSystemdFacts {
+        architecture: std::env::consts::ARCH.into(),
+        pid1_comm: "systemd".into(),
+        kernel_versions: vec!["6.12.0-1-amd64".into()],
+        root_filesystem_device: 1,
+        boot_filesystem_device: 2,
+        boot_writable: true,
+        boot_free_bytes: MIN_BOOT_FREE_BYTES,
+        boot_free_inodes: MIN_BOOT_FREE_INODES,
+        grub_regeneration: GrubRegeneration::UpdateGrub,
+        cryptsetup_location: CryptsetupLocation::UsrSbin,
+        tools: initramfs_tools_systemd_required_tools(
+            GrubRegeneration::UpdateGrub,
+            CryptsetupLocation::UsrSbin,
+        )
+        .map(ToolFact::exact)
+        .collect(),
+        contract_files: INITRAMFS_TOOLS_CONTRACT_FILES
+            .iter()
+            .map(|(path, executable)| InitramfsToolsPathFact::exact(path, *executable))
+            .collect(),
+        known_good_path: "/boot/initrd.img-6.12.0-1-amd64".into(),
+        known_good_digest: sha256(b"known-good"),
+        known_good_bytes: 64 * 1024 * 1024,
+        boot_filesystem_uuid: "1625-E85D".into(),
+        kernel_command_line: "root=/dev/mapper/crypt-root ro quiet".into(),
+    }
+}
+
+fn mkinitfs_boot_deploy_pristine_functions() -> String {
+    let unlock = r#"unlock_root_partition() {
+	command -v cryptsetup >/dev/null || return
+	if cryptsetup isLuks "$PMOS_ROOT"; then
+		splash_hide
+		tried=0
+		until cryptsetup status root | grep -qwi active; do
+			fde-unlock "$PMOS_ROOT" "$tried"
+			tried=$((tried + 1))
+		done
+		PMOS_ROOT=/dev/mapper/root
+		splash_set_message "Loading"
+	fi
+}
+"#;
+    format!("prefix\n{unlock}suffix\n")
+}
+
+fn mkinitfs_boot_deploy_openrc_facts() -> MkinitfsBootDeployOpenRcFacts {
+    MkinitfsBootDeployOpenRcFacts {
+        architecture: std::env::consts::ARCH.into(),
+        pid1_comm: "init".into(),
+        root_filesystem_device: 1,
+        boot_filesystem_device: 2,
+        boot_writable: true,
+        boot_free_bytes: MIN_BOOT_FREE_BYTES,
+        boot_total_inodes: MIN_BOOT_FREE_INODES * 2,
+        boot_free_inodes: MIN_BOOT_FREE_INODES,
+        tools: MKINITFS_BOOT_DEPLOY_OPENRC_TOOLS
+            .iter()
+            .map(|path| ToolFact::exact(path))
+            .collect(),
+        contract_files: MKINITFS_BOOT_DEPLOY_OPENRC_CONTRACT_FILES
+            .iter()
+            .map(|(path, executable)| MkinitfsBootDeployPathFact::exact(path, *executable))
+            .collect(),
+        initramfs_version: mkinitfs_boot_deploy::REVIEWED_INITRAMFS_VERSION.into(),
+        init_functions_2nd: mkinitfs_boot_deploy_pristine_functions(),
+        kernel_image: "/boot/vmlinuz-stable".into(),
+        active_image: "/boot/initramfs".into(),
+        known_good_digest: sha256(b"known-good"),
+        known_good_bytes: b"known-good".len() as u64,
+        active_loader_entry: "/boot/loader/entries/current.conf".into(),
+        active_loader_entry_mode: 0o644,
+        active_loader_entry_bytes: b"title Mobile Linux\nlinux vmlinuz-stable\ninitrd initramfs\noptions quiet splash console=ttyAMA0 root=/dev/mapper/root\n".to_vec(),
+        kernel_command_line: "quiet splash console=ttyAMA0 root=/dev/mapper/root".into(),
+    }
+}
+
+fn write_guest_file(root: &TempRoot, absolute: &str, mode: u32, bytes: &[u8]) {
+    root.mkdir_parent(absolute);
+    fs::write(root.guest(absolute), bytes).unwrap();
+    fs::set_permissions(root.guest(absolute), fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn make_dracut_systemd_preflight_tree(root: &TempRoot) {
+    write_guest_file(
+        root,
+        "/etc/fstab",
+        0o644,
+        b"/dev/disk/by-uuid/1625-E85D /boot ext4 defaults 0 2\n",
+    );
+    write_guest_file(root, "/proc/1/comm", 0o444, b"systemd\n");
+    write_guest_file(
+        root,
+        "/proc/sys/kernel/osrelease",
+        0o444,
+        b"7.0.0-28-generic\n",
+    );
+    write_guest_file(
+        root,
+        "/proc/cmdline",
+        0o444,
+        b"root=/dev/mapper/crypt-root ro quiet\n",
+    );
+    for directory in [
+        "/boot",
+        "/usr/lib/modules/7.0.0-28-generic",
+        "/usr/lib/dracut/modules.d/00systemd",
+        "/usr/lib/dracut/modules.d/90crypt",
+    ] {
+        fs::create_dir_all(root.guest(directory)).unwrap();
+        let mut current = root.path.clone();
+        for component in root
+            .guest(directory)
+            .strip_prefix(&root.path)
+            .unwrap()
+            .components()
+        {
+            current.push(component);
+            fs::set_permissions(&current, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    write_guest_file(
+        root,
+        "/boot/initrd.img-7.0.0-28-generic",
+        0o600,
+        b"known-good-initramfs",
+    );
+    for path in
+        dracut_systemd_required_tools(GrubRegeneration::UpdateGrub, CryptsetupLocation::UsrSbin)
+    {
+        write_guest_file(root, path, 0o755, b"reviewed tool fixture");
+    }
+}
+
+fn make_initramfs_tools_systemd_preflight_tree(root: &TempRoot) {
+    write_guest_file(
+        root,
+        "/etc/fstab",
+        0o644,
+        b"/dev/disk/by-uuid/1625-E85D /boot ext4 defaults 0 2\n",
+    );
+    write_guest_file(root, "/proc/1/comm", 0o444, b"systemd\n");
+    write_guest_file(
+        root,
+        "/proc/sys/kernel/osrelease",
+        0o444,
+        b"6.12.0-1-amd64\n",
+    );
+    write_guest_file(
+        root,
+        "/proc/cmdline",
+        0o444,
+        b"root=/dev/mapper/crypt-root ro quiet\n",
+    );
+    fs::create_dir_all(root.guest("/usr/lib/modules/6.12.0-1-amd64")).unwrap();
+    fs::set_permissions(
+        root.guest("/usr/lib/modules/6.12.0-1-amd64"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    write_guest_file(
+        root,
+        "/boot/initrd.img-6.12.0-1-amd64",
+        0o600,
+        b"known-good-initramfs-tools-image",
+    );
+    for path in initramfs_tools_systemd_required_tools(
+        GrubRegeneration::UpdateGrub,
+        CryptsetupLocation::UsrSbin,
+    ) {
+        write_guest_file(root, path, 0o755, b"reviewed tool fixture");
+    }
+    for (path, executable) in INITRAMFS_TOOLS_CONTRACT_FILES {
+        write_guest_file(
+            root,
+            path,
+            if *executable { 0o755 } else { 0o644 },
+            b"reviewed initramfs-tools contract fixture",
+        );
+    }
+}
+
+fn make_unpacked_candidate(root: &TempRoot, product: &[u8]) -> PathBuf {
+    let unpacked = root.guest("/unpacked-candidate");
+    populate_unpacked_candidate(&unpacked, product);
+    unpacked
+}
+
+fn populate_unpacked_candidate(unpacked: &Path, product: &[u8]) {
+    fs::create_dir_all(unpacked).unwrap();
+    fs::set_permissions(unpacked, fs::Permissions::from_mode(0o700)).unwrap();
+    let write_member = |relative: &str, mode: u32, bytes: &[u8]| {
+        let path = unpacked.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write_member("usr/bin/bootart", 0o755, product);
+    write_member("usr/lib/systemd/systemd", 0o755, b"systemd");
+    write_member("usr/lib/systemd/systemd-cryptsetup", 0o755, b"crypt");
+    for id in [
+        TemplateId::SystemdStartUnit,
+        TemplateId::SystemdShowUnit,
+        TemplateId::SystemdSwitchRootUnit,
+        TemplateId::SystemdConsoleAgentDropIn,
+    ] {
+        let resource = template_resource(id);
+        let TemplateMaterialization::File { path, mode } = resource.materialization else {
+            panic!("unit fixture must be a file")
+        };
+        write_member(
+            path.trim_start_matches('/'),
+            mode,
+            resource.contents.as_bytes(),
+        );
+    }
+    for (relative, target) in [
+        (
+            "usr/lib/systemd/system/initrd.target.wants/bootart-start.service",
+            "../bootart-start.service",
+        ),
+        (
+            "usr/lib/systemd/system/initrd.target.wants/bootart-show.service",
+            "../bootart-show.service",
+        ),
+        (
+            "usr/lib/systemd/system/initrd-switch-root.target.wants/bootart-switch-root.service",
+            "../bootart-switch-root.service",
+        ),
+    ] {
+        let path = unpacked.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        symlink(target, path).unwrap();
+    }
+}
+
+fn populate_bootart_free_unpacked_candidate(unpacked: &Path) {
+    fs::create_dir_all(unpacked).unwrap();
+    fs::set_permissions(unpacked, fs::Permissions::from_mode(0o700)).unwrap();
+    for (relative, bytes) in [
+        ("usr/lib/systemd/systemd", b"systemd".as_slice()),
+        ("usr/lib/systemd/systemd-cryptsetup", b"crypt".as_slice()),
+    ] {
+        let path = unpacked.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[derive(Clone)]
+struct DracutSystemdTransactionCommands {
+    root: PathBuf,
+    product: Vec<u8>,
+    candidate: Vec<u8>,
+    calls: Arc<Mutex<Vec<GeneratorRequest>>>,
+}
+
+impl CommandRunner for DracutSystemdTransactionCommands {
+    fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError> {
+        self.calls.lock().unwrap().push(request.clone());
+        match request.generator {
+            GeneratorKind::Dracut => {
+                let candidate = request.arguments.last().expect("fixed dracut output path");
+                let host = self.root.join(candidate.trim_start_matches('/'));
+                let bytes = if request.arguments.iter().any(|arg| arg == "--omit") {
+                    b"verified Bootart-free candidate initramfs".as_slice()
+                } else {
+                    self.candidate.as_slice()
+                };
+                fs::write(&host, bytes).unwrap();
+                fs::set_permissions(host, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            GeneratorKind::InitramfsInspection => {
+                let working_directory = request
+                    .working_directory
+                    .as_deref()
+                    .expect("fixed lsinitrd working directory");
+                let bootart_free = self
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|call| call.generator == GeneratorKind::Dracut)
+                    .is_some_and(|call| call.arguments.iter().any(|arg| arg == "--omit"));
+                let unpacked = self.root.join(working_directory.trim_start_matches('/'));
+                if bootart_free {
+                    populate_bootart_free_unpacked_candidate(&unpacked);
+                } else {
+                    populate_unpacked_candidate(&unpacked, &self.product);
+                }
+            }
+            GeneratorKind::GrubUpdate => {
+                let guest_config = match request.executable.as_str() {
+                    UPDATE_GRUB_EXECUTABLE => "/boot/grub/grub.cfg",
+                    GRUB2_MKCONFIG_EXECUTABLE => request
+                        .arguments
+                        .get(1)
+                        .map(String::as_str)
+                        .expect("fixed grub2-mkconfig output path"),
+                    _ => panic!("unexpected GRUB updater in transaction fixture"),
+                };
+                let path = self.root.join(guest_config.trim_start_matches('/'));
+                fs::write(
+                    &path,
+                    b"generated menu\nmenuentry 'bootart-known-good' {}\n",
+                )
+                .unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            _ => panic!("unexpected generator in dracut-systemd transaction fixture"),
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+fn populate_unpacked_initramfs_tools_candidate(unpacked: &Path, product: &[u8]) {
+    let main = unpacked.join("main");
+    fs::create_dir_all(&main).unwrap();
+    fs::set_permissions(&main, fs::Permissions::from_mode(0o700)).unwrap();
+    let write_member = |relative: &str, mode: u32, bytes: &[u8]| {
+        let path = main.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write_member("usr/bin/bootart", 0o755, product);
+    write_member("init", 0o755, b"stock init");
+    write_member("scripts/local-top/cryptroot", 0o755, b"stock cryptroot");
+    write_member(
+        "usr/lib/cryptsetup/functions",
+        0o644,
+        b"stock cryptsetup functions",
+    );
+    write_member(
+        "usr/lib/cryptsetup/askpass.bootart-console",
+        0o755,
+        b"stock askpass",
+    );
+    for (archive_path, id) in [
+        (
+            "scripts/init-top/bootart",
+            TemplateId::InitramfsToolsEarlyHook,
+        ),
+        (
+            "scripts/init-bottom/bootart",
+            TemplateId::InitramfsToolsBottomHook,
+        ),
+        (
+            "usr/lib/cryptsetup/askpass",
+            TemplateId::InitramfsToolsAskpassWrapper,
+        ),
+    ] {
+        let resource = template_resource(id);
+        let TemplateMaterialization::File { mode, .. } = resource.materialization else {
+            panic!("runtime resource must be a file")
+        };
+        write_member(archive_path, mode, resource.contents.as_bytes());
+    }
+}
+
+#[derive(Clone)]
+struct InitramfsToolsSystemdTransactionCommands {
+    root: PathBuf,
+    product: Vec<u8>,
+    candidate: Vec<u8>,
+    calls: Arc<Mutex<Vec<GeneratorRequest>>>,
+}
+
+impl CommandRunner for InitramfsToolsSystemdTransactionCommands {
+    fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError> {
+        self.calls.lock().unwrap().push(request.clone());
+        match request.generator {
+            GeneratorKind::InitramfsTools => {
+                let candidate = &request.arguments[1];
+                let host = self.root.join(candidate.trim_start_matches('/'));
+                fs::write(&host, &self.candidate).unwrap();
+                fs::set_permissions(host, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            GeneratorKind::InitramfsInspection => {
+                let destination = &request.arguments[1];
+                let unpacked = self.root.join(destination.trim_start_matches('/'));
+                populate_unpacked_initramfs_tools_candidate(&unpacked, &self.product);
+            }
+            GeneratorKind::GrubUpdate => {
+                let path = self.root.join("boot/grub/grub.cfg");
+                fs::write(
+                    &path,
+                    b"generated menu\nmenuentry 'bootart-known-good' {}\n",
+                )
+                .unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            _ => panic!("unexpected initramfs-tools transaction generator"),
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+fn mkinitfs_boot_deploy_archive(product: &[u8]) -> Vec<u8> {
+    let patched = mkinitfs_boot_deploy::patch_init_functions_2nd(
+        &mkinitfs_boot_deploy_pristine_functions(),
+        mkinitfs_boot_deploy::REVIEWED_INITRAMFS_VERSION,
+    )
+    .unwrap();
+    build_cpio_archive(&[
+        ("usr/bin/bootart", product, 0o100755),
+        (
+            "usr/libexec/bootart/mkinitfs-boot-deploy-runtime",
+            mkinitfs_boot_deploy::RUNTIME_HOOK.as_bytes(),
+            0o100755,
+        ),
+        (
+            "usr/libexec/bootart/mkinitfs-boot-deploy-fde",
+            mkinitfs_boot_deploy::FDE_WRAPPER.as_bytes(),
+            0o100755,
+        ),
+        (
+            "usr/libexec/bootart/fde-unlock-stock",
+            mkinitfs_boot_deploy::STOCK_FDE_UNLOCK.as_bytes(),
+            0o100755,
+        ),
+        (
+            "usr/libexec/bootart/native-bin/unl0kr",
+            mkinitfs_boot_deploy::NATIVE_UNL0KR.as_bytes(),
+            0o100755,
+        ),
+        (
+            "hooks-extra/50-bootart-start.sh",
+            mkinitfs_boot_deploy::START_HOOK.as_bytes(),
+            0o100755,
+        ),
+        (
+            "hooks-cleanup/90-bootart-handoff.sh",
+            mkinitfs_boot_deploy::CLEANUP_HOOK.as_bytes(),
+            0o100755,
+        ),
+        ("init_functions_2nd.sh", patched.as_bytes(), 0o100644),
+    ])
+}
+
+#[derive(Clone)]
+struct MkinitfsBootDeployTransactionCommands {
+    root: PathBuf,
+    candidate: Vec<u8>,
+    calls: Arc<Mutex<Vec<GeneratorRequest>>>,
+}
+
+impl CommandRunner for MkinitfsBootDeployTransactionCommands {
+    fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError> {
+        self.calls.lock().unwrap().push(request.clone());
+        match request.generator {
+            GeneratorKind::MkinitfsBootDeploy => {
+                let seed = self.root.join("boot/.bootart-candidate/vmlinuz-stable");
+                assert_eq!(fs::read(seed).unwrap(), b"kernel");
+                let candidate = self.root.join("boot/.bootart-candidate/initramfs");
+                fs::write(&candidate, &self.candidate).unwrap();
+                fs::set_permissions(candidate, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            _ => panic!("unexpected mkinitfs-boot-deploy transaction generator"),
+        }
+        Ok(CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn dracut_systemd_preflight_collects_bounded_descriptor_checked_facts() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    let installer = installer(&root, NeverFail);
+    let facts = installer.collect_dracut_systemd_facts().unwrap();
+
+    assert_eq!(facts.pid1_comm, "systemd");
+    assert_eq!(facts.kernel_versions, ["7.0.0-28-generic"]);
+    assert!(facts.dracut_modules.contains(&"systemd".to_owned()));
+    assert!(facts.dracut_modules.contains(&"crypt".to_owned()));
+    assert_eq!(
+        facts.tools.len(),
+        dracut_systemd_required_tools(GrubRegeneration::UpdateGrub, CryptsetupLocation::UsrSbin,)
+            .count()
+    );
+    assert_eq!(facts.known_good_digest, sha256(b"known-good-initramfs"));
+    assert_eq!(facts.boot_filesystem_uuid, "1625-E85D");
+    assert_eq!(facts.root_filesystem_device, facts.boot_filesystem_device);
+    assert!(matches!(
+        bootart::install::plan_dracut_systemd(&facts),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("not a separate filesystem")
+    ));
+}
+
+#[test]
+fn initramfs_tools_systemd_preflight_collects_exact_mechanism_facts() {
+    let root = TempRoot::new();
+    make_initramfs_tools_systemd_preflight_tree(&root);
+    let subject = installer(&root, NeverFail);
+    let mut facts: InitramfsToolsSystemdFacts =
+        subject.collect_initramfs_tools_systemd_facts().unwrap();
+
+    assert_eq!(facts.pid1_comm, "systemd");
+    assert_eq!(facts.kernel_versions, ["6.12.0-1-amd64"]);
+    assert_eq!(
+        facts.tools.len(),
+        initramfs_tools_systemd_required_tools(
+            GrubRegeneration::UpdateGrub,
+            CryptsetupLocation::UsrSbin,
+        )
+        .count()
+    );
+    assert_eq!(
+        facts.contract_files.len(),
+        INITRAMFS_TOOLS_CONTRACT_FILES.len()
+    );
+    assert_eq!(
+        facts.known_good_digest,
+        sha256(b"known-good-initramfs-tools-image")
+    );
+
+    facts.root_filesystem_device = facts.boot_filesystem_device.wrapping_add(1);
+    facts.boot_free_bytes = facts.boot_free_bytes.max(MIN_BOOT_FREE_BYTES);
+    facts.boot_free_inodes = facts.boot_free_inodes.max(MIN_BOOT_FREE_INODES);
+    let contract = plan_initramfs_tools_systemd_for_root(&facts, &root.path).unwrap();
+    assert_eq!(contract.active_image, "/boot/initrd.img-6.12.0-1-amd64");
+    assert_eq!(
+        contract.generate.arguments,
+        [
+            "-o",
+            "/boot/.bootart-candidate-initrd.img-6.12.0-1-amd64",
+            "6.12.0-1-amd64"
+        ]
+    );
+}
+
+#[test]
+fn initramfs_tools_systemd_preflight_ignores_distribution_identity() {
+    let root = TempRoot::new();
+    make_initramfs_tools_systemd_preflight_tree(&root);
+    let subject = installer(&root, NeverFail);
+    let mut without = subject.collect_initramfs_tools_systemd_facts().unwrap();
+    write_guest_file(
+        &root,
+        "/etc/os-release",
+        0o644,
+        b"NAME=Unrelated Linux\nID=unrelated\nVERSION_ID=rolling\n",
+    );
+    let mut with = subject.collect_initramfs_tools_systemd_facts().unwrap();
+    without.boot_free_bytes = 0;
+    without.boot_free_inodes = 0;
+    with.boot_free_bytes = 0;
+    with.boot_free_inodes = 0;
+    assert_eq!(with, without);
+}
+
+#[test]
+fn initramfs_tools_systemd_preflight_rejects_symlinked_contract_files() {
+    let root = TempRoot::new();
+    make_initramfs_tools_systemd_preflight_tree(&root);
+    let path = INITRAMFS_TOOLS_CONTRACT_FILES[0].0;
+    fs::remove_file(root.guest(path)).unwrap();
+    symlink("/etc/fstab", root.guest(path)).unwrap();
+    assert!(
+        installer(&root, NeverFail)
+            .collect_initramfs_tools_systemd_facts()
+            .is_err()
+    );
+}
+
+#[test]
+fn dracut_systemd_preflight_rejects_symlinked_tools() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    fs::remove_file(root.guest(DRACUT_EXECUTABLE)).unwrap();
+    symlink("/bin/false", root.guest(DRACUT_EXECUTABLE)).unwrap();
+    let subject = installer(&root, NeverFail);
+    assert!(subject.collect_dracut_systemd_facts().is_err());
+}
+
+#[test]
+fn dracut_systemd_preflight_selects_safe_usr_bin_cryptsetup_with_merged_usr_alias() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    for path in [
+        UPDATE_GRUB_EXECUTABLE,
+        GRUB_PROBE_EXECUTABLE,
+        CRYPTSETUP_EXECUTABLE,
+    ] {
+        fs::remove_file(root.guest(path)).unwrap();
+    }
+    fs::remove_dir(root.guest("/usr/sbin")).unwrap();
+    for path in [
+        GRUB2_MKCONFIG_EXECUTABLE,
+        GRUB2_PROBE_EXECUTABLE,
+        CRYPTSETUP_USR_BIN_EXECUTABLE,
+    ] {
+        write_guest_file(&root, path, 0o755, b"reviewed merged-/usr tool fixture");
+    }
+    symlink("bin", root.guest("/usr/sbin")).unwrap();
+
+    let facts = installer(&root, NeverFail)
+        .collect_dracut_systemd_facts()
+        .unwrap();
+    assert_eq!(facts.grub_regeneration, GrubRegeneration::Grub2Mkconfig);
+    assert_eq!(facts.cryptsetup_location, CryptsetupLocation::UsrBin);
+    assert!(
+        facts
+            .tools
+            .iter()
+            .any(|tool| tool.path == CRYPTSETUP_USR_BIN_EXECUTABLE)
+    );
+    assert!(
+        !facts
+            .tools
+            .iter()
+            .any(|tool| tool.path == CRYPTSETUP_EXECUTABLE)
+    );
+}
+
+#[test]
+fn dracut_systemd_preflight_ignores_distribution_identity() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    let subject = installer(&root, NeverFail);
+    let without_os_release = subject.collect_dracut_systemd_facts().unwrap();
+
+    write_guest_file(
+        &root,
+        "/etc/os-release",
+        0o644,
+        b"NAME=Any Linux\nID=anything\nVERSION_ID=rolling\n",
+    );
+    let mut with_unrelated_os_release = subject.collect_dracut_systemd_facts().unwrap();
+    let mut without_os_release = without_os_release;
+
+    // Creating an unrelated diagnostic file can legitimately consume blocks
+    // and an inode on the same temporary filesystem. Normalize only those
+    // volatile capacity observations; every capability fact must stay equal.
+    assert!(with_unrelated_os_release.boot_free_bytes > 0);
+    assert!(without_os_release.boot_free_bytes > 0);
+    assert!(with_unrelated_os_release.boot_free_inodes > 0);
+    assert!(without_os_release.boot_free_inodes > 0);
+    with_unrelated_os_release.boot_free_bytes = 0;
+    without_os_release.boot_free_bytes = 0;
+    with_unrelated_os_release.boot_free_inodes = 0;
+    without_os_release.boot_free_inodes = 0;
+    assert_eq!(with_unrelated_os_release, without_os_release);
+}
+
+#[test]
+fn dracut_systemd_preflight_selects_grub2_and_initramfs_by_capability() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    fs::remove_file(root.guest(UPDATE_GRUB_EXECUTABLE)).unwrap();
+    fs::remove_file(root.guest(GRUB_PROBE_EXECUTABLE)).unwrap();
+    fs::remove_file(root.guest("/boot/initrd.img-7.0.0-28-generic")).unwrap();
+    write_guest_file(
+        &root,
+        GRUB2_MKCONFIG_EXECUTABLE,
+        0o755,
+        b"reviewed tool fixture",
+    );
+    write_guest_file(
+        &root,
+        GRUB2_PROBE_EXECUTABLE,
+        0o755,
+        b"reviewed tool fixture",
+    );
+    write_guest_file(
+        &root,
+        "/boot/initramfs-7.0.0-28-generic.img",
+        0o600,
+        b"known-good-initramfs",
+    );
+
+    let mut facts = installer(&root, NeverFail)
+        .collect_dracut_systemd_facts()
+        .unwrap();
+    assert_eq!(facts.image_layout, DracutImageLayout::InitramfsImg);
+    assert_eq!(facts.grub_regeneration, GrubRegeneration::Grub2Mkconfig);
+    assert_eq!(
+        facts.known_good_path,
+        "/boot/initramfs-7.0.0-28-generic.img"
+    );
+
+    // The temporary test tree is not a mount namespace. Preserve all observed
+    // capability facts while modeling the separately mounted /boot required
+    // by the mutating production contract.
+    facts.root_filesystem_device = facts.boot_filesystem_device.wrapping_add(1);
+    facts.boot_free_bytes = facts.boot_free_bytes.max(MIN_BOOT_FREE_BYTES);
+    facts.boot_free_inodes = facts.boot_free_inodes.max(MIN_BOOT_FREE_INODES);
+    let contract = plan_dracut_systemd_for_root(&facts, &root.path).unwrap();
+    assert_eq!(contract.grub_config_path, "/boot/grub2/grub.cfg");
+    assert_eq!(contract.update_grub.executable, GRUB2_MKCONFIG_EXECUTABLE);
+    assert_eq!(
+        contract.update_grub.arguments,
+        ["-o", "/boot/grub2/grub.cfg"]
+    );
+    assert_eq!(
+        contract.candidate_image,
+        "/boot/.bootart-candidate-initramfs-7.0.0-28-generic.img"
+    );
+    assert!(
+        String::from_utf8(contract.grub_script)
+            .unwrap()
+            .contains("initrd /initramfs-7.0.0-28-generic.img.bootart-known-good")
+    );
+}
+
+#[test]
+fn dracut_systemd_preflight_rejects_partial_or_ambiguous_capabilities() {
+    let partial = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&partial);
+    fs::remove_file(partial.guest(GRUB_PROBE_EXECUTABLE)).unwrap();
+    assert!(matches!(
+        installer(&partial, NeverFail).collect_dracut_systemd_facts(),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("GRUB capability is incomplete")
+    ));
+
+    let ambiguous_grub = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&ambiguous_grub);
+    write_guest_file(
+        &ambiguous_grub,
+        GRUB2_MKCONFIG_EXECUTABLE,
+        0o755,
+        b"reviewed tool fixture",
+    );
+    write_guest_file(
+        &ambiguous_grub,
+        GRUB2_PROBE_EXECUTABLE,
+        0o755,
+        b"reviewed tool fixture",
+    );
+    assert!(matches!(
+        installer(&ambiguous_grub, NeverFail).collect_dracut_systemd_facts(),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("exactly one supported GRUB")
+    ));
+
+    let ambiguous_image = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&ambiguous_image);
+    write_guest_file(
+        &ambiguous_image,
+        "/boot/initramfs-7.0.0-28-generic.img",
+        0o600,
+        b"second initramfs layout",
+    );
+    assert!(matches!(
+        installer(&ambiguous_image, NeverFail).collect_dracut_systemd_facts(),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("exactly one supported running-kernel initramfs layout")
+    ));
+}
+
+#[test]
+fn dracut_systemd_preflight_selects_the_running_kernel_from_fallbacks() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    fs::create_dir_all(root.guest("/usr/lib/modules/7.0.0-14-generic")).unwrap();
+    fs::set_permissions(
+        root.guest("/usr/lib/modules/7.0.0-14-generic"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let subject = installer(&root, NeverFail);
+    let facts = subject.collect_dracut_systemd_facts().unwrap();
+    assert_eq!(facts.kernel_versions, ["7.0.0-28-generic"]);
+
+    fs::set_permissions(
+        root.guest("/proc/sys/kernel/osrelease"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    write_guest_file(
+        &root,
+        "/proc/sys/kernel/osrelease",
+        0o444,
+        b"7.0.0-99-generic\n",
+    );
+    assert!(matches!(
+        subject.collect_dracut_systemd_facts(),
+        Err(InstallError::InvalidPlan(reason))
+            if reason.contains("no exact installed module tree")
+    ));
+}
+
+#[test]
+fn dracut_systemd_preflight_rejects_a_non_uuid_boot_source() {
+    let root = TempRoot::new();
+    make_dracut_systemd_preflight_tree(&root);
+    write_guest_file(
+        &root,
+        "/etc/fstab",
+        0o644,
+        b"/dev/vda2 /boot ext4 defaults 0 2\n",
+    );
+    let subject = installer(&root, NeverFail);
+    assert!(matches!(
+        subject.collect_dracut_systemd_facts(),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("not an explicit UUID")
+    ));
+}
+
+#[test]
+fn unpacked_candidate_collector_holds_descriptors_and_never_follows_symlinks() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let unpacked = make_unpacked_candidate(&root, &product);
+    let outside = root.guest("/outside-secret");
+    fs::write(&outside, b"must not be read").unwrap();
+    symlink(&outside, unpacked.join("outside-link")).unwrap();
+
+    let entries = collect_unpacked_dracut_inventory(&unpacked, unsafe { libc::geteuid() }).unwrap();
+    let outside_entry = entries
+        .iter()
+        .find(|entry| entry.path == "outside-link")
+        .unwrap();
+    assert_eq!(outside_entry.kind, ArchiveEntryKind::Symlink);
+    assert_ne!(outside_entry.bytes, b"must not be read");
+    inspect_dracut_inventory(&entries, &product).unwrap();
+}
+
+#[test]
+fn unpacked_candidate_collector_rejects_public_roots_and_special_nodes() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let unpacked = make_unpacked_candidate(&root, &product);
+    fs::set_permissions(&unpacked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(collect_unpacked_dracut_inventory(&unpacked, unsafe { libc::geteuid() }).is_err());
+
+    fs::set_permissions(&unpacked, fs::Permissions::from_mode(0o700)).unwrap();
+    let fifo_path = unpacked.join("foreign.fifo");
+    let fifo_name = std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+    assert!(collect_unpacked_dracut_inventory(&unpacked, unsafe { libc::geteuid() }).is_err());
+}
+
+#[test]
+fn dracut_systemd_archive_allows_only_the_exact_observed_character_devices() {
+    let reviewed = [
+        ("dev/console", 5, 1),
+        ("dev/kmsg", 1, 11),
+        ("dev/null", 1, 3),
+        ("dev/random", 1, 8),
+        ("dev/urandom", 1, 9),
+    ];
+    for (path, major, minor) in reviewed {
+        assert!(reviewed_dracut_character_device_for_tests(
+            path,
+            libc::S_IFCHR,
+            0o644,
+            0,
+            0,
+            major,
+            minor,
+            0,
+        ));
+    }
+    for rejected in [
+        ("dev/null", libc::S_IFCHR, 0o644, 0, 0, 5, 1, 0),
+        ("dev/console", libc::S_IFBLK, 0o644, 0, 0, 5, 1, 0),
+        ("dev/console", libc::S_IFCHR, 0o600, 0, 0, 5, 1, 0),
+        ("dev/console", libc::S_IFCHR, 0o644, 1, 0, 5, 1, 0),
+        ("dev/console", libc::S_IFCHR, 0o644, 0, 1, 5, 1, 0),
+        ("dev/console", libc::S_IFCHR, 0o644, 0, 0, 1, 3, 0),
+        ("dev/console", libc::S_IFCHR, 0o644, 0, 0, 5, 1, 1000),
+    ] {
+        assert!(!reviewed_dracut_character_device_for_tests(
+            rejected.0, rejected.1, rejected.2, rejected.3, rejected.4, rejected.5, rejected.6,
+            rejected.7,
+        ));
+    }
+
+    let root = TempRoot::new();
+    let product = test_elf();
+    let unpacked = make_unpacked_candidate(&root, &product);
+    let mut entries =
+        collect_unpacked_dracut_inventory(&unpacked, unsafe { libc::geteuid() }).unwrap();
+    for (path, major, minor) in reviewed {
+        entries.push(bootart::install::ArchiveEntry {
+            path: path.into(),
+            kind: ArchiveEntryKind::CharacterDevice { major, minor },
+            mode: 0o644,
+            bytes: Vec::new(),
+        });
+    }
+    inspect_dracut_inventory(&entries, &product).unwrap();
+
+    entries.last_mut().unwrap().kind = ArchiveEntryKind::CharacterDevice { major: 1, minor: 5 };
+    assert!(matches!(
+        inspect_dracut_inventory(&entries, &product),
+        Err(InstallError::InvalidPlan(reason)) if reason.contains("unreviewed dracut archive character device")
+    ));
+}
+
+#[test]
+fn dracut_systemd_image_transaction_installs_idempotently_and_uninstall_restores_boot_state() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let candidate = b"verified candidate initramfs".to_vec();
+    let original_grub = b"original grub configuration\n";
+    write_guest_file(
+        &root,
+        "/boot/initrd.img-7.0.0-28-generic",
+        0o600,
+        b"known-good",
+    );
+    write_guest_file(&root, "/boot/grub/grub.cfg", 0o600, original_grub);
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = DracutSystemdTransactionCommands {
+        root: root.path.clone(),
+        product: product.clone(),
+        candidate: candidate.clone(),
+        calls: Arc::clone(&calls),
+    };
+    let mut subject =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    let plan = build_install_plan(subject.root(), selection(subject.root()), &product).unwrap();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+
+    assert_eq!(
+        subject
+            .apply_dracut_systemd_for_tests(&plan, &contract, &product)
+            .unwrap(),
+        ApplyOutcome::Installed
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        candidate
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.known_good_image)).unwrap(),
+        b"known-good"
+    );
+    assert!(!root.guest(&contract.candidate_image).exists());
+    assert_eq!(
+        fs::read(root.guest(&contract.grub_script_path)).unwrap(),
+        contract.grub_script
+    );
+    assert!(
+        fs::read(root.guest(&contract.grub_config_path))
+            .unwrap()
+            .windows(b"bootart-known-good".len())
+            .any(|window| window == b"bootart-known-good")
+    );
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Verified { .. }
+    ));
+    let first_calls = calls.lock().unwrap().clone();
+    assert_eq!(
+        first_calls
+            .iter()
+            .map(|request| request.generator)
+            .collect::<Vec<_>>(),
+        [
+            GeneratorKind::Dracut,
+            GeneratorKind::InitramfsInspection,
+            GeneratorKind::GrubUpdate,
+        ]
+    );
+
+    assert_eq!(
+        subject
+            .apply_dracut_systemd_for_tests(&plan, &contract, &product)
+            .unwrap(),
+        ApplyOutcome::AlreadyCurrent
+    );
+    assert_eq!(*calls.lock().unwrap(), first_calls);
+
+    let report = subject.uninstall().unwrap();
+    assert!(report.preserved_modified.is_empty());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        b"known-good"
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.grub_config_path)).unwrap(),
+        original_grub
+    );
+    assert!(!root.guest(&contract.known_good_image).exists());
+    assert!(!root.guest(&contract.grub_script_path).exists());
+    assert!(!root.guest("/usr/bin/bootart").exists());
+    assert!(!root.guest("/var/lib/bootart/install/manifest.v1").exists());
+}
+
+#[test]
+fn initramfs_tools_systemd_image_transaction_installs_and_restores_boot_state() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let candidate = b"verified initramfs-tools candidate".to_vec();
+    let original_grub = b"original grub configuration\n";
+    write_guest_file(
+        &root,
+        "/boot/initrd.img-6.12.0-1-amd64",
+        0o600,
+        b"known-good",
+    );
+    write_guest_file(&root, "/boot/grub/grub.cfg", 0o600, original_grub);
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = InitramfsToolsSystemdTransactionCommands {
+        root: root.path.clone(),
+        product: product.clone(),
+        candidate: candidate.clone(),
+        calls: Arc::clone(&calls),
+    };
+    let mut subject =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    let selected = selection_for(
+        subject.root(),
+        AdapterId::InitramfsToolsBusybox,
+        AdapterId::SystemdRealRoot,
+    );
+    let plan = build_install_plan(subject.root(), selected, &product).unwrap();
+    let contract =
+        plan_initramfs_tools_systemd_for_root(&initramfs_tools_systemd_facts(), &root.path)
+            .unwrap();
+
+    assert_eq!(
+        subject
+            .apply_initramfs_tools_systemd_for_tests(&plan, &contract, &product)
+            .unwrap(),
+        ApplyOutcome::Installed
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        candidate
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.known_good_image)).unwrap(),
+        b"known-good"
+    );
+    assert!(!root.guest(&contract.candidate_image).exists());
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Verified { .. }
+    ));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.generator)
+            .collect::<Vec<_>>(),
+        [
+            GeneratorKind::InitramfsTools,
+            GeneratorKind::InitramfsInspection,
+            GeneratorKind::GrubUpdate,
+        ]
+    );
+
+    assert_eq!(
+        subject
+            .apply_initramfs_tools_systemd_for_tests(&plan, &contract, &product)
+            .unwrap(),
+        ApplyOutcome::AlreadyCurrent
+    );
+    let report = subject.uninstall().unwrap();
+    assert!(report.preserved_modified.is_empty());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        b"known-good"
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.grub_config_path)).unwrap(),
+        original_grub
+    );
+    assert!(!root.guest(&contract.known_good_image).exists());
+    assert!(!root.guest("/usr/bin/bootart").exists());
+}
+
+#[test]
+fn mkinitfs_boot_deploy_openrc_transaction_seeds_inspects_and_restores_bls_state() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let original_loader_entry = b"title Mobile Linux\nlinux vmlinuz-stable\ninitrd initramfs\noptions quiet splash console=ttyAMA0 root=/dev/mapper/root\n";
+    let decompressed = mkinitfs_boot_deploy_archive(&product);
+    let compressed_candidate = ruzstd::encoding::compress_to_vec(
+        decompressed.as_slice(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    write_guest_file(&root, "/boot/initramfs", 0o600, b"known-good");
+    write_guest_file(&root, "/boot/vmlinuz-stable", 0o600, b"kernel");
+    write_guest_file(
+        &root,
+        "/boot/loader/entries/current.conf",
+        0o644,
+        original_loader_entry,
+    );
+    let pristine_functions = mkinitfs_boot_deploy_pristine_functions();
+    write_guest_file(
+        &root,
+        "/usr/share/initramfs/init_functions_2nd.sh",
+        0o644,
+        pristine_functions.as_bytes(),
+    );
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = MkinitfsBootDeployTransactionCommands {
+        root: root.path.clone(),
+        candidate: compressed_candidate.clone(),
+        calls: Arc::clone(&calls),
+    };
+    let mut subject =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    let selected = selection_for(
+        subject.root(),
+        AdapterId::MkinitfsBootDeploy,
+        AdapterId::OpenRcRealRoot,
+    );
+    let plan = build_install_plan(subject.root(), selected, &product).unwrap();
+    let contract =
+        plan_mkinitfs_boot_deploy_openrc_for_root(&mkinitfs_boot_deploy_openrc_facts(), &root.path)
+            .unwrap();
+
+    assert_eq!(
+        subject
+            .apply_mkinitfs_boot_deploy_openrc_for_tests(&plan, &contract, &product)
+            .unwrap(),
+        ApplyOutcome::Installed
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        compressed_candidate
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.known_good_image)).unwrap(),
+        b"known-good"
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.known_good_entry_path)).unwrap(),
+        contract.known_good_entry
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.active_loader_entry)).unwrap(),
+        contract.active_loader_entry_activated
+    );
+    assert_eq!(
+        fs::read(root.guest("/etc/kernel-cmdline.d/90-bootart.conf")).unwrap(),
+        b"-splash\n"
+    );
+    assert!(!root.guest(&contract.candidate_kernel).exists());
+    assert!(!root.guest(&contract.candidate_image).exists());
+    assert_eq!(
+        fs::metadata(root.guest(&contract.candidate_directory))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o700
+    );
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Verified { .. }
+    ));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.generator)
+            .collect::<Vec<_>>(),
+        [GeneratorKind::MkinitfsBootDeploy]
+    );
+
+    let report = subject.uninstall().unwrap();
+    assert!(report.preserved_modified.is_empty());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        b"known-good"
+    );
+    assert_eq!(
+        fs::read(root.guest("/usr/share/initramfs/init_functions_2nd.sh")).unwrap(),
+        pristine_functions.as_bytes()
+    );
+    assert!(!root.guest(&contract.known_good_image).exists());
+    assert!(!root.guest(&contract.known_good_entry_path).exists());
+    assert!(!root.guest(&contract.candidate_directory).exists());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_loader_entry)).unwrap(),
+        original_loader_entry
+    );
+    assert!(!root.guest("/etc/kernel-cmdline.d/90-bootart.conf").exists());
+    assert!(!root.guest("/usr/bin/bootart").exists());
+}
+
+#[test]
+fn dracut_systemd_grub2_transaction_uses_dynamic_image_and_config_paths() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    let candidate = b"verified generic dracut candidate".to_vec();
+    let original_grub = b"original grub2 configuration\n";
+    write_guest_file(
+        &root,
+        "/boot/initramfs-7.0.0-28-generic.img",
+        0o600,
+        b"known-good",
+    );
+    write_guest_file(&root, "/boot/grub2/grub.cfg", 0o600, original_grub);
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = DracutSystemdTransactionCommands {
+        root: root.path.clone(),
+        product: product.clone(),
+        candidate: candidate.clone(),
+        calls: Arc::clone(&calls),
+    };
+    let mut subject =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    let plan = build_install_plan(subject.root(), selection(subject.root()), &product).unwrap();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_grub2_facts(), &root.path).unwrap();
+
+    subject
+        .apply_dracut_systemd_for_tests(&plan, &contract, &product)
+        .unwrap();
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        candidate
+    );
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Verified { .. }
+    ));
+    let grub_call = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.generator == GeneratorKind::GrubUpdate)
+        .cloned()
+        .unwrap();
+    assert_eq!(grub_call.executable, GRUB2_MKCONFIG_EXECUTABLE);
+    assert_eq!(grub_call.arguments, ["-o", "/boot/grub2/grub.cfg"]);
+
+    let report = subject.uninstall().unwrap();
+    assert!(report.preserved_modified.is_empty());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        b"known-good"
+    );
+    assert_eq!(
+        fs::read(root.guest(&contract.grub_config_path)).unwrap(),
+        original_grub
+    );
+    assert!(!root.guest(&contract.known_good_image).exists());
+    assert!(!root.guest(&contract.grub_script_path).exists());
+}
+
+#[test]
+fn dracut_systemd_uninstall_generates_inspects_and_activates_a_bootart_free_image() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    write_guest_file(
+        &root,
+        "/boot/initrd.img-7.0.0-28-generic",
+        0o600,
+        b"known-good",
+    );
+    write_guest_file(
+        &root,
+        "/boot/grub/grub.cfg",
+        0o600,
+        b"original grub configuration\n",
+    );
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = DracutSystemdTransactionCommands {
+        root: root.path.clone(),
+        product: product.clone(),
+        candidate: b"verified Bootart candidate initramfs".to_vec(),
+        calls: Arc::clone(&calls),
+    };
+    let mut subject =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    let plan = build_install_plan(subject.root(), selection(subject.root()), &product).unwrap();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+    subject
+        .apply_dracut_systemd_for_tests(&plan, &contract, &product)
+        .unwrap();
+
+    let report = subject.uninstall_dracut_systemd_for_tests().unwrap();
+    assert!(report.preserved_modified.is_empty());
+    assert_eq!(
+        fs::read(root.guest(&contract.active_image)).unwrap(),
+        b"verified Bootart-free candidate initramfs"
+    );
+    assert!(!root.guest(&contract.candidate_image).exists());
+    assert!(!root.guest(&contract.known_good_image).exists());
+    assert!(!root.guest(&contract.grub_script_path).exists());
+    assert!(!root.guest("/usr/bin/bootart").exists());
+    assert!(!root.guest("/var/lib/bootart/install/manifest.v1").exists());
+
+    let calls = calls.lock().unwrap();
+    let uninstall_calls = &calls[3..];
+    assert_eq!(
+        uninstall_calls
+            .iter()
+            .map(|request| request.generator)
+            .collect::<Vec<_>>(),
+        [GeneratorKind::Dracut, GeneratorKind::InitramfsInspection]
+    );
+    assert!(
+        uninstall_calls[0]
+            .arguments
+            .iter()
+            .any(|arg| arg == "--omit")
+    );
+}
+
+#[test]
+fn every_dracut_systemd_image_failure_boundary_restores_the_exact_boot_state() {
+    let product = test_elf();
+    let candidate = b"verified candidate initramfs".to_vec();
+    let mut observed_failures = 0;
+
+    for failure in 0..256 {
+        let root = TempRoot::new();
+        write_guest_file(
+            &root,
+            "/boot/initrd.img-7.0.0-28-generic",
+            0o600,
+            b"known-good",
+        );
+        write_guest_file(
+            &root,
+            "/boot/grub/grub.cfg",
+            0o600,
+            b"original grub configuration\n",
+        );
+        let commands = DracutSystemdTransactionCommands {
+            root: root.path.clone(),
+            product: product.clone(),
+            candidate: candidate.clone(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut subject = Installer::with_test_components(
+            &root.path,
+            TestMetadata,
+            policy(),
+            commands,
+            FailAt::rollback(failure),
+        )
+        .unwrap();
+        let plan = build_install_plan(subject.root(), selection(subject.root()), &product).unwrap();
+        let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+        let before = snapshot(&root.path);
+
+        match subject.apply_dracut_systemd_for_tests(&plan, &contract, &product) {
+            Err(_) => {
+                observed_failures += 1;
+                assert_eq!(snapshot(&root.path), before, "failure point {failure}");
+            }
+            Ok(ApplyOutcome::Installed) => break,
+            Ok(other) => panic!("unexpected outcome at failure point {failure}: {other:?}"),
+        }
+    }
+
+    assert!(
+        observed_failures >= 20,
+        "expected all payload, generator, GRUB, activation, and commit boundaries"
+    );
+}
+
+#[derive(Clone, Copy)]
+struct InterruptAtImageActivated;
+
+impl FaultInjector for InterruptAtImageActivated {
+    fn check(&mut self, point: &FailurePoint) -> Result<(), String> {
+        if matches!(point, FailurePoint::ImageActivated) {
+            Err("simulate power loss after image activation".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn simulates_interruption(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn interrupted_dracut_systemd_activation_requires_recovery_and_restores_boot_state() {
+    let root = TempRoot::new();
+    let product = test_elf();
+    write_guest_file(
+        &root,
+        "/boot/initrd.img-7.0.0-28-generic",
+        0o600,
+        b"known-good",
+    );
+    write_guest_file(
+        &root,
+        "/boot/grub/grub.cfg",
+        0o600,
+        b"original grub configuration\n",
+    );
+    let before = snapshot(&root.path);
+    let commands = DracutSystemdTransactionCommands {
+        root: root.path.clone(),
+        product: product.clone(),
+        candidate: b"verified candidate initramfs".to_vec(),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut crashing = Installer::with_test_components(
+        &root.path,
+        TestMetadata,
+        policy(),
+        commands,
+        InterruptAtImageActivated,
+    )
+    .unwrap();
+    let plan = build_install_plan(crashing.root(), selection(crashing.root()), &product).unwrap();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+
+    assert!(
+        crashing
+            .apply_dracut_systemd_for_tests(&plan, &contract, &product)
+            .is_err()
+    );
+    assert!(matches!(
+        crashing.status(),
+        Err(InstallError::RecoveryRequired)
+    ));
+    let recovery = installer(&root, NeverFail);
+    assert_eq!(recovery.recover().unwrap(), RecoveryOutcome::RolledBack);
+    assert_eq!(snapshot(&root.path), before);
+}
+
+fn command_installer(root: &TempRoot, output: CommandOutput) -> CommandInstaller {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let commands = RecordingCommands {
+        calls: calls.clone(),
+        output,
+    };
+    let installer =
+        Installer::with_test_components(&root.path, TestMetadata, policy(), commands, NeverFail)
+            .unwrap();
+    (installer, calls)
+}
+
+#[test]
+fn exact_dracut_systemd_generator_request_reaches_only_the_injected_runner() {
+    let root = TempRoot::new();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+    let output = CommandOutput {
+        status: 0,
+        stdout: b"bounded report".to_vec(),
+        stderr: Vec::new(),
+    };
+    let (mut installer, calls) = command_installer(&root, output.clone());
+
+    assert_eq!(installer.run_generator(&contract.generate).unwrap(), output);
+    assert_eq!(calls.lock().unwrap().as_slice(), &[contract.generate]);
+}
+
+#[test]
+fn os_generator_runner_refuses_alternate_roots_before_opening_a_tool() {
+    let root = TempRoot::new();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+    let mut runner = OsCommandRunner;
+    assert!(matches!(
+        runner.run(&contract.generate),
+        Err(InstallError::GeneratorExecution { message, .. })
+            if message.contains("only the live root")
+    ));
+}
+
+#[test]
+fn generator_seam_rejects_widened_root_argv_failure_and_output() {
+    let root = TempRoot::new();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+
+    let (mut installer, calls) = command_installer(
+        &root,
+        CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+    );
+    let mut widened = contract.generate.clone();
+    widened.executable = "/bin/sh".into();
+    assert!(matches!(
+        installer.run_generator(&widened),
+        Err(InstallError::InvalidPlan(_))
+    ));
+    assert!(calls.lock().unwrap().is_empty());
+
+    let mut wrong_root = contract.generate.clone();
+    wrong_root.alternate_root = PathBuf::from("/");
+    assert!(matches!(
+        installer.run_generator(&wrong_root),
+        Err(InstallError::PlanRootMismatch { .. })
+    ));
+    assert!(calls.lock().unwrap().is_empty());
+
+    let (mut installer, _) = command_installer(
+        &root,
+        CommandOutput {
+            status: 17,
+            stdout: Vec::new(),
+            stderr: b"failed".to_vec(),
+        },
+    );
+    assert!(matches!(
+        installer.run_generator(&contract.generate),
+        Err(InstallError::GeneratorExited { status: 17, .. })
+    ));
+
+    let (mut installer, _) = command_installer(
+        &root,
+        CommandOutput {
+            status: 0,
+            stdout: vec![0; MAX_GENERATOR_OUTPUT_BYTES + 1],
+            stderr: Vec::new(),
+        },
+    );
+    assert!(matches!(
+        installer.run_generator(&contract.generate),
+        Err(InstallError::GeneratorOutputTooLarge { .. })
+    ));
+}
+
+struct FailGeneratorBoundary {
+    after: bool,
+}
+
+impl FaultInjector for FailGeneratorBoundary {
+    fn check(&mut self, point: &FailurePoint) -> Result<(), String> {
+        let matches = if self.after {
+            matches!(point, FailurePoint::AfterGenerator { .. })
+        } else {
+            matches!(point, FailurePoint::BeforeGenerator { .. })
+        };
+        if matches {
+            Err("generator boundary fault".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn generator_failure_boundaries_distinguish_pre_execution_from_post_execution() {
+    let root = TempRoot::new();
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingCommands {
+        calls: calls.clone(),
+        output: CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+    };
+    let mut subject = Installer::with_test_components(
+        &root.path,
+        TestMetadata,
+        policy(),
+        runner,
+        FailGeneratorBoundary { after: false },
+    )
+    .unwrap();
+    assert!(matches!(
+        subject.run_generator(&contract.generate),
+        Err(InstallError::InjectedFailure {
+            point: FailurePoint::BeforeGenerator { .. },
+            ..
+        })
+    ));
+    assert!(calls.lock().unwrap().is_empty());
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingCommands {
+        calls: calls.clone(),
+        output: CommandOutput {
+            status: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+    };
+    let mut subject = Installer::with_test_components(
+        &root.path,
+        TestMetadata,
+        policy(),
+        runner,
+        FailGeneratorBoundary { after: true },
+    )
+    .unwrap();
+    assert!(matches!(
+        subject.run_generator(&contract.generate),
+        Err(InstallError::InjectedFailure {
+            point: FailurePoint::AfterGenerator { .. },
+            ..
+        })
+    ));
+    assert_eq!(calls.lock().unwrap().as_slice(), &[contract.generate]);
+}
+
+#[test]
+fn manifest_image_record_round_trips_and_status_verifies_all_boot_hashes() {
+    let root = TempRoot::new();
+    let mut subject = installer(&root, NeverFail);
+    let product = test_elf();
+    let plan = build_install_plan(subject.root(), selection(subject.root()), &product).unwrap();
+    subject.apply(&plan).unwrap();
+
+    let contract = plan_dracut_systemd_for_root(&dracut_systemd_facts(), &root.path).unwrap();
+    let inspection = ArchiveInspection {
+        bootart_digest: sha256(&product),
+        inspected_entries: 10,
+        inspected_bytes: 1024,
+    };
+    let candidate = b"verified candidate image";
+    let image =
+        verified_dracut_systemd_image_record(&contract, candidate, &inspection, &product).unwrap();
+    write_guest_file(&root, &image.active_image, 0o600, candidate);
+    write_guest_file(&root, &image.known_good_image, 0o600, b"known-good");
+    write_guest_file(&root, &image.grub_script_path, 0o755, &contract.grub_script);
+    let grub_config = b"menuentry 'bootart-known-good' {}\n";
+    write_guest_file(&root, &contract.grub_config_path, 0o600, grub_config);
+
+    let image_line = format!(
+        "dracut-systemd-image\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        manifest_hex(&image.kernel_version),
+        manifest_hex(&image.active_image),
+        image.active_digest,
+        manifest_hex(&image.candidate_image),
+        image.candidate_digest,
+        image.candidate_bytes,
+        manifest_hex(&image.known_good_image),
+        image.known_good_digest,
+        manifest_hex(&image.grub_script_path),
+        image.grub_script_digest,
+        manifest_hex(&image.grub_config_path),
+        image.bootart_digest,
+    );
+    rewrite_manifest(&root, |contents| {
+        let anchor = "adapter\tsystemd-real-root\n";
+        let with_image = contents.replacen(anchor, &format!("{anchor}{image_line}"), 1);
+        let original_active = sha256(b"known-good");
+        let original_grub = sha256(b"original grub configuration");
+        let backup_active = manifest_hex("transactions/test/backup-active");
+        let backup_grub = manifest_hex("transactions/test/backup-grub");
+        let mut inventory = with_image
+            .lines()
+            .filter(|line| {
+                matches!(
+                    line.split('\t').next(),
+                    Some("file" | "patched-file" | "symlink")
+                )
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        inventory.extend([
+            manifest_file_record(
+                &image.active_image,
+                0o600,
+                image.active_digest,
+                &format!("file\t600\t{original_active}\t{backup_active}"),
+            ),
+            manifest_file_record(
+                &image.known_good_image,
+                0o600,
+                image.known_good_digest,
+                "absent\t-\t-\t-",
+            ),
+            manifest_file_record(
+                &image.grub_script_path,
+                0o755,
+                image.grub_script_digest,
+                "absent\t-\t-\t-",
+            ),
+            manifest_file_record(
+                &contract.grub_config_path,
+                0o600,
+                sha256(grub_config),
+                &format!("file\t600\t{original_grub}\t{backup_grub}"),
+            ),
+        ]);
+        inventory.sort_by(|left, right| left.split('\t').nth(1).cmp(&right.split('\t').nth(1)));
+        let mut prefix = with_image
+            .lines()
+            .filter(|line| {
+                !matches!(
+                    line.split('\t').next(),
+                    Some("file" | "patched-file" | "symlink")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        prefix.push('\n');
+        prefix.push_str(&inventory.join("\n"));
+        prefix.push('\n');
+        prefix
+    });
+
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Verified {
+            active_digest,
+            known_good_digest,
+            bootart_digest,
+        } if active_digest == image.active_digest
+            && known_good_digest == image.known_good_digest
+            && bootart_digest == image.bootart_digest
+    ));
+
+    write_guest_file(&root, &image.active_image, 0o600, b"modified active image");
+    assert!(matches!(
+        subject.status().unwrap().image_verification,
+        ImageVerificationStatus::Modified { paths }
+            if paths == [image.active_image]
+    ));
 }

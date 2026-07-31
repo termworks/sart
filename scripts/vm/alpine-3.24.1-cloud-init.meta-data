@@ -1,0 +1,2 @@
+instance-id: bootart-alpine-3.24.1-provision
+local-hostname: bootart-alpine-provision

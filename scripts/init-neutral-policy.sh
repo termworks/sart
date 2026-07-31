@@ -80,7 +80,7 @@ for candidate in "$repo_root/.cargo/config" "$repo_root/.cargo/config.toml"; do
         link_surfaces+=("$candidate")
     fi
 done
-link_hit="$(grep -H -n -E -- '-l[^#]*(systemd|dbus)|pkg-config[^#]*(systemd|dbus)|lib(systemd|dbus)[^[:alnum:]_]' \
+link_hit="$(grep -H -n -E -- '(^|[^[:alnum:]_])-l[^#]*(systemd|dbus)|pkg-config[^#]*(systemd|dbus)|lib(systemd|dbus)[^[:alnum:]_]' \
     "${link_surfaces[@]}" 2>/dev/null || true)"
 [[ -z "$link_hit" ]] || die "forbidden init-specific native link configuration: $link_hit"
 

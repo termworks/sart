@@ -13,7 +13,7 @@ lock_file=$3
 vm_check_layout "$repo_root" "$vm_root"
 vm_validate_lock "$lock_file"
 
-tools=(bash awk basename cat chmod cp cpio curl date dirname find findmnt grep gzip head id install jq ln mkdir mkfifo mktemp od prlimit readelf readlink rm sed sha256sum sleep socat sort stat tail tar timeout touch tr truncate wc xorriso)
+tools=(bash awk basename cat chmod cp cpio curl date dirname find findmnt grep gzip head id install jq ln mkdir mke2fs mkfifo mktemp od prlimit readelf readlink rm sed sha256sum sleep socat sort stat tail tar timeout touch tr truncate wc xorriso)
 
 missing=()
 for tool in "${tools[@]}"; do

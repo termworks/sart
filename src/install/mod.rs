@@ -1,38 +1,53 @@
-//! Transactional installer foundation for explicit, alternate filesystem roots.
+//! Distribution-neutral transactional Linux installer.
 //!
-//! Nothing in this module discovers or mutates the running host implicitly.
-//! Default/release builds can validate an absolute alternate root and render a
-//! non-actionable preview, but every production mutator is hard-locked.
-//! Transaction exercises compile only behind the non-default test-seam feature;
-//! generators remain unsupported until their exact disposable-VM lanes exist.
+//! Normal release builds operate only on `/` and select mechanism-named
+//! initramfs, supervisor, password-broker, and boot-loader contracts from
+//! descriptor-verified capabilities. UID, terminal, hostname, ELF, filesystem,
+//! tool, image, and adapter checks must all succeed before mutation. Alternate
+//! roots and interruption injection stay behind the non-default installer
+//! test-seam feature.
 
+mod dracut_systemd;
 mod elf;
 mod hash;
+mod initramfs_tools_systemd;
+mod mkinitcpio_systemd;
+mod mkinitfs_boot_deploy_openrc;
+mod mkinitfs_openrc;
 
+pub use dracut_systemd::*;
 pub use elf::validate_static_elf;
 pub use hash::{Sha256Digest, sha256};
+pub use initramfs_tools_systemd::*;
+pub use mkinitcpio_systemd::*;
+pub use mkinitfs_boot_deploy_openrc::*;
+pub use mkinitfs_openrc::*;
 
 use crate::embedded::{
     RESOURCE_SET_VERSION, TemplateId, TemplateMaterialization, template_resource,
 };
 use crate::integration::mkinitfs::patch_initramfs_init;
+use crate::integration::mkinitfs_boot_deploy::{
+    REVIEWED_INITRAMFS_VERSION as REVIEWED_BOOT_DEPLOY_INITRAMFS_VERSION, patch_init_functions_2nd,
+};
 use crate::integration::{
     ADAPTERS, AdapterId, AdapterKind, SupportStatus, adapter as adapter_metadata,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PLAN_SCHEMA: &str = "bootart.install-plan";
 const PLAN_VERSION: u16 = 3;
-const MANIFEST_HEADER: &str = "BOOTART-MANIFEST\t2";
+const MANIFEST_HEADER: &str = "BOOTART-MANIFEST\t3";
 const JOURNAL_HEADER: &str = "BOOTART-JOURNAL\t1";
 const STATE_DIR: &str = "/var/lib/bootart/install";
 const TRANSACTIONS_DIR: &str = "/var/lib/bootart/install/transactions";
@@ -122,6 +137,8 @@ pub enum InstallError {
         effective_uid: u32,
         required_uid: u32,
     },
+    MutationRequiresTerminal,
+    HostConfirmationMismatch,
     MutationLocked,
     TransactionBusy,
     ExistingInstallationConflict,
@@ -148,6 +165,23 @@ pub enum InstallError {
     CleanupFailed(Vec<String>),
     GeneratorsUnsupported {
         generator: GeneratorKind,
+    },
+    GeneratorExited {
+        generator: GeneratorKind,
+        status: i32,
+    },
+    GeneratorOutputTooLarge {
+        generator: GeneratorKind,
+        bytes: usize,
+        limit: usize,
+    },
+    GeneratorTimedOut {
+        generator: GeneratorKind,
+        seconds: u64,
+    },
+    GeneratorExecution {
+        generator: GeneratorKind,
+        message: String,
     },
 }
 
@@ -233,6 +267,14 @@ impl fmt::Display for InstallError {
                 formatter,
                 "effective uid {effective_uid} cannot mutate a tree requiring uid {required_uid}"
             ),
+            Self::MutationRequiresTerminal => write!(
+                formatter,
+                "installer mutation requires interactive standard input and standard output"
+            ),
+            Self::HostConfirmationMismatch => write!(
+                formatter,
+                "confirmation does not equal the exact current hostname"
+            ),
             Self::MutationLocked => write!(
                 formatter,
                 "installer mutation is locked until exact generator and VM acceptance gates pass"
@@ -297,6 +339,30 @@ impl fmt::Display for InstallError {
                 formatter,
                 "generator {generator:?} is unsupported until its disposable-VM gate passes"
             ),
+            Self::GeneratorExited { generator, status } => {
+                write!(
+                    formatter,
+                    "generator {generator:?} exited with status {status}"
+                )
+            }
+            Self::GeneratorOutputTooLarge {
+                generator,
+                bytes,
+                limit,
+            } => write!(
+                formatter,
+                "generator {generator:?} produced {bytes} output bytes, above the {limit}-byte limit"
+            ),
+            Self::GeneratorTimedOut { generator, seconds } => write!(
+                formatter,
+                "generator {generator:?} exceeded its {seconds}-second process-group timeout"
+            ),
+            Self::GeneratorExecution { generator, message } => {
+                write!(
+                    formatter,
+                    "generator {generator:?} execution failed: {message}"
+                )
+            }
         }
     }
 }
@@ -417,6 +483,21 @@ impl AlternateRoot {
             .map_err(|error| io_error("inspect alternate-root identity", path, error))?;
         Ok(Self {
             path: path.to_path_buf(),
+            device: identity.device,
+            inode: identity.inode,
+        })
+    }
+
+    fn live_root() -> Result<Self, InstallError> {
+        let metadata = OsMetadataSource;
+        let identity = check_existing_node(
+            Path::new("/"),
+            &metadata,
+            RootPolicy::PRODUCTION,
+            Some(NodeKind::Directory),
+        )?;
+        Ok(Self {
+            path: PathBuf::from("/"),
             device: identity.device,
             inode: identity.inode,
         })
@@ -602,37 +683,46 @@ pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
         proof_slug: "dracut-systemd",
         initramfs: AdapterId::DracutSystemd,
         real_root: AdapterId::SystemdRealRoot,
-        status: SupportStatus::ExperimentalUnproven,
+        status: SupportStatus::ProvenSupported,
         proof_gates: &[
             "make vm-test-lifecycle-dracut-systemd",
             "make vm-test-install-dracut-systemd",
             "make vm-test-password-dracut-systemd",
+            "make vm-test-recovery-dracut-systemd",
+            "make vm-test-uninstall-dracut-systemd",
+            "make vm-test-kernel-update-dracut-systemd",
         ],
-        limitation: "dracut/systemd end-to-end installation is not VM-proven",
+        limitation: "supported only when runtime discovery proves the exact dracut-systemd + systemd capability contract",
     },
     AdapterPairMetadata {
         proof_slug: "initramfs-tools",
         initramfs: AdapterId::InitramfsToolsBusybox,
         real_root: AdapterId::SystemdRealRoot,
-        status: SupportStatus::ExperimentalUnproven,
+        status: SupportStatus::ProvenSupported,
         proof_gates: &[
             "make vm-test-lifecycle-initramfs-tools",
             "make vm-test-install-initramfs-tools",
             "make vm-test-password-initramfs-tools",
+            "make vm-test-recovery-initramfs-tools",
+            "make vm-test-uninstall-initramfs-tools",
+            "make vm-test-kernel-update-initramfs-tools",
         ],
-        limitation: "initramfs-tools/systemd end-to-end installation is not VM-proven",
+        limitation: "supported only when runtime discovery proves the exact initramfs-tools + systemd capability contract",
     },
     AdapterPairMetadata {
         proof_slug: "mkinitcpio",
         initramfs: AdapterId::MkinitcpioBusybox,
         real_root: AdapterId::SystemdRealRoot,
-        status: SupportStatus::ExperimentalUnproven,
+        status: SupportStatus::ProvenSupported,
         proof_gates: &[
             "make vm-test-lifecycle-mkinitcpio",
             "make vm-test-install-mkinitcpio",
             "make vm-test-password-mkinitcpio",
+            "make vm-test-recovery-mkinitcpio",
+            "make vm-test-uninstall-mkinitcpio",
+            "make vm-test-kernel-update-mkinitcpio",
         ],
-        limitation: "mkinitcpio/systemd end-to-end installation is not VM-proven",
+        limitation: "supported only when runtime discovery proves the exact mkinitcpio + systemd capability contract",
     },
     AdapterPairMetadata {
         proof_slug: "dracut-classic",
@@ -643,6 +733,9 @@ pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
             "make vm-test-lifecycle-dracut-classic",
             "make vm-test-install-dracut-classic",
             "make vm-test-password-dracut-classic",
+            "make vm-test-recovery-dracut-classic",
+            "make vm-test-uninstall-dracut-classic",
+            "make vm-test-kernel-update-dracut-classic",
         ],
         limitation: "classic dracut/OpenRC end-to-end installation is not VM-proven",
     },
@@ -650,13 +743,31 @@ pub const ADAPTER_PAIRS: &[AdapterPairMetadata] = &[
         proof_slug: "mkinitfs-openrc",
         initramfs: AdapterId::MkinitfsBusybox,
         real_root: AdapterId::OpenRcRealRoot,
-        status: SupportStatus::ExperimentalUnproven,
+        status: SupportStatus::ProvenSupported,
         proof_gates: &[
             "make vm-test-lifecycle-mkinitfs-openrc",
             "make vm-test-install-mkinitfs-openrc",
             "make vm-test-password-mkinitfs-openrc",
+            "make vm-test-recovery-mkinitfs-openrc",
+            "make vm-test-uninstall-mkinitfs-openrc",
+            "make vm-test-kernel-update-mkinitfs-openrc",
         ],
-        limitation: "mkinitfs/OpenRC end-to-end installation is not VM-proven",
+        limitation: "supported only when runtime discovery proves the exact mkinitfs + OpenRC + extlinux capability contract",
+    },
+    AdapterPairMetadata {
+        proof_slug: "mkinitfs-boot-deploy-openrc",
+        initramfs: AdapterId::MkinitfsBootDeploy,
+        real_root: AdapterId::OpenRcRealRoot,
+        status: SupportStatus::ProvenSupported,
+        proof_gates: &[
+            "make vm-test-lifecycle-mkinitfs-boot-deploy-openrc",
+            "make vm-test-install-mkinitfs-boot-deploy-openrc",
+            "make vm-test-password-mkinitfs-boot-deploy-openrc",
+            "make vm-test-recovery-mkinitfs-boot-deploy-openrc",
+            "make vm-test-uninstall-mkinitfs-boot-deploy-openrc",
+            "make vm-test-kernel-update-mkinitfs-boot-deploy-openrc",
+        ],
+        limitation: "supported only when runtime discovery proves the exact mkinitfs + boot-deploy + OpenRC + BLS capability contract",
     },
 ];
 
@@ -1223,10 +1334,10 @@ const INITRAMFS_SAFETY_SPECS: &[InitramfsSafetySpec] = &[
     InitramfsSafetySpec {
         adapter: AdapterId::DracutSystemd,
         generator: GeneratorKind::Dracut,
-        invocation_blocker: "dracut-systemd has no embedded absolute generator path, kernel-version input, or candidate-output argv contract",
-        image_blocker: "dracut-systemd has no embedded candidate initramfs path contract",
-        known_good_blocker: "dracut-systemd has no embedded default-image or boot-entry discovery contract",
-        inspection_blocker: "dracut-systemd has no embedded candidate archive inspector or non-default systemd unit-directory contract",
+        invocation_blocker: "generic preview cannot substitute for the descriptor-validated live dracut-systemd generator contract",
+        image_blocker: "generic preview has no live dracut-systemd candidate path identity",
+        known_good_blocker: "generic preview has no live dracut-systemd known-good image or boot-loader identity",
+        inspection_blocker: "generic preview cannot substitute for the bounded live dracut-systemd archive inventory contract",
     },
     InitramfsSafetySpec {
         adapter: AdapterId::DracutClassic,
@@ -1260,14 +1371,21 @@ const INITRAMFS_SAFETY_SPECS: &[InitramfsSafetySpec] = &[
         known_good_blocker: "mkinitfs has no embedded default-image or boot-entry discovery contract",
         inspection_blocker: "mkinitfs has no embedded candidate archive inspector or archive-member mapping; the exact 3.14.0-r0 source insertion contract is validated read-only",
     },
+    InitramfsSafetySpec {
+        adapter: AdapterId::MkinitfsBootDeploy,
+        generator: GeneratorKind::MkinitfsBootDeploy,
+        invocation_blocker: "mkinitfs + boot-deploy has no embedded absolute generator path, profile input, or separately named output contract",
+        image_blocker: "mkinitfs + boot-deploy has no embedded candidate boot artifact path contract",
+        known_good_blocker: "mkinitfs + boot-deploy has no embedded known-good boot-deploy recovery contract",
+        inspection_blocker: "mkinitfs + boot-deploy has no embedded candidate archive/boot-image inspector or validated unl0kr hook contract",
+    },
 ];
 
 const DESTINATION_INSPECTION_BLOCKER: &str =
     "shared-file preimages and required-directory creation state are not represented yet";
 const GENERATED_DIRECTORY_BLOCKER: &str = "candidate initramfs directory existence is unresolved until a candidate path and generator contract exist";
-const SAFETY_EXECUTION_BLOCKER: &str =
-    "production mutation and non-payload preview execution remain locked";
-const IMAGE_VERIFICATION_BLOCKER: &str = "candidate and known-good initramfs verification is unresolved until the selected adapter image contract and VM gates pass";
+const SAFETY_EXECUTION_BLOCKER: &str = "generic adapter preview execution remains locked; only a verified live capability contract may mutate";
+const IMAGE_VERIFICATION_BLOCKER: &str = "generic preview has no verified live image contract; a selected production backend supplies candidate and known-good verification";
 const TRANSACTION_ID_PLACEHOLDER: &str = "{transaction-id}";
 
 /// Stable, reviewable plan. Construction reads embedded constants and caller
@@ -1394,9 +1512,9 @@ impl InstallPlan {
         &self.operations
     }
 
-    /// Shared-file edits are explicit preview data. They are kept separate
-    /// from whole-file payload writes so the transaction seam cannot execute
-    /// them accidentally.
+    /// Shared-file edits are kept separate from whole-file payload writes so
+    /// planning, identity validation, and transactional patch execution remain
+    /// explicit.
     pub fn managed_snippet_operations(&self) -> &[ManagedSnippetOperation] {
         &self.managed_snippet_operations
     }
@@ -1428,6 +1546,837 @@ impl InstallPlan {
 
     pub const fn blockers(&self) -> &'static [&'static str] {
         PLAN_BLOCKERS
+    }
+
+    fn validate_dracut_systemd_production_contract(
+        &self,
+        contract: &DracutSystemdContract,
+    ) -> Result<(), InstallError> {
+        if self.root != Path::new("/")
+            || self.selection.initramfs() != AdapterId::DracutSystemd
+            || self.selection.real_root() != AdapterId::SystemdRealRoot
+            || !self.selection.pair_metadata().status.is_supported()
+            || contract.generate.alternate_root != self.root
+            || contract.update_grub.alternate_root != self.root
+        {
+            return Err(InstallError::InvalidPlan(
+                "production rendering requires the exact proven dracut-systemd live-root pair"
+                    .into(),
+            ));
+        }
+        validate_dracut_systemd_contract(contract)?;
+        Ok(())
+    }
+
+    /// Binds the generic embedded-file plan to every host-derived value that
+    /// can change the exact dracut-systemd transaction. A plan ID therefore cannot be
+    /// replayed across kernels, initramfs images, GRUB state, or generator
+    /// requests merely because the copied Bootart ELF is identical.
+    fn dracut_systemd_production_identity(&self, contract: &DracutSystemdContract) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        push_plan_identity_field(
+            &mut bytes,
+            b"bootart.dracut-systemd-production-plan.identity.v1",
+        );
+        push_plan_identity_field(&mut bytes, self.identity().to_string().as_bytes());
+        for field in [
+            contract.kernel_version.as_bytes(),
+            contract.active_image.as_bytes(),
+            contract.candidate_image.as_bytes(),
+            contract.known_good_image.as_bytes(),
+            contract.grub_script_path.as_bytes(),
+            contract.grub_config_path.as_bytes(),
+        ] {
+            push_plan_identity_field(&mut bytes, field);
+        }
+        push_plan_identity_field(&mut bytes, contract.known_good_digest.as_bytes());
+        push_plan_identity_field(&mut bytes, &contract.grub_script);
+        push_generator_request_identity(&mut bytes, &contract.generate);
+        push_generator_request_identity(&mut bytes, &contract.update_grub);
+        sha256(&bytes)
+    }
+
+    /// Truthful read-only rendering for the only production-capable pair. The
+    /// generic alternate-root preview below intentionally remains locked.
+    pub fn render_dracut_systemd_production_human(
+        &self,
+        contract: &DracutSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_dracut_systemd_production_contract(contract)?;
+        let mut output = format!(
+            "bootart install plan v{PLAN_VERSION}\nstatus: READY\nmutation: GUARDED (uid-0 + exact-hostname + interactive-tty)\nresource-set: {RESOURCE_SET_VERSION}\nplan-id: {}\nroot: /\nplatform: linux {}\nadapters: dracut-systemd + systemd\nkernel: {}\nactive-image: {}\ncandidate-image: {}\nknown-good-image: {}\ngenerator: {} {:?}\narchive-inspector: {} --unpack {}\ngrub-update: {} {:?}\noperations:\n",
+            self.dracut_systemd_production_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            contract.kernel_version,
+            contract.active_image,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.generate.executable,
+            contract.generate.arguments,
+            LSINITRD_EXECUTABLE,
+            contract.candidate_image,
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+        );
+        for (index, operation) in self.operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} write {} mode={:04o} owner={} sha256={} source={} previous={}\n",
+                index + 1,
+                operation.path,
+                operation.mode,
+                operation.owner_uid,
+                operation.digest,
+                operation.source.stable_name(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.activation_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} symlink {} -> {} scope={} owner={}\n",
+                self.operations.len() + index + 1,
+                operation.path,
+                operation.relative_target,
+                operation.scope.stable_name(),
+                operation.owner_uid,
+            ));
+        }
+        output.push_str(&format!(
+            "image-transaction:\n  generate-candidate {}\n  inspect-candidate {} --unpack {}\n  preserve-known-good {} sha256={}\n  write-grub-script {} mode=0755 sha256={}\n  update-grub {} {:?}\n  atomically-activate {} -> {}\n",
+            contract.candidate_image,
+            LSINITRD_EXECUTABLE,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.known_good_digest,
+            contract.grub_script_path,
+            sha256(&contract.grub_script),
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+            contract.candidate_image,
+            contract.active_image,
+        ));
+        output.push_str("transaction: candidate-generate -> bounded-inspect -> known-good-grub -> atomic-activate -> manifest-commit\nrollback: durable preimages + known-good boot entry + explicit recover\nnetwork: forbidden\n");
+        Ok(output)
+    }
+
+    pub fn render_dracut_systemd_production_json(
+        &self,
+        contract: &DracutSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_dracut_systemd_production_contract(contract)?;
+        let arguments = contract
+            .generate
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let grub_arguments = contract
+            .update_grub
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut operations = self
+            .operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{{\"kind\":\"write_file\",\"path\":\"{}\",\"mode\":{},\"owner_uid\":{},\"sha256\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\"}}",
+                    json_escape(&operation.path),
+                    operation.mode,
+                    operation.owner_uid,
+                    operation.digest,
+                    json_escape(operation.source.stable_name()),
+                    operation.expected_previous.stable_name(),
+                )
+            })
+            .collect::<Vec<_>>();
+        operations.extend(self.activation_operations.iter().map(|operation| {
+            format!(
+                "{{\"kind\":\"create_symlink\",\"path\":\"{}\",\"target\":\"{}\",\"scope\":\"{}\",\"owner_uid\":{},\"previous\":\"{}\"}}",
+                json_escape(&operation.path),
+                json_escape(&operation.relative_target),
+                operation.scope.stable_name(),
+                operation.owner_uid,
+                operation.expected_previous.stable_name(),
+            )
+        }));
+        let operations = operations.join(",");
+        Ok(format!(
+            "{{\"schema\":\"{PLAN_SCHEMA}\",\"version\":{PLAN_VERSION},\"resource_set_version\":{RESOURCE_SET_VERSION},\"plan_id\":\"{}\",\"actionable\":true,\"mutation\":\"guarded\",\"guards\":[\"uid_0\",\"exact_hostname\",\"interactive_stdin\",\"interactive_stdout\"],\"root\":\"/\",\"platform\":{{\"kernel\":\"linux\",\"architecture\":\"{}\"}},\"adapters\":[\"dracut-systemd\",\"systemd\"],\"kernel\":\"{}\",\"active_image\":\"{}\",\"candidate_image\":\"{}\",\"known_good_image\":\"{}\",\"known_good_sha256\":\"{}\",\"generator\":{{\"executable\":\"{}\",\"argv\":[{arguments}],\"clear_environment\":true}},\"archive_inspector\":{{\"executable\":\"{}\",\"argv\":[\"--unpack\",\"{}\"]}},\"grub_script\":{{\"path\":\"{}\",\"mode\":493,\"sha256\":\"{}\"}},\"grub_config\":\"{}\",\"grub_update\":{{\"executable\":\"{}\",\"argv\":[{grub_arguments}],\"clear_environment\":true}},\"operations\":[{operations}],\"transaction\":[\"candidate_generate\",\"bounded_inspect\",\"known_good_grub\",\"atomic_activate\",\"manifest_commit\"],\"rollback\":\"durable_preimages_and_explicit_recover\",\"network\":\"forbidden\"}}",
+            self.dracut_systemd_production_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            json_escape(&contract.kernel_version),
+            json_escape(&contract.active_image),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.known_good_image),
+            contract.known_good_digest,
+            json_escape(&contract.generate.executable),
+            json_escape(LSINITRD_EXECUTABLE),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.grub_script_path),
+            sha256(&contract.grub_script),
+            json_escape(&contract.grub_config_path),
+            json_escape(&contract.update_grub.executable),
+        ))
+    }
+
+    fn validate_initramfs_tools_systemd_live_contract(
+        &self,
+        contract: &InitramfsToolsSystemdContract,
+    ) -> Result<(), InstallError> {
+        if self.root != Path::new("/")
+            || self.selection.initramfs() != AdapterId::InitramfsToolsBusybox
+            || self.selection.real_root() != AdapterId::SystemdRealRoot
+            || contract.generate.alternate_root != self.root
+            || contract.update_grub.alternate_root != self.root
+        {
+            return Err(InstallError::InvalidPlan(
+                "live rendering requires the exact initramfs-tools-systemd + systemd pair".into(),
+            ));
+        }
+        validate_initramfs_tools_systemd_contract(contract)
+    }
+
+    fn initramfs_tools_systemd_identity(
+        &self,
+        contract: &InitramfsToolsSystemdContract,
+    ) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        push_plan_identity_field(
+            &mut bytes,
+            b"bootart.initramfs-tools-systemd-plan.identity.v1",
+        );
+        push_plan_identity_field(&mut bytes, self.identity().to_string().as_bytes());
+        for field in [
+            contract.kernel_version.as_bytes(),
+            contract.active_image.as_bytes(),
+            contract.candidate_image.as_bytes(),
+            contract.known_good_image.as_bytes(),
+            contract.grub_script_path.as_bytes(),
+            contract.grub_config_path.as_bytes(),
+        ] {
+            push_plan_identity_field(&mut bytes, field);
+        }
+        push_plan_identity_field(&mut bytes, contract.known_good_digest.as_bytes());
+        push_plan_identity_field(&mut bytes, &contract.grub_script);
+        push_generator_request_identity(&mut bytes, &contract.generate);
+        push_generator_request_identity(&mut bytes, &contract.update_grub);
+        sha256(&bytes)
+    }
+
+    /// Exact read-only plan for the proven initramfs-tools + systemd pair.
+    pub fn render_initramfs_tools_systemd_human(
+        &self,
+        contract: &InitramfsToolsSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_initramfs_tools_systemd_live_contract(contract)?;
+        let mut output = format!(
+            "bootart install plan v{PLAN_VERSION}\nstatus: READY\nmutation: GUARDED (uid-0 + exact-hostname + interactive-tty)\nresource-set: {RESOURCE_SET_VERSION}\nplan-id: {}\nroot: /\nplatform: linux {}\nadapters: initramfs-tools-busybox + systemd\nkernel: {}\nactive-image: {}\ncandidate-image: {}\nknown-good-image: {}\ngenerator: {} {:?}\narchive-inspector: {} {} <private-transaction-directory>\ngrub-update: {} {:?}\noperations:\n",
+            self.initramfs_tools_systemd_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            contract.kernel_version,
+            contract.active_image,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.generate.executable,
+            contract.generate.arguments,
+            UNMKINITRAMFS_EXECUTABLE,
+            contract.candidate_image,
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+        );
+        for (index, operation) in self.operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} write {} mode={:04o} owner={} sha256={} source={} previous={}\n",
+                index + 1,
+                operation.path,
+                operation.mode,
+                operation.owner_uid,
+                operation.digest,
+                operation.source.stable_name(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.activation_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} symlink {} -> {} scope={} owner={}\n",
+                self.operations.len() + index + 1,
+                operation.path,
+                operation.relative_target,
+                operation.scope.stable_name(),
+                operation.owner_uid,
+            ));
+        }
+        output.push_str(&format!(
+            "image-transaction:\n  generate-candidate {}\n  inspect-candidate {} {} <private-transaction-directory>\n  preserve-known-good {} sha256={}\n  write-grub-script {} mode=0755 sha256={}\n  update-grub {} {:?}\n  atomically-activate {} -> {}\n",
+            contract.candidate_image,
+            UNMKINITRAMFS_EXECUTABLE,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.known_good_digest,
+            contract.grub_script_path,
+            sha256(&contract.grub_script),
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+            contract.candidate_image,
+            contract.active_image,
+        ));
+        output.push_str("transaction: candidate-generate -> bounded-layer-inspect -> known-good-grub -> atomic-activate -> manifest-commit\nrollback: durable preimages + known-good boot entry + explicit recover\nnetwork: forbidden\n");
+        Ok(output)
+    }
+
+    pub fn render_initramfs_tools_systemd_json(
+        &self,
+        contract: &InitramfsToolsSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_initramfs_tools_systemd_live_contract(contract)?;
+        let arguments = contract
+            .generate
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let grub_arguments = contract
+            .update_grub
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut operations = self
+            .operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{{\"kind\":\"write_file\",\"path\":\"{}\",\"mode\":{},\"owner_uid\":{},\"sha256\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\"}}",
+                    json_escape(&operation.path),
+                    operation.mode,
+                    operation.owner_uid,
+                    operation.digest,
+                    json_escape(operation.source.stable_name()),
+                    operation.expected_previous.stable_name(),
+                )
+            })
+            .collect::<Vec<_>>();
+        operations.extend(self.activation_operations.iter().map(|operation| {
+            format!(
+                "{{\"kind\":\"create_symlink\",\"path\":\"{}\",\"target\":\"{}\",\"scope\":\"{}\",\"owner_uid\":{},\"previous\":\"{}\"}}",
+                json_escape(&operation.path),
+                json_escape(&operation.relative_target),
+                operation.scope.stable_name(),
+                operation.owner_uid,
+                operation.expected_previous.stable_name(),
+            )
+        }));
+        Ok(format!(
+            "{{\"schema\":\"{PLAN_SCHEMA}\",\"version\":{PLAN_VERSION},\"resource_set_version\":{RESOURCE_SET_VERSION},\"plan_id\":\"{}\",\"actionable\":true,\"mutation\":\"guarded\",\"guards\":[\"uid_0\",\"exact_hostname\",\"interactive_stdin\",\"interactive_stdout\"],\"root\":\"/\",\"platform\":{{\"kernel\":\"linux\",\"architecture\":\"{}\"}},\"adapters\":[\"initramfs-tools-busybox\",\"systemd\"],\"kernel\":\"{}\",\"active_image\":\"{}\",\"candidate_image\":\"{}\",\"known_good_image\":\"{}\",\"known_good_sha256\":\"{}\",\"generator\":{{\"executable\":\"{}\",\"argv\":[{arguments}],\"clear_environment\":true}},\"archive_inspector\":{{\"executable\":\"{}\",\"argv\":[\"{}\",\"<private-transaction-directory>\"]}},\"grub_script\":{{\"path\":\"{}\",\"mode\":493,\"sha256\":\"{}\"}},\"grub_config\":\"{}\",\"grub_update\":{{\"executable\":\"{}\",\"argv\":[{grub_arguments}],\"clear_environment\":true}},\"operations\":[{}],\"transaction\":[\"candidate_generate\",\"bounded_layer_inspect\",\"known_good_grub\",\"atomic_activate\",\"manifest_commit\"],\"rollback\":\"durable_preimages_and_explicit_recover\",\"network\":\"forbidden\"}}",
+            self.initramfs_tools_systemd_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            json_escape(&contract.kernel_version),
+            json_escape(&contract.active_image),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.known_good_image),
+            contract.known_good_digest,
+            json_escape(&contract.generate.executable),
+            json_escape(UNMKINITRAMFS_EXECUTABLE),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.grub_script_path),
+            sha256(&contract.grub_script),
+            json_escape(&contract.grub_config_path),
+            json_escape(&contract.update_grub.executable),
+            operations.join(","),
+        ))
+    }
+
+    fn validate_mkinitcpio_systemd_live_contract(
+        &self,
+        contract: &MkinitcpioSystemdContract,
+    ) -> Result<(), InstallError> {
+        if self.root != Path::new("/")
+            || self.selection.initramfs() != AdapterId::MkinitcpioBusybox
+            || self.selection.real_root() != AdapterId::SystemdRealRoot
+            || contract.generate.alternate_root != self.root
+            || contract.update_grub.alternate_root != self.root
+        {
+            return Err(InstallError::InvalidPlan(
+                "live rendering requires the exact mkinitcpio + systemd pair".into(),
+            ));
+        }
+        validate_mkinitcpio_systemd_contract(contract)
+    }
+
+    fn mkinitcpio_systemd_identity(&self, contract: &MkinitcpioSystemdContract) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        push_plan_identity_field(&mut bytes, b"bootart.mkinitcpio-systemd-plan.identity.v1");
+        push_plan_identity_field(&mut bytes, self.identity().to_string().as_bytes());
+        for field in [
+            contract.kernel_version.as_bytes(),
+            contract.package_base.as_bytes(),
+            contract.preset_path.as_bytes(),
+            contract.active_image.as_bytes(),
+            contract.candidate_image.as_bytes(),
+            contract.known_good_image.as_bytes(),
+            contract.config_path.as_bytes(),
+            contract.grub_script_path.as_bytes(),
+            contract.grub_config_path.as_bytes(),
+        ] {
+            push_plan_identity_field(&mut bytes, field);
+        }
+        push_plan_identity_field(&mut bytes, contract.known_good_digest.as_bytes());
+        push_plan_identity_field(&mut bytes, &contract.config_original);
+        push_plan_identity_field(&mut bytes, &contract.config_activated);
+        push_plan_identity_field(&mut bytes, &contract.grub_script);
+        push_generator_request_identity(&mut bytes, &contract.generate);
+        push_generator_request_identity(&mut bytes, &contract.update_grub);
+        sha256(&bytes)
+    }
+
+    pub fn render_mkinitcpio_systemd_human(
+        &self,
+        contract: &MkinitcpioSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitcpio_systemd_live_contract(contract)?;
+        let mut output = format!(
+            "bootart install plan v{PLAN_VERSION}\nstatus: READY\nmutation: GUARDED (uid-0 + exact-hostname + interactive-tty)\nresource-set: {RESOURCE_SET_VERSION}\nplan-id: {}\nroot: /\nplatform: linux {}\nadapters: mkinitcpio-busybox + systemd\nkernel: {}\npackage-base: {}\nactive-image: {}\ncandidate-image: {}\nknown-good-image: {}\ngenerator-config: {} mode={:04o}\ngenerator: {} {:?}\narchive-inspector: {} -x {} <private-transaction-directory>\ngrub-update: {} {:?}\noperations:\n",
+            self.mkinitcpio_systemd_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            contract.kernel_version,
+            contract.package_base,
+            contract.active_image,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.config_path,
+            contract.config_mode,
+            contract.generate.executable,
+            contract.generate.arguments,
+            LSINITCPIO_EXECUTABLE,
+            contract.candidate_image,
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+        );
+        for (index, operation) in self.operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} write {} mode={:04o} owner={} sha256={} source={} previous={}\n",
+                index + 1,
+                operation.path,
+                operation.mode,
+                operation.owner_uid,
+                operation.digest,
+                operation.source.stable_name(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.activation_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} symlink {} -> {} scope={} owner={}\n",
+                self.operations.len() + index + 1,
+                operation.path,
+                operation.relative_target,
+                operation.scope.stable_name(),
+                operation.owner_uid,
+            ));
+        }
+        output.push_str(&format!(
+            "image-transaction:\n  activate-generator-config {}\n  generate-candidate {}\n  inspect-candidate {} -x {} <private-transaction-directory>\n  preserve-known-good {} sha256={}\n  write-grub-script {} mode=0755 sha256={}\n  update-grub {} {:?}\n  atomically-activate {} -> {}\n",
+            contract.config_path,
+            contract.candidate_image,
+            LSINITCPIO_EXECUTABLE,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.known_good_digest,
+            contract.grub_script_path,
+            sha256(&contract.grub_script),
+            contract.update_grub.executable,
+            contract.update_grub.arguments,
+            contract.candidate_image,
+            contract.active_image,
+        ));
+        output.push_str("transaction: config-activate -> candidate-generate -> bounded-inspect -> known-good-grub -> atomic-activate -> manifest-commit\nrollback: durable preimages + known-good boot entry + explicit recover\nnetwork: forbidden\n");
+        Ok(output)
+    }
+
+    pub fn render_mkinitcpio_systemd_json(
+        &self,
+        contract: &MkinitcpioSystemdContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitcpio_systemd_live_contract(contract)?;
+        let arguments = contract
+            .generate
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let grub_arguments = contract
+            .update_grub
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{{\"kind\":\"write_file\",\"path\":\"{}\",\"mode\":{},\"owner_uid\":{},\"sha256\":\"{}\",\"source\":\"{}\",\"previous\":\"{}\"}}",
+                    json_escape(&operation.path),
+                    operation.mode,
+                    operation.owner_uid,
+                    operation.digest,
+                    json_escape(operation.source.stable_name()),
+                    operation.expected_previous.stable_name(),
+                )
+            })
+            .chain(self.activation_operations.iter().map(|operation| {
+                format!(
+                    "{{\"kind\":\"create_symlink\",\"path\":\"{}\",\"target\":\"{}\",\"scope\":\"{}\",\"owner_uid\":{},\"previous\":\"{}\"}}",
+                    json_escape(&operation.path),
+                    json_escape(&operation.relative_target),
+                    operation.scope.stable_name(),
+                    operation.owner_uid,
+                    operation.expected_previous.stable_name(),
+                )
+            }))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "{{\"schema\":\"{PLAN_SCHEMA}\",\"version\":{PLAN_VERSION},\"resource_set_version\":{RESOURCE_SET_VERSION},\"plan_id\":\"{}\",\"actionable\":true,\"mutation\":\"guarded\",\"guards\":[\"uid_0\",\"exact_hostname\",\"interactive_stdin\",\"interactive_stdout\"],\"root\":\"/\",\"platform\":{{\"kernel\":\"linux\",\"architecture\":\"{}\"}},\"adapters\":[\"mkinitcpio-busybox\",\"systemd\"],\"kernel\":\"{}\",\"package_base\":\"{}\",\"active_image\":\"{}\",\"candidate_image\":\"{}\",\"known_good_image\":\"{}\",\"known_good_sha256\":\"{}\",\"generator_config\":{{\"path\":\"{}\",\"mode\":{},\"original_sha256\":\"{}\",\"activated_sha256\":\"{}\"}},\"generator\":{{\"executable\":\"{}\",\"argv\":[{arguments}],\"clear_environment\":true}},\"archive_inspector\":{{\"executable\":\"{}\",\"argv\":[\"-x\",\"{}\"],\"working_directory\":\"<private-transaction-directory>\"}},\"grub_script\":{{\"path\":\"{}\",\"mode\":493,\"sha256\":\"{}\"}},\"grub_config\":\"{}\",\"grub_update\":{{\"executable\":\"{}\",\"argv\":[{grub_arguments}],\"clear_environment\":true}},\"operations\":[{operations}],\"transaction\":[\"config_activate\",\"candidate_generate\",\"bounded_inspect\",\"known_good_grub\",\"atomic_activate\",\"manifest_commit\"],\"rollback\":\"durable_preimages_and_explicit_recover\",\"network\":\"forbidden\"}}",
+            self.mkinitcpio_systemd_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            json_escape(&contract.kernel_version),
+            json_escape(&contract.package_base),
+            json_escape(&contract.active_image),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.known_good_image),
+            contract.known_good_digest,
+            json_escape(&contract.config_path),
+            contract.config_mode,
+            sha256(&contract.config_original),
+            sha256(&contract.config_activated),
+            json_escape(&contract.generate.executable),
+            json_escape(LSINITCPIO_EXECUTABLE),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.grub_script_path),
+            sha256(&contract.grub_script),
+            json_escape(&contract.grub_config_path),
+            json_escape(&contract.update_grub.executable),
+        ))
+    }
+
+    fn validate_mkinitfs_openrc_live_contract(
+        &self,
+        contract: &MkinitfsOpenRcContract,
+    ) -> Result<(), InstallError> {
+        if self.root != Path::new("/")
+            || self.selection.initramfs() != AdapterId::MkinitfsBusybox
+            || self.selection.real_root() != AdapterId::OpenRcRealRoot
+            || contract.generate.alternate_root != self.root
+            || contract.update_extlinux.alternate_root != self.root
+        {
+            return Err(InstallError::InvalidPlan(
+                "live rendering requires the exact mkinitfs + OpenRC pair".into(),
+            ));
+        }
+        validate_mkinitfs_openrc_contract(contract)
+    }
+
+    fn mkinitfs_openrc_identity(&self, contract: &MkinitfsOpenRcContract) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        push_plan_identity_field(&mut bytes, b"bootart.mkinitfs-openrc-plan.identity.v1");
+        push_plan_identity_field(&mut bytes, self.identity().to_string().as_bytes());
+        for field in [
+            contract.kernel_version.as_bytes(),
+            contract.kernel_image.as_bytes(),
+            contract.active_image.as_bytes(),
+            contract.candidate_image.as_bytes(),
+            contract.known_good_image.as_bytes(),
+            contract.extlinux_fragment_path.as_bytes(),
+            contract.extlinux_config_path.as_bytes(),
+            contract.mkinitfs_config_path.as_bytes(),
+        ] {
+            push_plan_identity_field(&mut bytes, field);
+        }
+        push_plan_identity_field(&mut bytes, contract.known_good_digest.as_bytes());
+        push_plan_identity_field(&mut bytes, &contract.extlinux_fragment);
+        push_plan_identity_field(&mut bytes, &contract.mkinitfs_config_mode.to_be_bytes());
+        bytes.push(u8::from(contract.mkinitfs_config_already_active));
+        push_plan_identity_field(&mut bytes, &contract.mkinitfs_config_original);
+        push_plan_identity_field(&mut bytes, &contract.mkinitfs_config_activated);
+        push_generator_request_identity(&mut bytes, &contract.generate);
+        push_generator_request_identity(&mut bytes, &contract.update_extlinux);
+        sha256(&bytes)
+    }
+
+    pub fn render_mkinitfs_openrc_human(
+        &self,
+        contract: &MkinitfsOpenRcContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitfs_openrc_live_contract(contract)?;
+        let mut output = format!(
+            "bootart install plan v{PLAN_VERSION}\nstatus: READY\nmutation: GUARDED (uid-0 + exact-hostname + interactive-tty)\nresource-set: {RESOURCE_SET_VERSION}\nplan-id: {}\nroot: /\nplatform: linux {}\nadapters: mkinitfs-busybox + openrc\nkernel: {}\nactive-image: {}\ncandidate-image: {}\nknown-good-image: {}\ngenerator: {} {:?}\narchive-inspector: built-in bounded newc\nextlinux-update: {} {:?}\noperations:\n",
+            self.mkinitfs_openrc_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            contract.kernel_version,
+            contract.active_image,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.generate.executable,
+            contract.generate.arguments,
+            contract.update_extlinux.executable,
+            contract.update_extlinux.arguments,
+        );
+        for (index, operation) in self.operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} write {} mode={:04o} owner={} sha256={} source={} previous={}\n",
+                index + 1,
+                operation.path,
+                operation.mode,
+                operation.owner_uid,
+                operation.digest,
+                operation.source.stable_name(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.managed_snippet_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} managed-snippet {} at={} sha256={} adapter={} source={} previous={}\n",
+                self.operations.len() + index + 1,
+                operation.target,
+                operation.insertion_point,
+                operation.digest,
+                adapter_metadata(operation.adapter).name,
+                operation.source.as_str(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        output.push_str(&format!(
+            "  {:03} managed-config {} mode={:04o} from-sha256={} to-sha256={} feature=bootart previous=exact\n",
+            self.operations.len() + self.managed_snippet_operations.len() + 1,
+            contract.mkinitfs_config_path,
+            contract.mkinitfs_config_mode,
+            sha256(&contract.mkinitfs_config_original),
+            sha256(&contract.mkinitfs_config_activated),
+        ));
+        for (index, operation) in self.activation_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} symlink {} -> {} scope={} owner={}\n",
+                self.operations.len() + self.managed_snippet_operations.len() + index + 2,
+                operation.path,
+                operation.relative_target,
+                operation.scope.stable_name(),
+                operation.owner_uid,
+            ));
+        }
+        output.push_str(&format!(
+            "image-transaction:\n  generate-candidate {}\n  inspect-candidate built-in-newc\n  preserve-known-good {} sha256={}\n  write-extlinux-fragment {} mode=0644 sha256={}\n  update-extlinux {}\n  atomically-activate {} -> {}\ntransaction: candidate-generate -> bounded-newc-inspect -> known-good-extlinux -> atomic-activate -> manifest-commit\nrollback: durable preimages + known-good boot entry + explicit recover\nnetwork: forbidden\n",
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.known_good_digest,
+            contract.extlinux_fragment_path,
+            sha256(&contract.extlinux_fragment),
+            contract.update_extlinux.executable,
+            contract.candidate_image,
+            contract.active_image,
+        ));
+        Ok(output)
+    }
+
+    pub fn render_mkinitfs_openrc_json(
+        &self,
+        contract: &MkinitfsOpenRcContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitfs_openrc_live_contract(contract)?;
+        let arguments = contract
+            .generate
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "{{\"schema\":\"{PLAN_SCHEMA}\",\"version\":{PLAN_VERSION},\"resource_set_version\":{RESOURCE_SET_VERSION},\"plan_id\":\"{}\",\"actionable\":true,\"mutation\":\"guarded\",\"root\":\"/\",\"platform\":{{\"kernel\":\"linux\",\"architecture\":\"{}\"}},\"adapters\":[\"mkinitfs-busybox\",\"openrc\"],\"kernel\":\"{}\",\"active_image\":\"{}\",\"candidate_image\":\"{}\",\"known_good_image\":\"{}\",\"known_good_sha256\":\"{}\",\"generator\":{{\"executable\":\"{}\",\"argv\":[{arguments}],\"clear_environment\":true}},\"generator_configuration\":{{\"path\":\"{}\",\"mode\":{},\"from_sha256\":\"{}\",\"to_sha256\":\"{}\",\"feature\":\"bootart\"}},\"archive_inspector\":{{\"kind\":\"built_in_newc\"}},\"boot_entry\":{{\"path\":\"{}\",\"mode\":420,\"sha256\":\"{}\"}},\"boot_config\":\"{}\",\"boot_update\":{{\"executable\":\"{}\",\"argv\":[],\"clear_environment\":true}},\"transaction\":[\"activate_generator_configuration\",\"candidate_generate\",\"bounded_newc_inspect\",\"known_good_extlinux\",\"atomic_activate\",\"manifest_commit\"],\"rollback\":\"durable_preimages_and_explicit_recover\",\"network\":\"forbidden\"}}",
+            self.mkinitfs_openrc_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            json_escape(&contract.kernel_version),
+            json_escape(&contract.active_image),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.known_good_image),
+            contract.known_good_digest,
+            json_escape(&contract.generate.executable),
+            json_escape(&contract.mkinitfs_config_path),
+            contract.mkinitfs_config_mode,
+            sha256(&contract.mkinitfs_config_original),
+            sha256(&contract.mkinitfs_config_activated),
+            json_escape(&contract.extlinux_fragment_path),
+            sha256(&contract.extlinux_fragment),
+            json_escape(&contract.extlinux_config_path),
+            json_escape(&contract.update_extlinux.executable),
+        ))
+    }
+
+    fn validate_mkinitfs_boot_deploy_openrc_live_contract(
+        &self,
+        contract: &MkinitfsBootDeployOpenRcContract,
+    ) -> Result<(), InstallError> {
+        if self.root != Path::new("/")
+            || self.selection.initramfs() != AdapterId::MkinitfsBootDeploy
+            || self.selection.real_root() != AdapterId::OpenRcRealRoot
+            || contract.generate.alternate_root != self.root
+        {
+            return Err(InstallError::InvalidPlan(
+                "live rendering requires the exact mkinitfs + boot-deploy + OpenRC pair".into(),
+            ));
+        }
+        validate_mkinitfs_boot_deploy_openrc_contract(contract)
+    }
+
+    fn mkinitfs_boot_deploy_openrc_identity(
+        &self,
+        contract: &MkinitfsBootDeployOpenRcContract,
+    ) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        push_plan_identity_field(
+            &mut bytes,
+            b"bootart.mkinitfs-boot-deploy-openrc-plan.identity.v1",
+        );
+        push_plan_identity_field(&mut bytes, self.identity().to_string().as_bytes());
+        for field in [
+            contract.kernel_image.as_bytes(),
+            contract.active_image.as_bytes(),
+            contract.candidate_directory.as_bytes(),
+            contract.candidate_image.as_bytes(),
+            contract.candidate_kernel.as_bytes(),
+            contract.known_good_image.as_bytes(),
+            contract.known_good_entry_path.as_bytes(),
+            contract.active_loader_entry.as_bytes(),
+        ] {
+            push_plan_identity_field(&mut bytes, field);
+        }
+        push_plan_identity_field(&mut bytes, contract.known_good_digest.as_bytes());
+        push_plan_identity_field(
+            &mut bytes,
+            contract.known_good_entry_mode.to_string().as_bytes(),
+        );
+        push_plan_identity_field(&mut bytes, &contract.known_good_entry);
+        push_plan_identity_field(
+            &mut bytes,
+            contract.active_loader_entry_mode.to_string().as_bytes(),
+        );
+        push_plan_identity_field(&mut bytes, &contract.active_loader_entry_original);
+        push_plan_identity_field(&mut bytes, &contract.active_loader_entry_activated);
+        push_plan_identity_field(&mut bytes, &contract.patched_init_functions_2nd);
+        push_generator_request_identity(&mut bytes, &contract.generate);
+        sha256(&bytes)
+    }
+
+    pub fn render_mkinitfs_boot_deploy_openrc_human(
+        &self,
+        contract: &MkinitfsBootDeployOpenRcContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitfs_boot_deploy_openrc_live_contract(contract)?;
+        let mut output = format!(
+            "bootart install plan v{PLAN_VERSION}\nstatus: READY\nmutation: GUARDED (uid-0 + exact-hostname + interactive-tty)\nresource-set: {RESOURCE_SET_VERSION}\nplan-id: {}\nroot: /\nplatform: linux {}\nadapters: mkinitfs-boot-deploy + openrc\nkernel-image: {}\nactive-image: {}\ncandidate-image: {}\nknown-good-image: {}\ngenerator: {} {:?}\narchive-inspector: built-in bounded Zstandard + newc\noperations:\n",
+            self.mkinitfs_boot_deploy_openrc_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            contract.kernel_image,
+            contract.active_image,
+            contract.candidate_image,
+            contract.known_good_image,
+            contract.generate.executable,
+            contract.generate.arguments,
+        );
+        for (index, operation) in self.operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} write {} mode={:04o} owner={} sha256={} source={} previous={}\n",
+                index + 1,
+                operation.path,
+                operation.mode,
+                operation.owner_uid,
+                operation.digest,
+                operation.source.stable_name(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.managed_snippet_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} managed-snippet {} at={} sha256={} adapter={} source={} previous={}\n",
+                self.operations.len() + index + 1,
+                operation.target,
+                operation.insertion_point,
+                operation.digest,
+                adapter_metadata(operation.adapter).name,
+                operation.source.as_str(),
+                operation.expected_previous.stable_name(),
+            ));
+        }
+        for (index, operation) in self.activation_operations.iter().enumerate() {
+            output.push_str(&format!(
+                "  {:03} symlink {} -> {} scope={} owner={}\n",
+                self.operations.len() + self.managed_snippet_operations.len() + index + 1,
+                operation.path,
+                operation.relative_target,
+                operation.scope.stable_name(),
+                operation.owner_uid,
+            ));
+        }
+        output.push_str(&format!(
+            "image-transaction:\n  create-private-candidate-directory {} mode=0700\n  seed-kernel {} -> {}\n  generate-candidate {}\n  remove-candidate-kernel {}\n  inspect-candidate bounded-zstd-newc\n  preserve-known-good {} sha256={}\n  write-bls-entry {} mode={:04o} sha256={}\n  replace-stock-splash-token {} mode={:04o} from-sha256={} to-sha256={}\n  atomically-activate {} -> {}\ntransaction: stock-splash-token-removal -> seed-kernel -> candidate-generate -> bounded-zstd-newc-inspect -> known-good-bls -> atomic-activate -> manifest-commit\nrollback: durable preimages + known-good BLS entry + explicit recover\nnetwork: forbidden\n",
+            contract.candidate_directory,
+            contract.kernel_image,
+            contract.candidate_kernel,
+            contract.candidate_image,
+            contract.candidate_kernel,
+            contract.known_good_image,
+            contract.known_good_digest,
+            contract.known_good_entry_path,
+            contract.known_good_entry_mode,
+            sha256(&contract.known_good_entry),
+            contract.active_loader_entry,
+            contract.active_loader_entry_mode,
+            sha256(&contract.active_loader_entry_original),
+            sha256(&contract.active_loader_entry_activated),
+            contract.candidate_image,
+            contract.active_image,
+        ));
+        Ok(output)
+    }
+
+    pub fn render_mkinitfs_boot_deploy_openrc_json(
+        &self,
+        contract: &MkinitfsBootDeployOpenRcContract,
+    ) -> Result<String, InstallError> {
+        self.validate_mkinitfs_boot_deploy_openrc_live_contract(contract)?;
+        let generator_arguments = contract
+            .generate
+            .arguments
+            .iter()
+            .map(|argument| format!("\"{}\"", json_escape(argument)))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "{{\"schema\":\"{PLAN_SCHEMA}\",\"version\":{PLAN_VERSION},\"resource_set_version\":{RESOURCE_SET_VERSION},\"plan_id\":\"{}\",\"actionable\":true,\"mutation\":\"guarded\",\"root\":\"/\",\"platform\":{{\"kernel\":\"linux\",\"architecture\":\"{}\"}},\"adapters\":[\"mkinitfs-boot-deploy\",\"openrc\"],\"kernel_image\":\"{}\",\"active_image\":\"{}\",\"candidate_directory\":{{\"path\":\"{}\",\"mode\":448}},\"candidate_image\":\"{}\",\"candidate_kernel\":\"{}\",\"known_good_image\":\"{}\",\"known_good_sha256\":\"{}\",\"generator\":{{\"executable\":\"{}\",\"argv\":[{generator_arguments}],\"clear_environment\":true}},\"archive_inspector\":{{\"kind\":\"built_in_bounded_zstd_newc\"}},\"boot_entry\":{{\"path\":\"{}\",\"mode\":{},\"sha256\":\"{}\"}},\"active_boot_entry\":{{\"path\":\"{}\",\"mode\":{},\"from_sha256\":\"{}\",\"to_sha256\":\"{}\",\"remove_exact_token\":\"splash\"}},\"transaction\":[\"stock_splash_token_removal\",\"seed_kernel\",\"candidate_generate\",\"remove_candidate_kernel\",\"bounded_zstd_newc_inspect\",\"known_good_bls\",\"atomic_activate\",\"manifest_commit\"],\"rollback\":\"durable_preimages_and_explicit_recover\",\"network\":\"forbidden\"}}",
+            self.mkinitfs_boot_deploy_openrc_identity(contract),
+            PRODUCT_ARCHITECTURE,
+            json_escape(&contract.kernel_image),
+            json_escape(&contract.active_image),
+            json_escape(&contract.candidate_directory),
+            json_escape(&contract.candidate_image),
+            json_escape(&contract.candidate_kernel),
+            json_escape(&contract.known_good_image),
+            contract.known_good_digest,
+            json_escape(&contract.generate.executable),
+            json_escape(&contract.known_good_entry_path),
+            contract.known_good_entry_mode,
+            sha256(&contract.known_good_entry),
+            json_escape(&contract.active_loader_entry),
+            contract.active_loader_entry_mode,
+            sha256(&contract.active_loader_entry_original),
+            sha256(&contract.active_loader_entry_activated),
+        ))
     }
 
     pub fn render_human(&self) -> String {
@@ -1952,6 +2901,31 @@ fn push_plan_identity_field(output: &mut Vec<u8>, field: &[u8]) {
     output.extend_from_slice(field);
 }
 
+fn push_generator_request_identity(output: &mut Vec<u8>, request: &GeneratorRequest) {
+    push_plan_identity_field(output, request.generator.stable_name().as_bytes());
+    push_plan_identity_field(output, request.executable.as_bytes());
+    push_plan_identity_field(
+        output,
+        request
+            .alternate_root
+            .to_str()
+            .expect("validated generator root is UTF-8")
+            .as_bytes(),
+    );
+    match request.working_directory.as_deref() {
+        Some(directory) => {
+            output.push(1);
+            push_plan_identity_field(output, directory.as_bytes());
+        }
+        None => output.push(0),
+    }
+    output.push(u8::from(request.clear_environment));
+    output.extend_from_slice(&(request.arguments.len() as u64).to_be_bytes());
+    for argument in &request.arguments {
+        push_plan_identity_field(output, argument.as_bytes());
+    }
+}
+
 fn managed_snippet_operations_for_selection(
     selection: AdapterSelection,
 ) -> Vec<ManagedSnippetOperation> {
@@ -2395,6 +3369,12 @@ fn read_running_bootart_elf() -> Result<Vec<u8>, InstallError> {
     Ok(bytes)
 }
 
+#[cfg(feature = "installer-test-seams")]
+#[doc(hidden)]
+pub fn running_bootart_elf_for_vm_tests() -> Result<Vec<u8>, InstallError> {
+    read_running_bootart_elf()
+}
+
 /// Synthetic-payload constructor for alternate-root transaction tests. It is
 /// absent from normal/default builds so production code cannot substitute a
 /// different executable for the running one.
@@ -2494,13 +3474,15 @@ fn validate_plan(plan: &InstallPlan) -> Result<(), InstallError> {
         "make vm-test-lifecycle-",
         "make vm-test-install-",
         "make vm-test-password-",
+        "make vm-test-recovery-",
+        "make vm-test-uninstall-",
+        "make vm-test-kernel-update-",
     ];
     let proof_slug = pair
         .proof_gates
         .first()
         .and_then(|gate| gate.strip_prefix(gate_prefixes[0]));
-    if pair.status != SupportStatus::ExperimentalUnproven
-        || pair.proof_gates.len() != gate_prefixes.len()
+    if pair.proof_gates.len() != gate_prefixes.len()
         || pair
             .proof_gates
             .iter()
@@ -2517,7 +3499,7 @@ fn validate_plan(plan: &InstallPlan) -> Result<(), InstallError> {
             })
     {
         return Err(InstallError::InvalidPlan(
-            "exact adapter pair lacks its three unproven lifecycle/install/password gates".into(),
+            "exact adapter pair lacks its six VM proof gates".into(),
         ));
     }
     let selected_templates = plan
@@ -3381,7 +4363,13 @@ fn resolve_relative_activation_target(
 }
 
 fn validate_payload_path(path: &str) -> Result<(), InstallError> {
-    if path == BOOTART_BINARY_PATH {
+    if path == BOOTART_BINARY_PATH
+        || dracut_systemd_managed_image_path(path)
+        || mkinitcpio_systemd_managed_image_path(path)
+        || mkinitfs_openrc_managed_image_path(path)
+        || mkinitfs_boot_deploy_openrc_managed_image_path(path)
+        || crate::install::mkinitfs_boot_deploy_openrc::safe_loader_entry(path)
+    {
         return Ok(());
     }
     for &id in TemplateId::ALL {
@@ -3430,6 +4418,19 @@ fn is_allowed_payload_parent(path: &str) -> bool {
     if path == "/" || !path.starts_with('/') || path.ends_with('/') {
         return false;
     }
+    if matches!(
+        path,
+        "/boot"
+            | "/boot/.bootart-candidate"
+            | "/boot/loader"
+            | "/boot/loader/entries"
+            | "/etc"
+            | "/etc/grub.d"
+            | "/etc/mkinitfs"
+            | "/etc/update-extlinux.d"
+    ) {
+        return true;
+    }
     let prefix = format!("{path}/");
     allowed_payload_paths()
         .into_iter()
@@ -3466,9 +4467,13 @@ fn json_escape(value: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeneratorKind {
     Dracut,
+    InitramfsInspection,
+    GrubUpdate,
+    ExtlinuxUpdate,
     InitramfsTools,
     Mkinitcpio,
     Mkinitfs,
+    MkinitfsBootDeploy,
     SystemdReload,
     OpenRcRunlevel,
 }
@@ -3477,9 +4482,13 @@ impl GeneratorKind {
     const fn stable_name(self) -> &'static str {
         match self {
             Self::Dracut => "dracut",
+            Self::InitramfsInspection => "initramfs_inspection",
+            Self::GrubUpdate => "grub_update",
+            Self::ExtlinuxUpdate => "extlinux_update",
             Self::InitramfsTools => "initramfs_tools",
             Self::Mkinitcpio => "mkinitcpio",
             Self::Mkinitfs => "mkinitfs",
+            Self::MkinitfsBootDeploy => "mkinitfs_boot_deploy",
             Self::SystemdReload => "systemd_reload",
             Self::OpenRcRunlevel => "openrc_runlevel",
         }
@@ -3489,8 +4498,11 @@ impl GeneratorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratorRequest {
     pub generator: GeneratorKind,
+    pub executable: String,
     pub alternate_root: PathBuf,
+    pub working_directory: Option<String>,
     pub arguments: Vec<String>,
+    pub clear_environment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3500,8 +4512,11 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
 }
 
-/// Future generator execution is injected rather than hard-coded. Current
-/// installer APIs never call this seam and always report unsupported.
+pub const MAX_GENERATOR_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Generator execution is injected rather than hard-coded. The installer
+/// validates the fixed dracut-systemd request before this interface is reached; the
+/// production runner below still rejects every command.
 pub trait CommandRunner {
     fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError>;
 }
@@ -3517,12 +4532,389 @@ impl CommandRunner for RejectCommands {
     }
 }
 
+/// Fixed-environment Linux process runner for the eventual `/` transaction.
+/// It is not wired into [`Installer::production`]; the production constructor
+/// remains paired with [`RejectCommands`] until the VM gates pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OsCommandRunner;
+
+fn validate_supported_generator_request(request: &GeneratorRequest) -> Result<(), InstallError> {
+    if validate_dracut_systemd_generator_request(request).is_ok()
+        || validate_initramfs_tools_systemd_generator_request(request).is_ok()
+        || validate_mkinitcpio_systemd_generator_request(request).is_ok()
+        || validate_mkinitfs_openrc_generator_request(request).is_ok()
+        || validate_mkinitfs_boot_deploy_openrc_generator_request(request).is_ok()
+    {
+        Ok(())
+    } else {
+        Err(InstallError::InvalidPlan(
+            "generator request is outside every implemented mechanism contract".into(),
+        ))
+    }
+}
+
+impl OsCommandRunner {
+    fn timeout(generator: GeneratorKind) -> Duration {
+        match generator {
+            GeneratorKind::Dracut
+            | GeneratorKind::InitramfsTools
+            | GeneratorKind::Mkinitcpio
+            | GeneratorKind::Mkinitfs
+            | GeneratorKind::MkinitfsBootDeploy => Duration::from_secs(300),
+            GeneratorKind::InitramfsInspection
+            | GeneratorKind::GrubUpdate
+            | GeneratorKind::ExtlinuxUpdate => Duration::from_secs(120),
+            _ => Duration::from_secs(30),
+        }
+    }
+
+    fn drain_bounded<R: Read + Send + 'static>(
+        mut reader: R,
+        limit: usize,
+    ) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+        thread::spawn(move || {
+            let mut retained = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                if retained.len() <= limit {
+                    let remaining = limit.saturating_add(1).saturating_sub(retained.len());
+                    retained.extend_from_slice(&buffer[..count.min(remaining)]);
+                }
+            }
+            Ok(retained)
+        })
+    }
+
+    fn terminate_group(pid: libc::pid_t) {
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        thread::sleep(Duration::from_millis(500));
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
+impl CommandRunner for OsCommandRunner {
+    fn run(&mut self, request: &GeneratorRequest) -> Result<CommandOutput, InstallError> {
+        validate_supported_generator_request(request)?;
+        if request.alternate_root != Path::new("/") {
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: "OS command runner accepts only the live root".into(),
+            });
+        }
+
+        let path = std::ffi::CString::new(request.executable.as_bytes()).map_err(|_| {
+            InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: "executable path contains NUL".into(),
+            }
+        })?;
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!(
+                    "could not open approved executable: {}",
+                    io::Error::last_os_error()
+                ),
+            });
+        }
+        let executable = unsafe { File::from_raw_fd(fd) };
+        let metadata = executable
+            .metadata()
+            .map_err(|error| InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!("could not inspect approved executable: {error}"),
+            })?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o111 == 0
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: "approved executable failed descriptor ownership/type/mode checks".into(),
+            });
+        }
+        let descriptor_flags = unsafe { libc::fcntl(executable.as_raw_fd(), libc::F_GETFD) };
+        if descriptor_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    executable.as_raw_fd(),
+                    libc::F_SETFD,
+                    descriptor_flags & !libc::FD_CLOEXEC,
+                )
+            } < 0
+        {
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!(
+                    "could not retain executable descriptor: {}",
+                    io::Error::last_os_error()
+                ),
+            });
+        }
+
+        let argv_storage = std::iter::once(request.executable.as_str())
+            .chain(request.arguments.iter().map(String::as_str))
+            .map(|value| {
+                std::ffi::CString::new(value).map_err(|_| InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: "generator argument contains NUL".into(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut argv = argv_storage
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect::<Vec<_>>();
+        argv.push(std::ptr::null());
+        let environment_storage = [
+            std::ffi::CString::new("PATH=/usr/sbin:/usr/bin:/sbin:/bin").unwrap(),
+            std::ffi::CString::new("LANG=C").unwrap(),
+            std::ffi::CString::new("LC_ALL=C").unwrap(),
+            std::ffi::CString::new("HOME=/root").unwrap(),
+        ];
+        let mut environment = environment_storage
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect::<Vec<_>>();
+        environment.push(std::ptr::null());
+        let working_directory = request
+            .working_directory
+            .as_deref()
+            .map(|path| {
+                let path = PathBuf::from(path);
+                let directory = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&path)
+                    .map_err(|error| InstallError::GeneratorExecution {
+                        generator: request.generator,
+                        message: format!("could not open approved working directory: {error}"),
+                    })?;
+                let metadata =
+                    directory
+                        .metadata()
+                        .map_err(|error| InstallError::GeneratorExecution {
+                            generator: request.generator,
+                            message: format!(
+                                "could not inspect approved working directory: {error}"
+                            ),
+                        })?;
+                if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o7777 != 0o700 {
+                    return Err(InstallError::GeneratorExecution {
+                        generator: request.generator,
+                        message: "approved working directory is not a private root-owned directory"
+                            .into(),
+                    });
+                }
+                Ok((path, directory, metadata.dev(), metadata.ino()))
+            })
+            .transpose()?;
+
+        let mut stdout_pipe = [-1; 2];
+        let mut stderr_pipe = [-1; 2];
+        if unsafe { libc::pipe2(stdout_pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0
+            || unsafe { libc::pipe2(stderr_pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0
+        {
+            for fd in stdout_pipe.into_iter().chain(stderr_pipe) {
+                if fd >= 0 {
+                    unsafe { libc::close(fd) };
+                }
+            }
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!(
+                    "could not create bounded output pipes: {}",
+                    io::Error::last_os_error()
+                ),
+            });
+        }
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            for fd in stdout_pipe.into_iter().chain(stderr_pipe) {
+                unsafe { libc::close(fd) };
+            }
+            return Err(InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!(
+                    "could not fork approved executable: {}",
+                    io::Error::last_os_error()
+                ),
+            });
+        }
+        if pid == 0 {
+            unsafe {
+                if libc::setpgid(0, 0) != 0
+                    || libc::dup2(stdout_pipe[1], libc::STDOUT_FILENO) < 0
+                    || libc::dup2(stderr_pipe[1], libc::STDERR_FILENO) < 0
+                {
+                    libc::_exit(126);
+                }
+                let null_fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                if null_fd < 0 || libc::dup2(null_fd, libc::STDIN_FILENO) < 0 {
+                    libc::_exit(126);
+                }
+                for fd in stdout_pipe.into_iter().chain(stderr_pipe) {
+                    libc::close(fd);
+                }
+                libc::close(null_fd);
+                if let Some((_, directory, _, _)) = &working_directory
+                    && libc::fchdir(directory.as_raw_fd()) != 0
+                {
+                    libc::_exit(126);
+                }
+                libc::fexecve(executable.as_raw_fd(), argv.as_ptr(), environment.as_ptr());
+                libc::_exit(127);
+            }
+        }
+        unsafe {
+            libc::close(stdout_pipe[1]);
+            libc::close(stderr_pipe[1]);
+        }
+        drop(executable);
+        let stdout = unsafe { File::from_raw_fd(stdout_pipe[0]) };
+        let stderr = unsafe { File::from_raw_fd(stderr_pipe[0]) };
+        let stdout_reader = Self::drain_bounded(stdout, MAX_GENERATOR_OUTPUT_BYTES);
+        let stderr_reader = Self::drain_bounded(stderr, MAX_GENERATOR_OUTPUT_BYTES);
+        let timeout = Self::timeout(request.generator);
+        let deadline = Instant::now() + timeout;
+        let mut raw_status = 0;
+        let timed_out = loop {
+            let waited = unsafe { libc::waitpid(pid, &mut raw_status, libc::WNOHANG) };
+            if waited == pid {
+                break false;
+            }
+            if waited < 0 {
+                Self::terminate_group(pid);
+                unsafe { libc::waitpid(pid, &mut raw_status, 0) };
+                return Err(InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: format!(
+                        "could not wait for process group: {}",
+                        io::Error::last_os_error()
+                    ),
+                });
+            }
+            if Instant::now() >= deadline {
+                Self::terminate_group(pid);
+                if unsafe { libc::waitpid(pid, &mut raw_status, 0) } != pid {
+                    return Err(InstallError::GeneratorExecution {
+                        generator: request.generator,
+                        message: format!(
+                            "could not reap timed-out process group: {}",
+                            io::Error::last_os_error()
+                        ),
+                    });
+                }
+                break true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        if let Some((path, directory, expected_device, expected_inode)) = &working_directory {
+            if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+                return Err(InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: format!(
+                        "could not restore private working-directory mode: {}",
+                        io::Error::last_os_error()
+                    ),
+                });
+            }
+            directory
+                .sync_all()
+                .map_err(|error| InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: format!("could not sync approved working directory: {error}"),
+                })?;
+            let current =
+                fs::symlink_metadata(path).map_err(|error| InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: format!("could not reinspect approved working directory: {error}"),
+                })?;
+            if !current.is_dir()
+                || current.file_type().is_symlink()
+                || current.uid() != 0
+                || current.mode() & 0o7777 != 0o700
+                || current.dev() != *expected_device
+                || current.ino() != *expected_inode
+            {
+                return Err(InstallError::GeneratorExecution {
+                    generator: request.generator,
+                    message: "approved working directory changed identity during execution".into(),
+                });
+            }
+        }
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: "stdout reader panicked".into(),
+            })?
+            .map_err(|error| InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!("could not read stdout: {error}"),
+            })?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: "stderr reader panicked".into(),
+            })?
+            .map_err(|error| InstallError::GeneratorExecution {
+                generator: request.generator,
+                message: format!("could not read stderr: {error}"),
+            })?;
+        if timed_out {
+            return Err(InstallError::GeneratorTimedOut {
+                generator: request.generator,
+                seconds: timeout.as_secs(),
+            });
+        }
+        let status = if libc::WIFEXITED(raw_status) {
+            libc::WEXITSTATUS(raw_status)
+        } else if libc::WIFSIGNALED(raw_status) {
+            128 + libc::WTERMSIG(raw_status)
+        } else {
+            255
+        };
+        Ok(CommandOutput {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailurePoint {
     JournalDurable,
     BeforeBackup { index: usize, path: String },
     BeforePayload { index: usize, path: String },
     PayloadIntentDurable { index: usize, path: String },
+    BeforeGenerator { generator: GeneratorKind },
+    AfterGenerator { generator: GeneratorKind },
+    BeforeCandidateGeneration,
+    CandidateGenerated,
+    BeforeCandidateInspection,
+    CandidateInspected,
+    BeforeGrubUpdate,
+    BeforeImageActivation,
+    ImageActivated,
     BeforeManifestCommit,
 }
 
@@ -3542,6 +4934,33 @@ pub struct NoFaults;
 impl FaultInjector for NoFaults {
     fn check(&mut self, _point: &FailurePoint) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(feature = "installer-test-seams")]
+#[derive(Debug, Clone, Copy)]
+struct InterruptAtCheckpoint {
+    target: u16,
+    seen: u32,
+}
+
+#[cfg(feature = "installer-test-seams")]
+impl FaultInjector for InterruptAtCheckpoint {
+    fn check(&mut self, point: &FailurePoint) -> Result<(), String> {
+        let current = self.seen;
+        self.seen = self.seen.saturating_add(1);
+        if current == u32::from(self.target) {
+            Err(format!(
+                "VM-test simulated interruption at checkpoint {} ({point:?})",
+                self.target
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn simulates_interruption(&self) -> bool {
+        true
     }
 }
 
@@ -3610,6 +5029,7 @@ struct Manifest {
     resource_set_version: u16,
     inventory_state: ManifestInventoryState,
     adapters: Vec<AdapterId>,
+    image: Option<DracutSystemdImageRecord>,
     entries: Vec<ManifestEntry>,
     created_dirs: Vec<String>,
     state_created_dirs: Vec<String>,
@@ -3674,6 +5094,34 @@ struct OpenedDirectory {
     file: File,
     path: PathBuf,
     device: u64,
+}
+
+fn parse_boot_uuid(bytes: &[u8]) -> Result<String, InstallError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| InstallError::InvalidPlan("/etc/fstab is not UTF-8".into()))?;
+    let mut uuid = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 4 || fields[1] != "/boot" {
+            continue;
+        }
+        let value = fields[0]
+            .strip_prefix("UUID=")
+            .or_else(|| fields[0].strip_prefix("/dev/disk/by-uuid/"))
+            .ok_or_else(|| {
+                InstallError::InvalidPlan("/boot fstab source is not an explicit UUID".into())
+            })?;
+        if uuid.replace(value.to_owned()).is_some() {
+            return Err(InstallError::InvalidPlan(
+                "/boot has multiple fstab entries".into(),
+            ));
+        }
+    }
+    uuid.ok_or_else(|| InstallError::InvalidPlan("/boot fstab entry is missing".into()))
 }
 
 impl OpenedDirectory {
@@ -3782,10 +5230,20 @@ impl InstallProvenanceStatus {
 /// Initramfs image status is deliberately not inferred from installed paths.
 /// It remains unresolved until the selected adapter owns exact candidate and
 /// known-good image contracts plus a proven archive inspector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageVerificationStatus {
     NotInstalled,
-    Unresolved { blocker: &'static str },
+    Unresolved {
+        blocker: &'static str,
+    },
+    Verified {
+        active_digest: Sha256Digest,
+        known_good_digest: Sha256Digest,
+        bootart_digest: Sha256Digest,
+    },
+    Modified {
+        paths: Vec<String>,
+    },
 }
 
 /// Whether the manifest is a complete installed inventory or the explicit
@@ -3828,9 +5286,318 @@ pub enum RecoveryOutcome {
     CompletedCommitCleaned,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum InitramfsContractRef<'a> {
+    Dracut(&'a DracutSystemdContract),
+    InitramfsTools(&'a InitramfsToolsSystemdContract),
+    Mkinitcpio(&'a MkinitcpioSystemdContract),
+    MkinitfsOpenRc(&'a MkinitfsOpenRcContract),
+    MkinitfsBootDeployOpenRc(&'a MkinitfsBootDeployOpenRcContract),
+}
+
+impl<'a> InitramfsContractRef<'a> {
+    fn adapter(self) -> AdapterId {
+        match self {
+            Self::Dracut(_) => AdapterId::DracutSystemd,
+            Self::InitramfsTools(_) => AdapterId::InitramfsToolsBusybox,
+            Self::Mkinitcpio(_) => AdapterId::MkinitcpioBusybox,
+            Self::MkinitfsOpenRc(_) => AdapterId::MkinitfsBusybox,
+            Self::MkinitfsBootDeployOpenRc(_) => AdapterId::MkinitfsBootDeploy,
+        }
+    }
+
+    fn real_root_adapter(self) -> AdapterId {
+        match self {
+            Self::Dracut(_) | Self::InitramfsTools(_) | Self::Mkinitcpio(_) => {
+                AdapterId::SystemdRealRoot
+            }
+            Self::MkinitfsOpenRc(_) | Self::MkinitfsBootDeployOpenRc(_) => {
+                AdapterId::OpenRcRealRoot
+            }
+        }
+    }
+
+    fn validate(self) -> Result<(), InstallError> {
+        match self {
+            Self::Dracut(contract) => validate_dracut_systemd_contract(contract),
+            Self::InitramfsTools(contract) => validate_initramfs_tools_systemd_contract(contract),
+            Self::Mkinitcpio(contract) => validate_mkinitcpio_systemd_contract(contract),
+            Self::MkinitfsOpenRc(contract) => validate_mkinitfs_openrc_contract(contract),
+            Self::MkinitfsBootDeployOpenRc(contract) => {
+                validate_mkinitfs_boot_deploy_openrc_contract(contract)
+            }
+        }
+    }
+
+    fn active_image(self) -> &'a str {
+        match self {
+            Self::Dracut(contract) => &contract.active_image,
+            Self::InitramfsTools(contract) => &contract.active_image,
+            Self::Mkinitcpio(contract) => &contract.active_image,
+            Self::MkinitfsOpenRc(contract) => &contract.active_image,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.active_image,
+        }
+    }
+
+    fn candidate_image(self) -> &'a str {
+        match self {
+            Self::Dracut(contract) => &contract.candidate_image,
+            Self::InitramfsTools(contract) => &contract.candidate_image,
+            Self::Mkinitcpio(contract) => &contract.candidate_image,
+            Self::MkinitfsOpenRc(contract) => &contract.candidate_image,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.candidate_image,
+        }
+    }
+
+    fn known_good_image(self) -> &'a str {
+        match self {
+            Self::Dracut(contract) => &contract.known_good_image,
+            Self::InitramfsTools(contract) => &contract.known_good_image,
+            Self::Mkinitcpio(contract) => &contract.known_good_image,
+            Self::MkinitfsOpenRc(contract) => &contract.known_good_image,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.known_good_image,
+        }
+    }
+
+    fn known_good_digest(self) -> Sha256Digest {
+        match self {
+            Self::Dracut(contract) => contract.known_good_digest,
+            Self::InitramfsTools(contract) => contract.known_good_digest,
+            Self::Mkinitcpio(contract) => contract.known_good_digest,
+            Self::MkinitfsOpenRc(contract) => contract.known_good_digest,
+            Self::MkinitfsBootDeployOpenRc(contract) => contract.known_good_digest,
+        }
+    }
+
+    fn boot_entry_path(self) -> &'a str {
+        match self {
+            Self::Dracut(contract) => &contract.grub_script_path,
+            Self::InitramfsTools(contract) => &contract.grub_script_path,
+            Self::Mkinitcpio(contract) => &contract.grub_script_path,
+            Self::MkinitfsOpenRc(contract) => &contract.extlinux_fragment_path,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.known_good_entry_path,
+        }
+    }
+
+    fn boot_config_path(self) -> Option<&'a str> {
+        match self {
+            Self::Dracut(contract) => Some(&contract.grub_config_path),
+            Self::InitramfsTools(contract) => Some(&contract.grub_config_path),
+            Self::Mkinitcpio(contract) => Some(&contract.grub_config_path),
+            Self::MkinitfsOpenRc(contract) => Some(&contract.extlinux_config_path),
+            Self::MkinitfsBootDeployOpenRc(_) => None,
+        }
+    }
+
+    fn boot_entry(self) -> &'a [u8] {
+        match self {
+            Self::Dracut(contract) => &contract.grub_script,
+            Self::InitramfsTools(contract) => &contract.grub_script,
+            Self::Mkinitcpio(contract) => &contract.grub_script,
+            Self::MkinitfsOpenRc(contract) => &contract.extlinux_fragment,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.known_good_entry,
+        }
+    }
+
+    fn boot_entry_mode(self) -> u32 {
+        match self {
+            Self::Dracut(_) | Self::InitramfsTools(_) | Self::Mkinitcpio(_) => 0o755,
+            Self::MkinitfsOpenRc(_) => 0o644,
+            Self::MkinitfsBootDeployOpenRc(contract) => contract.known_good_entry_mode,
+        }
+    }
+
+    fn generator_configuration_activation(self) -> Option<(&'a str, u32, &'a [u8], &'a [u8])> {
+        match self {
+            Self::Dracut(_) | Self::InitramfsTools(_) | Self::MkinitfsBootDeployOpenRc(_) => None,
+            Self::Mkinitcpio(contract) => Some((
+                &contract.config_path,
+                contract.config_mode,
+                &contract.config_original,
+                &contract.config_activated,
+            )),
+            Self::MkinitfsOpenRc(contract) => Some((
+                &contract.mkinitfs_config_path,
+                contract.mkinitfs_config_mode,
+                &contract.mkinitfs_config_original,
+                &contract.mkinitfs_config_activated,
+            )),
+        }
+    }
+
+    fn presentation_boot_entry_activation(self) -> Option<(&'a str, u32, &'a [u8], &'a [u8])> {
+        match self {
+            Self::MkinitfsBootDeployOpenRc(contract) => Some((
+                &contract.active_loader_entry,
+                contract.active_loader_entry_mode,
+                &contract.active_loader_entry_original,
+                &contract.active_loader_entry_activated,
+            )),
+            Self::Dracut(_)
+            | Self::InitramfsTools(_)
+            | Self::Mkinitcpio(_)
+            | Self::MkinitfsOpenRc(_) => None,
+        }
+    }
+
+    fn generator_configuration_already_active(self) -> bool {
+        match self {
+            Self::Dracut(_) | Self::InitramfsTools(_) | Self::MkinitfsBootDeployOpenRc(_) => false,
+            Self::Mkinitcpio(contract) => contract.config_already_active,
+            Self::MkinitfsOpenRc(contract) => contract.mkinitfs_config_already_active,
+        }
+    }
+
+    fn generate(self) -> &'a GeneratorRequest {
+        match self {
+            Self::Dracut(contract) => &contract.generate,
+            Self::InitramfsTools(contract) => &contract.generate,
+            Self::Mkinitcpio(contract) => &contract.generate,
+            Self::MkinitfsOpenRc(contract) => &contract.generate,
+            Self::MkinitfsBootDeployOpenRc(contract) => &contract.generate,
+        }
+    }
+
+    fn update_bootloader(self) -> Option<&'a GeneratorRequest> {
+        match self {
+            Self::Dracut(contract) => Some(&contract.update_grub),
+            Self::InitramfsTools(contract) => Some(&contract.update_grub),
+            Self::Mkinitcpio(contract) => Some(&contract.update_grub),
+            Self::MkinitfsOpenRc(contract) => Some(&contract.update_extlinux),
+            Self::MkinitfsBootDeployOpenRc(_) => None,
+        }
+    }
+
+    fn candidate_directory(self) -> Option<&'a str> {
+        match self {
+            Self::MkinitfsBootDeployOpenRc(contract) => Some(&contract.candidate_directory),
+            _ => None,
+        }
+    }
+
+    fn candidate_seed(self) -> Option<(&'a str, &'a str)> {
+        match self {
+            Self::MkinitfsBootDeployOpenRc(contract) => {
+                Some((&contract.kernel_image, &contract.candidate_kernel))
+            }
+            _ => None,
+        }
+    }
+
+    fn unpack_request(self, transaction: &str) -> Result<Option<GeneratorRequest>, InstallError> {
+        match self {
+            Self::Dracut(contract) => {
+                dracut_systemd_unpack_request(contract, transaction).map(Some)
+            }
+            Self::InitramfsTools(contract) => {
+                initramfs_tools_systemd_unpack_request(contract, transaction).map(Some)
+            }
+            Self::Mkinitcpio(contract) => {
+                mkinitcpio_systemd_unpack_request(contract, transaction).map(Some)
+            }
+            Self::MkinitfsOpenRc(_) => Ok(None),
+            Self::MkinitfsBootDeployOpenRc(_) => Ok(None),
+        }
+    }
+
+    fn inspect_inventory(
+        self,
+        unpacked: &Path,
+        expected_owner_uid: u32,
+        expected_bootart: &[u8],
+    ) -> Result<ArchiveInspection, InstallError> {
+        match self {
+            Self::Dracut(_) => {
+                let inventory = collect_unpacked_dracut_inventory(unpacked, expected_owner_uid)?;
+                inspect_dracut_inventory(&inventory, expected_bootart)
+            }
+            Self::InitramfsTools(_) => {
+                let inventory =
+                    collect_unpacked_initramfs_tools_inventory(unpacked, expected_owner_uid)?;
+                inspect_initramfs_tools_inventory(&inventory, expected_bootart)
+            }
+            Self::Mkinitcpio(_) => {
+                let inventory =
+                    collect_unpacked_mkinitcpio_inventory(unpacked, expected_owner_uid)?;
+                inspect_mkinitcpio_inventory(&inventory, expected_bootart)
+            }
+            Self::MkinitfsOpenRc(_) | Self::MkinitfsBootDeployOpenRc(_) => Err(invalid(
+                "mkinitfs candidate inspection does not use an unpacked directory",
+            )),
+        }
+    }
+
+    fn inspect_candidate(
+        self,
+        candidate: &[u8],
+        expected_bootart: &[u8],
+    ) -> Result<Option<ArchiveInspection>, InstallError> {
+        match self {
+            Self::MkinitfsOpenRc(_) => {
+                inspect_mkinitfs_openrc_archive(candidate, expected_bootart).map(Some)
+            }
+            Self::MkinitfsBootDeployOpenRc(_) => {
+                let decompressed = decompress_mkinitfs_boot_deploy_openrc_archive(candidate)?;
+                inspect_mkinitfs_boot_deploy_openrc_archive(&decompressed, expected_bootart)
+                    .map(Some)
+            }
+            Self::Dracut(_) | Self::InitramfsTools(_) | Self::Mkinitcpio(_) => Ok(None),
+        }
+    }
+
+    fn verified_record(
+        self,
+        candidate: &[u8],
+        inspection: &ArchiveInspection,
+        expected_bootart: &[u8],
+    ) -> Result<DracutSystemdImageRecord, InstallError> {
+        match self {
+            Self::Dracut(contract) => verified_dracut_systemd_image_record(
+                contract,
+                candidate,
+                inspection,
+                expected_bootart,
+            ),
+            Self::InitramfsTools(contract) => verified_initramfs_tools_systemd_image_record(
+                contract,
+                candidate,
+                inspection,
+                expected_bootart,
+            ),
+            Self::Mkinitcpio(contract) => verified_mkinitcpio_systemd_image_record(
+                contract,
+                candidate,
+                inspection,
+                expected_bootart,
+            ),
+            Self::MkinitfsOpenRc(contract) => verified_mkinitfs_openrc_image_record(
+                contract,
+                candidate,
+                inspection,
+                expected_bootart,
+            ),
+            Self::MkinitfsBootDeployOpenRc(contract) => {
+                verified_mkinitfs_boot_deploy_openrc_image_record(
+                    contract,
+                    candidate,
+                    inspection,
+                    expected_bootart,
+                )
+            }
+        }
+    }
+}
+
 /// Installer engine parameterized over all environment-dependent seams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallerRootMode {
+    AlternateRoot,
+    LiveRoot,
+}
+
 pub struct Installer<M = OsMetadataSource, C = RejectCommands, F = NoFaults> {
     root: AlternateRoot,
+    root_mode: InstallerRootMode,
     metadata: M,
     policy: RootPolicy,
     commands: C,
@@ -3844,6 +5611,7 @@ impl Installer<OsMetadataSource, RejectCommands, NoFaults> {
         let root = AlternateRoot::with_metadata(path, &metadata, RootPolicy::PRODUCTION)?;
         Ok(Self {
             root,
+            root_mode: InstallerRootMode::AlternateRoot,
             metadata,
             policy: RootPolicy::PRODUCTION,
             commands: RejectCommands,
@@ -3851,6 +5619,102 @@ impl Installer<OsMetadataSource, RejectCommands, NoFaults> {
             mutation_unlocked: false,
         })
     }
+
+    /// Read-only production view of the exact running root. This constructor
+    /// cannot execute a generator or unlock any mutator.
+    pub fn production_live_root_read_only() -> Result<Self, InstallError> {
+        Ok(Self {
+            root: AlternateRoot::live_root()?,
+            root_mode: InstallerRootMode::LiveRoot,
+            metadata: OsMetadataSource,
+            policy: RootPolicy::PRODUCTION,
+            commands: RejectCommands,
+            faults: NoFaults,
+            mutation_unlocked: false,
+        })
+    }
+}
+
+impl Installer<OsMetadataSource, OsCommandRunner, NoFaults> {
+    /// Constructs the only release mutation capability. Authorization happens
+    /// here, not merely in the CLI, so callers cannot obtain a live command
+    /// runner without UID 0, two interactive terminals, and an exact hostname
+    /// acknowledgement.
+    pub fn production_live_root_mutating(confirmation: &str) -> Result<Self, InstallError> {
+        authorize_live_root_mutation(confirmation)?;
+        Ok(Self {
+            root: AlternateRoot::live_root()?,
+            root_mode: InstallerRootMode::LiveRoot,
+            metadata: OsMetadataSource,
+            policy: RootPolicy::PRODUCTION,
+            commands: OsCommandRunner,
+            faults: NoFaults,
+            mutation_unlocked: true,
+        })
+    }
+
+    /// Non-release alias retained for injected interruption tests. It uses the
+    /// same exact live root and command runner, but the feature itself is absent
+    /// from release ELFs.
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn live_root_for_vm_tests() -> Result<Self, InstallError> {
+        Ok(Self {
+            root: AlternateRoot::live_root()?,
+            root_mode: InstallerRootMode::LiveRoot,
+            metadata: OsMetadataSource,
+            policy: RootPolicy::PRODUCTION,
+            commands: OsCommandRunner,
+            faults: NoFaults,
+            mutation_unlocked: true,
+        })
+    }
+}
+
+fn authorize_live_root_mutation(confirmation: &str) -> Result<(), InstallError> {
+    let effective_uid = unsafe { libc::geteuid() };
+    if effective_uid != RootPolicy::PRODUCTION.expected_owner_uid {
+        return Err(InstallError::MutationIdentityMismatch {
+            effective_uid,
+            required_uid: RootPolicy::PRODUCTION.expected_owner_uid,
+        });
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(InstallError::MutationRequiresTerminal);
+    }
+    if confirmation.is_empty()
+        || confirmation.len() > 255
+        || confirmation
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(InstallError::HostConfirmationMismatch);
+    }
+    let hostname_path = Path::new("/proc/sys/kernel/hostname");
+    let mut hostname_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(hostname_path)
+        .map_err(|error| io_error("open current hostname", hostname_path, error))?;
+    let metadata = hostname_file
+        .metadata()
+        .map_err(|error| io_error("inspect current hostname", hostname_path, error))?;
+    if !metadata.file_type().is_file() || metadata.len() > 256 {
+        return Err(InstallError::UnsafePath {
+            path: hostname_path.to_path_buf(),
+            reason: "hostname source is not a bounded regular file".into(),
+        });
+    }
+    let mut hostname = String::new();
+    std::io::Read::by_ref(&mut hostname_file)
+        .take(256)
+        .read_to_string(&mut hostname)
+        .map_err(|error| io_error("read current hostname", hostname_path, error))?;
+    let hostname = hostname.trim_end_matches(['\n', '\r']);
+    if hostname.is_empty() || hostname != confirmation {
+        return Err(InstallError::HostConfirmationMismatch);
+    }
+    Ok(())
 }
 
 impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
@@ -3866,6 +5730,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let root = AlternateRoot::with_metadata(path, &metadata, policy)?;
         Ok(Self {
             root,
+            root_mode: InstallerRootMode::AlternateRoot,
             metadata,
             policy,
             commands,
@@ -3889,6 +5754,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let root = AlternateRoot::with_metadata(path, &metadata, policy)?;
         Ok(Self {
             root,
+            root_mode: InstallerRootMode::AlternateRoot,
             metadata,
             policy,
             commands,
@@ -4031,6 +5897,1073 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         Ok(())
     }
 
+    fn inspect_backend_executable(&self, absolute: &str) -> Result<ToolFact, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::File))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&host)
+            .map_err(|error| io_error("open backend prerequisite", &host, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error("inspect backend prerequisite", &host, error))?;
+        let mode = metadata.mode() & 0o7777;
+        if !metadata.is_file()
+            || metadata.uid() != self.policy.expected_owner_uid
+            || metadata.nlink() != 1
+            || mode & 0o111 == 0
+            || (self.policy.reject_group_world_writable && mode & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: host,
+                reason: "backend prerequisite changed type, owner, link count, or executable mode"
+                    .into(),
+            });
+        }
+        Ok(ToolFact {
+            path: absolute.to_owned(),
+            root_owned: self.policy.expected_owner_uid == 0
+                || metadata.uid() == self.policy.expected_owner_uid,
+            regular: true,
+            symlink: false,
+            executable: true,
+        })
+    }
+
+    fn backend_path_exists(&self, absolute: &str) -> Result<bool, InstallError> {
+        let host = self.guest_path(absolute)?;
+        match fs::symlink_metadata(&host) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_error("inspect backend capability path", &host, error)),
+        }
+    }
+
+    fn select_backend_cryptsetup(&self) -> Result<CryptsetupLocation, InstallError> {
+        let mut safe = Vec::new();
+        let mut rejected = None;
+        for location in [CryptsetupLocation::UsrBin, CryptsetupLocation::UsrSbin] {
+            let path = location.executable();
+            if !self.backend_path_exists(path)? {
+                continue;
+            }
+            match self.inspect_backend_executable(path) {
+                Ok(_) => safe.push(location),
+                Err(error @ InstallError::UnsafePath { .. }) => {
+                    if rejected.is_none() {
+                        rejected = Some(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        match safe.as_slice() {
+            [location] => Ok(*location),
+            [] => Err(rejected.unwrap_or_else(|| {
+                InstallError::InvalidPlan(
+                    "no supported descriptor-safe cryptsetup executable was found".into(),
+                )
+            })),
+            _ => Err(InstallError::InvalidPlan(
+                "multiple supported cryptsetup executables were found".into(),
+            )),
+        }
+    }
+
+    fn exact_child_directories(
+        &self,
+        absolute: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::Directory))?;
+        let mut names = Vec::new();
+        let entries = fs::read_dir(&host)
+            .map_err(|error| io_error("enumerate backend prerequisite directory", &host, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                io_error("read backend prerequisite directory entry", &host, error)
+            })?;
+            if names.len() >= limit {
+                return Err(InstallError::InvalidPlan(format!(
+                    "backend prerequisite directory {absolute} exceeds its entry bound"
+                )));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                InstallError::InvalidPlan(format!(
+                    "backend prerequisite directory {absolute} has a non-UTF-8 entry"
+                ))
+            })?;
+            if name.is_empty()
+                || !name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-')
+                })
+            {
+                return Err(InstallError::InvalidPlan(format!(
+                    "backend prerequisite directory {absolute} has an unsafe entry"
+                )));
+            }
+            let child = entry.path();
+            self.validate_node(&child, Some(NodeKind::Directory))?;
+            names.push(name);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn exact_child_regular_files(
+        &self,
+        absolute: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::Directory))?;
+        let mut names = Vec::new();
+        let entries = fs::read_dir(&host)
+            .map_err(|error| io_error("enumerate backend file directory", &host, error))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| io_error("read backend file directory entry", &host, error))?;
+            if names.len() >= limit {
+                return Err(InstallError::InvalidPlan(format!(
+                    "backend file directory {absolute} exceeds its entry bound"
+                )));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                InstallError::InvalidPlan(format!(
+                    "backend file directory {absolute} has a non-UTF-8 entry"
+                ))
+            })?;
+            if name.is_empty()
+                || !name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-')
+                })
+            {
+                return Err(InstallError::InvalidPlan(format!(
+                    "backend file directory {absolute} has an unsafe entry"
+                )));
+            }
+            self.validate_node(&entry.path(), Some(NodeKind::File))?;
+            names.push(name);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Collects systemd-based dracut filesystem facts without mutation or PATH
+    /// lookup. Every regular file is reopened with `O_NOFOLLOW` and checked by
+    /// descriptor; directories and files remain bounded. The returned facts
+    /// still pass through [`plan_dracut_systemd`] before they become commands.
+    pub fn collect_dracut_systemd_facts(&self) -> Result<DracutSystemdFacts, InstallError> {
+        self.revalidate_root()?;
+
+        let (pid1, _) = self.read_regular_file_limited("/proc/1/comm", 4096)?;
+        let pid1_comm = std::str::from_utf8(&pid1)
+            .map_err(|_| InstallError::InvalidPlan("/proc/1/comm is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if pid1_comm.is_empty() || pid1_comm.contains(char::is_whitespace) {
+            return Err(InstallError::InvalidPlan(
+                "PID 1 process name is empty or malformed".into(),
+            ));
+        }
+
+        let installed_kernel_versions = self.exact_child_directories("/usr/lib/modules", 64)?;
+        let (running_kernel, _) =
+            self.read_regular_file_limited("/proc/sys/kernel/osrelease", 4096)?;
+        let running_kernel = std::str::from_utf8(&running_kernel)
+            .map_err(|_| {
+                InstallError::InvalidPlan("/proc/sys/kernel/osrelease is not UTF-8".into())
+            })?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if running_kernel.is_empty()
+            || !installed_kernel_versions
+                .iter()
+                .any(|version| version == &running_kernel)
+        {
+            return Err(InstallError::InvalidPlan(
+                "running kernel has no exact installed module tree".into(),
+            ));
+        }
+        // A distribution may retain older fallback kernels. The transaction
+        // is bound to the kernel that is actually running rather than guessing
+        // from directory count or lexicographic version order.
+        let kernel_versions = vec![running_kernel];
+        let dracut_directories = self.exact_child_directories("/usr/lib/dracut/modules.d", 256)?;
+        let mut dracut_modules = Vec::with_capacity(dracut_directories.len());
+        for directory in dracut_directories {
+            let digits = directory.bytes().take_while(u8::is_ascii_digit).count();
+            if digits != 2 || directory.len() == digits {
+                return Err(InstallError::InvalidPlan(format!(
+                    "invalid dracut module directory: {directory}"
+                )));
+            }
+            dracut_modules.push(directory[digits..].to_owned());
+        }
+
+        let [kernel] = kernel_versions.as_slice() else {
+            unreachable!("the descriptor-checked running kernel is singular")
+        };
+
+        let mut grub_profiles = Vec::new();
+        for profile in [
+            GrubRegeneration::UpdateGrub,
+            GrubRegeneration::Grub2Mkconfig,
+        ] {
+            let updater = self.backend_path_exists(profile.updater())?;
+            let probe = self.backend_path_exists(profile.probe())?;
+            match (updater, probe) {
+                (true, true) => grub_profiles.push(profile),
+                (false, false) => {}
+                _ => {
+                    return Err(InstallError::InvalidPlan(format!(
+                        "dracut-systemd GRUB capability is incomplete: {} and {} must both be present",
+                        profile.updater(),
+                        profile.probe()
+                    )));
+                }
+            }
+        }
+        let [grub_regeneration] = grub_profiles.as_slice() else {
+            return Err(InstallError::InvalidPlan(
+                "dracut-systemd requires exactly one supported GRUB regeneration capability".into(),
+            ));
+        };
+        let grub_regeneration = *grub_regeneration;
+        let cryptsetup_location = self.select_backend_cryptsetup()?;
+        let tools = dracut_systemd_required_tools(grub_regeneration, cryptsetup_location)
+            .map(|path| self.inspect_backend_executable(path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut image_layouts = Vec::new();
+        for layout in [
+            DracutImageLayout::InitrdImg,
+            DracutImageLayout::InitramfsImg,
+        ] {
+            if self.backend_path_exists(&layout.active_image(kernel))? {
+                image_layouts.push(layout);
+            }
+        }
+        let [image_layout] = image_layouts.as_slice() else {
+            return Err(InstallError::InvalidPlan(
+                "dracut-systemd requires exactly one supported running-kernel initramfs layout"
+                    .into(),
+            ));
+        };
+        let image_layout = *image_layout;
+        let known_good_path = image_layout.active_image(kernel);
+        let (known_good, _) =
+            self.read_regular_file_limited(&known_good_path, MAX_CANDIDATE_BYTES)?;
+
+        let (fstab, _) = self.read_regular_file_limited("/etc/fstab", 1024 * 1024)?;
+        let boot_filesystem_uuid = parse_boot_uuid(&fstab)?;
+        let (cmdline, _) = self.read_regular_file_limited("/proc/cmdline", 16 * 1024)?;
+        let kernel_command_line = std::str::from_utf8(&cmdline)
+            .map_err(|_| InstallError::InvalidPlan("/proc/cmdline is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+
+        let boot_host = self.guest_path("/boot")?;
+        self.validate_guest_components("/boot", Some(NodeKind::Directory))?;
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&boot_host)
+            .map_err(|error| io_error("open /boot", &boot_host, error))?;
+        let boot_metadata = boot
+            .metadata()
+            .map_err(|error| io_error("inspect /boot", &boot_host, error))?;
+        if !boot_metadata.is_dir()
+            || boot_metadata.uid() != self.policy.expected_owner_uid
+            || (self.policy.reject_group_world_writable && boot_metadata.mode() & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: boot_host.clone(),
+                reason: "opened /boot changed type, owner, or mode".into(),
+            });
+        }
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(boot.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(io_error(
+                "inspect /boot filesystem",
+                &boot_host,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::InvalidPlan(
+                "/boot filesystem reports zero allocation size".into(),
+            ));
+        }
+        let free_bytes = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+
+        Ok(DracutSystemdFacts {
+            architecture: std::env::consts::ARCH.to_owned(),
+            pid1_comm,
+            kernel_versions,
+            root_filesystem_device: self.root.device,
+            boot_filesystem_device: boot_metadata.dev(),
+            boot_writable: filesystem.f_flag & libc::ST_RDONLY == 0,
+            boot_free_bytes: u64::try_from(free_bytes).unwrap_or(u64::MAX),
+            boot_free_inodes: filesystem.f_favail,
+            dracut_modules,
+            image_layout,
+            grub_regeneration,
+            cryptsetup_location,
+            tools,
+            known_good_path,
+            known_good_digest: sha256(&known_good),
+            known_good_bytes: known_good.len() as u64,
+            boot_filesystem_uuid,
+            kernel_command_line,
+        })
+    }
+
+    fn inspect_initramfs_tools_contract_file(
+        &self,
+        absolute: &str,
+        executable: bool,
+    ) -> Result<InitramfsToolsPathFact, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::File))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&host)
+            .map_err(|error| io_error("open initramfs-tools prerequisite", &host, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error("inspect initramfs-tools prerequisite", &host, error))?;
+        let mode = metadata.mode() & 0o7777;
+        if !metadata.is_file()
+            || metadata.uid() != self.policy.expected_owner_uid
+            || metadata.nlink() != 1
+            || (mode & 0o111 != 0) != executable
+            || (self.policy.reject_group_world_writable && mode & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: host,
+                reason: "initramfs-tools prerequisite changed type, owner, link count, or mode"
+                    .into(),
+            });
+        }
+        Ok(InitramfsToolsPathFact {
+            path: absolute.to_owned(),
+            root_owned: self.policy.expected_owner_uid == 0
+                || metadata.uid() == self.policy.expected_owner_uid,
+            regular: true,
+            symlink: false,
+            executable,
+        })
+    }
+
+    /// Collects initramfs-tools + systemd capabilities without consulting
+    /// distribution identity and without mutation. Every selected command and
+    /// contract file is descriptor-reopened and the running kernel alone is
+    /// bound to the image transaction.
+    pub fn collect_initramfs_tools_systemd_facts(
+        &self,
+    ) -> Result<InitramfsToolsSystemdFacts, InstallError> {
+        self.revalidate_root()?;
+
+        let (pid1, _) = self.read_regular_file_limited("/proc/1/comm", 4096)?;
+        let pid1_comm = std::str::from_utf8(&pid1)
+            .map_err(|_| InstallError::InvalidPlan("/proc/1/comm is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if pid1_comm.is_empty() || pid1_comm.contains(char::is_whitespace) {
+            return Err(InstallError::InvalidPlan(
+                "PID 1 process name is empty or malformed".into(),
+            ));
+        }
+
+        let installed_kernel_versions = self.exact_child_directories("/usr/lib/modules", 64)?;
+        let (running_kernel, _) =
+            self.read_regular_file_limited("/proc/sys/kernel/osrelease", 4096)?;
+        let running_kernel = std::str::from_utf8(&running_kernel)
+            .map_err(|_| {
+                InstallError::InvalidPlan("/proc/sys/kernel/osrelease is not UTF-8".into())
+            })?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if running_kernel.is_empty()
+            || !installed_kernel_versions
+                .iter()
+                .any(|version| version == &running_kernel)
+        {
+            return Err(InstallError::InvalidPlan(
+                "running kernel has no exact installed module tree".into(),
+            ));
+        }
+        let kernel_versions = vec![running_kernel];
+        let [kernel] = kernel_versions.as_slice() else {
+            unreachable!("the descriptor-checked running kernel is singular")
+        };
+
+        let mut grub_profiles = Vec::new();
+        for profile in [
+            GrubRegeneration::UpdateGrub,
+            GrubRegeneration::Grub2Mkconfig,
+        ] {
+            let updater = self.backend_path_exists(profile.updater())?;
+            let probe = self.backend_path_exists(profile.probe())?;
+            match (updater, probe) {
+                (true, true) => grub_profiles.push(profile),
+                (false, false) => {}
+                _ => {
+                    return Err(InstallError::InvalidPlan(format!(
+                        "initramfs-tools-systemd GRUB capability is incomplete: {} and {} must both be present",
+                        profile.updater(),
+                        profile.probe()
+                    )));
+                }
+            }
+        }
+        let [grub_regeneration] = grub_profiles.as_slice() else {
+            return Err(InstallError::InvalidPlan(
+                "initramfs-tools-systemd requires exactly one supported GRUB regeneration capability"
+                    .into(),
+            ));
+        };
+        let grub_regeneration = *grub_regeneration;
+        let cryptsetup_location = self.select_backend_cryptsetup()?;
+        let tools = initramfs_tools_systemd_required_tools(grub_regeneration, cryptsetup_location)
+            .map(|path| self.inspect_backend_executable(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let contract_files = INITRAMFS_TOOLS_CONTRACT_FILES
+            .iter()
+            .map(|(path, executable)| self.inspect_initramfs_tools_contract_file(path, *executable))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let known_good_path = format!("/boot/initrd.img-{kernel}");
+        let (known_good, _) =
+            self.read_regular_file_limited(&known_good_path, MAX_CANDIDATE_BYTES)?;
+        let (fstab, _) = self.read_regular_file_limited("/etc/fstab", 1024 * 1024)?;
+        let boot_filesystem_uuid = parse_boot_uuid(&fstab)?;
+        let (cmdline, _) = self.read_regular_file_limited("/proc/cmdline", 16 * 1024)?;
+        let kernel_command_line = std::str::from_utf8(&cmdline)
+            .map_err(|_| InstallError::InvalidPlan("/proc/cmdline is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+
+        let boot_host = self.guest_path("/boot")?;
+        self.validate_guest_components("/boot", Some(NodeKind::Directory))?;
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&boot_host)
+            .map_err(|error| io_error("open /boot", &boot_host, error))?;
+        let boot_metadata = boot
+            .metadata()
+            .map_err(|error| io_error("inspect /boot", &boot_host, error))?;
+        if !boot_metadata.is_dir()
+            || boot_metadata.uid() != self.policy.expected_owner_uid
+            || (self.policy.reject_group_world_writable && boot_metadata.mode() & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: boot_host.clone(),
+                reason: "opened /boot changed type, owner, or mode".into(),
+            });
+        }
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(boot.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(io_error(
+                "inspect /boot filesystem",
+                &boot_host,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::InvalidPlan(
+                "/boot filesystem reports zero allocation size".into(),
+            ));
+        }
+        let free_bytes = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+
+        Ok(InitramfsToolsSystemdFacts {
+            architecture: std::env::consts::ARCH.to_owned(),
+            pid1_comm,
+            kernel_versions,
+            root_filesystem_device: self.root.device,
+            boot_filesystem_device: boot_metadata.dev(),
+            boot_writable: filesystem.f_flag & libc::ST_RDONLY == 0,
+            boot_free_bytes: u64::try_from(free_bytes).unwrap_or(u64::MAX),
+            boot_free_inodes: filesystem.f_favail,
+            grub_regeneration,
+            cryptsetup_location,
+            tools,
+            contract_files,
+            known_good_path,
+            known_good_digest: sha256(&known_good),
+            known_good_bytes: known_good.len() as u64,
+            boot_filesystem_uuid,
+            kernel_command_line,
+        })
+    }
+
+    fn inspect_mkinitcpio_contract_file(
+        &self,
+        absolute: &str,
+        executable: bool,
+    ) -> Result<MkinitcpioPathFact, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::File))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&host)
+            .map_err(|error| io_error("open mkinitcpio prerequisite", &host, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error("inspect mkinitcpio prerequisite", &host, error))?;
+        let mode = metadata.mode() & 0o7777;
+        if !metadata.is_file()
+            || metadata.uid() != self.policy.expected_owner_uid
+            || metadata.nlink() != 1
+            || (mode & 0o111 != 0) != executable
+            || (self.policy.reject_group_world_writable && mode & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: host,
+                reason: "mkinitcpio prerequisite changed type, owner, link count, or mode".into(),
+            });
+        }
+        Ok(MkinitcpioPathFact {
+            path: absolute.to_owned(),
+            root_owned: self.policy.expected_owner_uid == 0
+                || metadata.uid() == self.policy.expected_owner_uid,
+            regular: true,
+            symlink: false,
+            executable,
+        })
+    }
+
+    /// Collects the mkinitcpio BusyBox + systemd capability contract from
+    /// descriptor-checked mechanism files and the running kernel's `pkgbase`.
+    pub fn collect_mkinitcpio_systemd_facts(&self) -> Result<MkinitcpioSystemdFacts, InstallError> {
+        self.revalidate_root()?;
+        let (pid1, _) = self.read_regular_file_limited("/proc/1/comm", 4096)?;
+        let pid1_comm = std::str::from_utf8(&pid1)
+            .map_err(|_| InstallError::InvalidPlan("/proc/1/comm is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if pid1_comm.is_empty() || pid1_comm.contains(char::is_whitespace) {
+            return Err(InstallError::InvalidPlan(
+                "PID 1 process name is empty or malformed".into(),
+            ));
+        }
+        let installed_kernel_versions = self.exact_child_directories("/usr/lib/modules", 64)?;
+        let (running_kernel, _) =
+            self.read_regular_file_limited("/proc/sys/kernel/osrelease", 4096)?;
+        let running_kernel = std::str::from_utf8(&running_kernel)
+            .map_err(|_| {
+                InstallError::InvalidPlan("/proc/sys/kernel/osrelease is not UTF-8".into())
+            })?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if running_kernel.is_empty()
+            || !installed_kernel_versions
+                .iter()
+                .any(|version| version == &running_kernel)
+        {
+            return Err(InstallError::InvalidPlan(
+                "running kernel has no exact installed module tree".into(),
+            ));
+        }
+        if !safe_kernel_version(&running_kernel) {
+            return Err(InstallError::InvalidPlan(
+                "running kernel version is unsafe".into(),
+            ));
+        }
+        let pkgbase_path = format!("/usr/lib/modules/{running_kernel}/pkgbase");
+        let (pkgbase, _) = self.read_regular_file_limited(&pkgbase_path, 4096)?;
+        let package_base = std::str::from_utf8(&pkgbase)
+            .map_err(|_| InstallError::InvalidPlan("kernel pkgbase is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        let preset_path = format!("/etc/mkinitcpio.d/{package_base}.preset");
+        let (preset, _) = self.read_regular_file_limited(&preset_path, 64 * 1024)?;
+        let preset_source = std::str::from_utf8(&preset)
+            .map_err(|_| InstallError::InvalidPlan("mkinitcpio preset is not UTF-8".into()))?
+            .to_owned();
+        let (config, config_mode) =
+            self.read_regular_file_limited(MKINITCPIO_CONFIG_PATH, 64 * 1024)?;
+        let config_source = std::str::from_utf8(&config)
+            .map_err(|_| InstallError::InvalidPlan("mkinitcpio configuration is not UTF-8".into()))?
+            .to_owned();
+        let cryptsetup_location = self.select_backend_cryptsetup()?;
+        let tools = mkinitcpio_systemd_required_tools(cryptsetup_location)
+            .map(|path| self.inspect_backend_executable(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let contract_files = MKINITCPIO_CONTRACT_FILES
+            .iter()
+            .map(|(path, executable)| self.inspect_mkinitcpio_contract_file(path, *executable))
+            .collect::<Result<Vec<_>, _>>()?;
+        let known_good_path = format!("/boot/initramfs-{package_base}.img");
+        let (known_good, _) =
+            self.read_regular_file_limited(&known_good_path, MAX_CANDIDATE_BYTES)?;
+        let (fstab, _) = self.read_regular_file_limited("/etc/fstab", 1024 * 1024)?;
+        let boot_filesystem_uuid = parse_boot_uuid(&fstab)?;
+        let (cmdline, _) = self.read_regular_file_limited("/proc/cmdline", 16 * 1024)?;
+        let kernel_command_line = std::str::from_utf8(&cmdline)
+            .map_err(|_| InstallError::InvalidPlan("/proc/cmdline is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+
+        let boot_host = self.guest_path("/boot")?;
+        self.validate_guest_components("/boot", Some(NodeKind::Directory))?;
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&boot_host)
+            .map_err(|error| io_error("open /boot", &boot_host, error))?;
+        let boot_metadata = boot
+            .metadata()
+            .map_err(|error| io_error("inspect /boot", &boot_host, error))?;
+        if !boot_metadata.is_dir()
+            || boot_metadata.uid() != self.policy.expected_owner_uid
+            || (self.policy.reject_group_world_writable && boot_metadata.mode() & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: boot_host.clone(),
+                reason: "opened /boot changed type, owner, or mode".into(),
+            });
+        }
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(boot.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(io_error(
+                "inspect /boot filesystem",
+                &boot_host,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::InvalidPlan(
+                "/boot filesystem reports zero allocation size".into(),
+            ));
+        }
+        let free_bytes = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+        Ok(MkinitcpioSystemdFacts {
+            architecture: std::env::consts::ARCH.to_owned(),
+            pid1_comm,
+            kernel_versions: vec![running_kernel],
+            package_base,
+            root_filesystem_device: self.root.device,
+            boot_filesystem_device: boot_metadata.dev(),
+            boot_writable: filesystem.f_flag & libc::ST_RDONLY == 0,
+            boot_free_bytes: u64::try_from(free_bytes).unwrap_or(u64::MAX),
+            boot_free_inodes: filesystem.f_favail,
+            cryptsetup_location,
+            tools,
+            contract_files,
+            config_source,
+            config_mode: config_mode & 0o7777,
+            preset_source,
+            known_good_path,
+            known_good_digest: sha256(&known_good),
+            known_good_bytes: known_good.len() as u64,
+            boot_filesystem_uuid,
+            kernel_command_line,
+        })
+    }
+
+    fn inspect_mkinitfs_openrc_contract_file(
+        &self,
+        absolute: &str,
+    ) -> Result<MkinitfsOpenRcPathFact, InstallError> {
+        let host = self.guest_path(absolute)?;
+        self.validate_guest_components(absolute, Some(NodeKind::File))?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&host)
+            .map_err(|error| io_error("open mkinitfs prerequisite", &host, error))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| io_error("inspect mkinitfs prerequisite", &host, error))?;
+        let mode = metadata.mode() & 0o7777;
+        if !metadata.is_file()
+            || metadata.uid() != self.policy.expected_owner_uid
+            || metadata.nlink() != 1
+            || mode & 0o111 != 0
+            || (self.policy.reject_group_world_writable && mode & 0o022 != 0)
+            || metadata.len() > MAX_CANDIDATE_BYTES
+        {
+            return Err(InstallError::UnsafePath {
+                path: host,
+                reason: "mkinitfs prerequisite changed type, owner, link count, size, or mode"
+                    .into(),
+            });
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(|error| io_error("read mkinitfs prerequisite", &host, error))?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(InstallError::InvalidPlan(
+                "mkinitfs prerequisite size changed during descriptor read".into(),
+            ));
+        }
+        Ok(MkinitfsOpenRcPathFact {
+            path: absolute.to_owned(),
+            root_owned: self.policy.expected_owner_uid == 0
+                || metadata.uid() == self.policy.expected_owner_uid,
+            regular: true,
+            symlink: false,
+            executable: false,
+            mode,
+            digest: sha256(&bytes),
+        })
+    }
+
+    /// Collects mkinitfs + OpenRC + extlinux capabilities by exact path and
+    /// descriptor. No distribution identity or package database is consulted.
+    pub fn collect_mkinitfs_openrc_facts(&self) -> Result<MkinitfsOpenRcFacts, InstallError> {
+        self.revalidate_root()?;
+
+        let (pid1, _) = self.read_regular_file_limited("/proc/1/comm", 4096)?;
+        let pid1_comm = std::str::from_utf8(&pid1)
+            .map_err(|_| InstallError::InvalidPlan("/proc/1/comm is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if pid1_comm.is_empty() || pid1_comm.contains(char::is_whitespace) {
+            return Err(InstallError::InvalidPlan(
+                "PID 1 process name is empty or malformed".into(),
+            ));
+        }
+
+        let installed_kernel_versions = self.exact_child_directories("/lib/modules", 64)?;
+        let (running_kernel, _) =
+            self.read_regular_file_limited("/proc/sys/kernel/osrelease", 4096)?;
+        let running_kernel = std::str::from_utf8(&running_kernel)
+            .map_err(|_| {
+                InstallError::InvalidPlan("/proc/sys/kernel/osrelease is not UTF-8".into())
+            })?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if running_kernel.is_empty()
+            || !installed_kernel_versions
+                .iter()
+                .any(|version| version == &running_kernel)
+        {
+            return Err(InstallError::InvalidPlan(
+                "running kernel has no exact installed module tree".into(),
+            ));
+        }
+        let flavor = running_kernel
+            .rsplit_once('-')
+            .map(|(_, flavor)| flavor)
+            .ok_or_else(|| {
+                InstallError::InvalidPlan("running kernel has no mkinitfs flavor".into())
+            })?;
+        let kernel_image = format!("/boot/vmlinuz-{flavor}");
+        let active_image = format!("/boot/initramfs-{flavor}");
+
+        let tools = MKINITFS_OPENRC_TOOLS
+            .iter()
+            .map(|path| self.inspect_backend_executable(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let contract_files = MKINITFS_OPENRC_CONTRACT_FILES
+            .iter()
+            .copied()
+            .chain(std::iter::once(kernel_image.as_str()))
+            .map(|path| self.inspect_mkinitfs_openrc_contract_file(path))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (init_source, _) = self.read_regular_file_limited(INITRAMFS_INIT_PATH, 1024 * 1024)?;
+        let initramfs_init_source = std::str::from_utf8(&init_source)
+            .map_err(|_| InstallError::InvalidPlan("mkinitfs init source is not UTF-8".into()))?
+            .to_owned();
+        let (mkinitfs_config, _) =
+            self.read_regular_file_limited(MKINITFS_CONFIG_PATH, 64 * 1024)?;
+        let mkinitfs_config_source = std::str::from_utf8(&mkinitfs_config)
+            .map_err(|_| InstallError::InvalidPlan("mkinitfs configuration is not UTF-8".into()))?
+            .to_owned();
+        let mkinitfs_features = parse_mkinitfs_features(&mkinitfs_config_source)?;
+        let (update_config, _) =
+            self.read_regular_file_limited(UPDATE_EXTLINUX_CONFIG_PATH, 64 * 1024)?;
+        let update_config = std::str::from_utf8(&update_config).map_err(|_| {
+            InstallError::InvalidPlan("update-extlinux configuration is not UTF-8".into())
+        })?;
+        let settings = parse_update_extlinux_settings(update_config)?;
+        let (extlinux_config, _) =
+            self.read_regular_file_limited(EXTLINUX_CONFIG_PATH, 1024 * 1024)?;
+        let extlinux_config = std::str::from_utf8(&extlinux_config)
+            .map_err(|_| InstallError::InvalidPlan("extlinux configuration is not UTF-8".into()))?;
+        let active_command_line =
+            parse_extlinux_entry_command_line(extlinux_config, &settings.default_label)?;
+        if active_command_line != settings.kernel_command_line {
+            return Err(InstallError::InvalidPlan(
+                "active extlinux entry differs from update-extlinux settings".into(),
+            ));
+        }
+
+        let (known_good, _) = self.read_regular_file_limited(&active_image, MAX_CANDIDATE_BYTES)?;
+        let boot_host = self.guest_path("/boot")?;
+        self.validate_guest_components("/boot", Some(NodeKind::Directory))?;
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&boot_host)
+            .map_err(|error| io_error("open /boot", &boot_host, error))?;
+        let boot_metadata = boot
+            .metadata()
+            .map_err(|error| io_error("inspect /boot", &boot_host, error))?;
+        if !boot_metadata.is_dir()
+            || boot_metadata.uid() != self.policy.expected_owner_uid
+            || (self.policy.reject_group_world_writable && boot_metadata.mode() & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: boot_host.clone(),
+                reason: "opened /boot changed type, owner, or mode".into(),
+            });
+        }
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(boot.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(io_error(
+                "inspect /boot filesystem",
+                &boot_host,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::InvalidPlan(
+                "/boot filesystem reports zero allocation size".into(),
+            ));
+        }
+        let free_bytes = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+
+        Ok(MkinitfsOpenRcFacts {
+            architecture: std::env::consts::ARCH.to_owned(),
+            pid1_comm,
+            kernel_versions: vec![running_kernel],
+            boot_writable: filesystem.f_flag & libc::ST_RDONLY == 0,
+            boot_free_bytes: u64::try_from(free_bytes).unwrap_or(u64::MAX),
+            boot_free_inodes: filesystem.f_favail,
+            tools,
+            contract_files,
+            initramfs_init_source,
+            mkinitfs_config_source,
+            mkinitfs_features,
+            extlinux_overwrite: settings.overwrite,
+            extlinux_default_label: settings.default_label,
+            kernel_command_line: active_command_line,
+            known_good_path: active_image,
+            known_good_digest: sha256(&known_good),
+            known_good_bytes: known_good.len() as u64,
+        })
+    }
+
+    fn inspect_mkinitfs_boot_deploy_contract_file(
+        &self,
+        absolute: &str,
+        executable: bool,
+    ) -> Result<MkinitfsBootDeployPathFact, InstallError> {
+        let metadata = self
+            .validate_guest_components(absolute, Some(NodeKind::File))?
+            .ok_or_else(|| {
+                InstallError::InvalidPlan(format!(
+                    "mkinitfs-boot-deploy prerequisite is absent: {absolute}"
+                ))
+            })?;
+        let mode = metadata.mode & 0o7777;
+        let (bytes, reopened_mode) = self.read_regular_file_limited(absolute, 1024 * 1024)?;
+        if bytes.is_empty()
+            || reopened_mode != mode
+            || (mode & 0o111 != 0) != executable
+            || (self.policy.reject_group_world_writable && mode & 0o022 != 0)
+        {
+            return Err(InstallError::InvalidPlan(format!(
+                "mkinitfs-boot-deploy prerequisite changed mode, is empty, or has unsafe permissions: {absolute}"
+            )));
+        }
+        Ok(MkinitfsBootDeployPathFact {
+            path: absolute.to_owned(),
+            root_owned: metadata.owner_uid == self.policy.expected_owner_uid,
+            regular: true,
+            symlink: false,
+            executable,
+        })
+    }
+
+    /// Collects the mkinitfs + boot-deploy + OpenRC capabilities by exact
+    /// executable, file, generated-image, and BLS-entry structure. No release
+    /// file, distribution name, or package-manager database is consulted.
+    pub fn collect_mkinitfs_boot_deploy_openrc_facts(
+        &self,
+    ) -> Result<MkinitfsBootDeployOpenRcFacts, InstallError> {
+        self.revalidate_root()?;
+
+        let (pid1, _) = self.read_regular_file_limited("/proc/1/comm", 4096)?;
+        let pid1_comm = std::str::from_utf8(&pid1)
+            .map_err(|_| InstallError::InvalidPlan("/proc/1/comm is not UTF-8".into()))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+        if pid1_comm.is_empty() || pid1_comm.contains(char::is_whitespace) {
+            return Err(InstallError::InvalidPlan(
+                "PID 1 process name is empty or malformed".into(),
+            ));
+        }
+
+        let tools = MKINITFS_BOOT_DEPLOY_OPENRC_TOOLS
+            .iter()
+            .map(|path| self.inspect_backend_executable(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let contract_files = MKINITFS_BOOT_DEPLOY_OPENRC_CONTRACT_FILES
+            .iter()
+            .map(|(path, executable)| {
+                self.inspect_mkinitfs_boot_deploy_contract_file(path, *executable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (init, _) =
+            self.read_regular_file_limited("/usr/share/initramfs/init.sh", 1024 * 1024)?;
+        let init = std::str::from_utf8(&init).map_err(|_| {
+            InstallError::InvalidPlan("mkinitfs-boot-deploy init source is not UTF-8".into())
+        })?;
+        let initramfs_version = parse_mkinitfs_boot_deploy_version(init)?;
+        let (functions, _) = self
+            .read_regular_file_limited("/usr/share/initramfs/init_functions_2nd.sh", 1024 * 1024)?;
+        let init_functions_2nd = std::str::from_utf8(&functions)
+            .map_err(|_| {
+                InstallError::InvalidPlan(
+                    "mkinitfs-boot-deploy init functions are not UTF-8".into(),
+                )
+            })?
+            .to_owned();
+
+        let mut loader_candidates = Vec::new();
+        for name in self.exact_child_regular_files(LOADER_ENTRIES_DIRECTORY, 64)? {
+            if name == "bootart-known-good.conf" {
+                continue;
+            }
+            if !name.ends_with(".conf") {
+                return Err(InstallError::InvalidPlan(
+                    "mkinitfs-boot-deploy loader entries contain a non-conf file".into(),
+                ));
+            }
+            let path = format!("{LOADER_ENTRIES_DIRECTORY}/{name}");
+            let (bytes, mode) = self.read_regular_file_limited(&path, 16 * 1024)?;
+            let source = std::str::from_utf8(&bytes).map_err(|_| {
+                InstallError::InvalidPlan(format!("loader entry is not UTF-8: {path}"))
+            })?;
+            if let Ok((kernel, command_line)) = parse_mkinitfs_boot_deploy_loader_entry(source) {
+                loader_candidates.push((path, kernel, command_line, mode & 0o7777, bytes));
+            }
+        }
+        let [
+            (
+                active_loader_entry,
+                kernel_image,
+                kernel_command_line,
+                active_loader_entry_mode,
+                active_loader_entry_bytes,
+            ),
+        ] = loader_candidates.as_slice()
+        else {
+            return Err(InstallError::InvalidPlan(
+                "mkinitfs-boot-deploy requires exactly one loader entry for /initramfs".into(),
+            ));
+        };
+        let (kernel, kernel_mode) =
+            self.read_regular_file_limited(kernel_image, MAX_CANDIDATE_BYTES)?;
+        if kernel.is_empty() || kernel_mode & 0o022 != 0 {
+            return Err(InstallError::InvalidPlan(
+                "mkinitfs-boot-deploy kernel is empty or writable by an unsafe principal".into(),
+            ));
+        }
+        let (known_good, _) =
+            self.read_regular_file_limited(ACTIVE_INITRAMFS_PATH, MAX_CANDIDATE_BYTES)?;
+
+        let boot_host = self.guest_path("/boot")?;
+        self.validate_guest_components("/boot", Some(NodeKind::Directory))?;
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&boot_host)
+            .map_err(|error| io_error("open /boot", &boot_host, error))?;
+        let boot_metadata = boot
+            .metadata()
+            .map_err(|error| io_error("inspect /boot", &boot_host, error))?;
+        if !boot_metadata.is_dir()
+            || boot_metadata.uid() != self.policy.expected_owner_uid
+            || (self.policy.reject_group_world_writable && boot_metadata.mode() & 0o022 != 0)
+        {
+            return Err(InstallError::UnsafePath {
+                path: boot_host.clone(),
+                reason: "opened /boot changed type, owner, or mode".into(),
+            });
+        }
+        let mut filesystem = MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::fstatvfs(boot.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(io_error(
+                "inspect /boot filesystem",
+                &boot_host,
+                io::Error::last_os_error(),
+            ));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let fragment_size = if filesystem.f_frsize == 0 {
+            filesystem.f_bsize
+        } else {
+            filesystem.f_frsize
+        };
+        if fragment_size == 0 {
+            return Err(InstallError::InvalidPlan(
+                "/boot filesystem reports zero allocation size".into(),
+            ));
+        }
+        let free_bytes = u128::from(filesystem.f_bavail) * u128::from(fragment_size);
+
+        Ok(MkinitfsBootDeployOpenRcFacts {
+            architecture: std::env::consts::ARCH.to_owned(),
+            pid1_comm,
+            root_filesystem_device: self.root.device,
+            boot_filesystem_device: boot_metadata.dev(),
+            boot_writable: filesystem.f_flag & libc::ST_RDONLY == 0,
+            boot_free_bytes: u64::try_from(free_bytes).unwrap_or(u64::MAX),
+            boot_total_inodes: filesystem.f_files,
+            boot_free_inodes: filesystem.f_favail,
+            tools,
+            contract_files,
+            initramfs_version,
+            init_functions_2nd,
+            kernel_image: kernel_image.clone(),
+            active_image: ACTIVE_INITRAMFS_PATH.into(),
+            known_good_digest: sha256(&known_good),
+            known_good_bytes: known_good.len() as u64,
+            active_loader_entry: active_loader_entry.clone(),
+            active_loader_entry_mode: *active_loader_entry_mode,
+            active_loader_entry_bytes: active_loader_entry_bytes.clone(),
+            kernel_command_line: kernel_command_line.clone(),
+        })
+    }
+
     /// Performs the production planning preflight against a fresh alternate
     /// root without issuing content or namespace mutations. Filesystem reads
     /// may still follow the mount's atime policy. The opened root inode remains
@@ -4049,7 +6982,6 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 actual: self.root.path.clone(),
             });
         }
-
         self.revalidate_root()?;
         let transaction_lock = self.acquire_transaction_lock()?;
         if self.bootstrap_temp_exists()? || self.read_journal_optional()?.is_some() {
@@ -4115,6 +7047,20 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                                 operation.target
                             ))
                         })?;
+                    } else if operation.adapter == AdapterId::MkinitfsBootDeploy {
+                        let source = std::str::from_utf8(&bytes).map_err(|_| {
+                            InstallError::InvalidPlan(format!(
+                                "managed snippet target {} is not UTF-8 text",
+                                operation.target
+                            ))
+                        })?;
+                        patch_init_functions_2nd(source, REVIEWED_BOOT_DEPLOY_INITRAMFS_VERSION)
+                            .map_err(|error| {
+                                InstallError::InvalidPlan(format!(
+                                    "managed snippet target {} is incompatible: {error}",
+                                    operation.target
+                                ))
+                            })?;
                     }
                 }
                 None => {
@@ -4139,20 +7085,78 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         Ok(plan)
     }
 
-    /// The seam is deliberately visible, but no generator is enabled yet.
-    /// In particular, this method never calls the injected runner.
+    /// Executes only an exact command shape from an implemented mechanism
+    /// contract through an injected runner. Production remains stopped by the
+    /// mutation lock and the default runner rejects every request.
     pub fn run_generator(
         &mut self,
         request: &GeneratorRequest,
     ) -> Result<CommandOutput, InstallError> {
-        let _runner_is_injected = &mut self.commands;
-        Err(InstallError::GeneratorsUnsupported {
+        self.require_mutation_unlocked()?;
+        if request.alternate_root != self.root.path {
+            return Err(InstallError::PlanRootMismatch {
+                planned: request.alternate_root.clone(),
+                actual: self.root.path.clone(),
+            });
+        }
+        validate_supported_generator_request(request)?;
+        self.revalidate_root()?;
+        self.require_mutation_identity()?;
+        self.checkpoint(FailurePoint::BeforeGenerator {
             generator: request.generator,
-        })
+        })?;
+        let output = self.commands.run(request)?;
+        let stdout_limit = MAX_GENERATOR_OUTPUT_BYTES;
+        let combined_limit = MAX_GENERATOR_OUTPUT_BYTES;
+        let bytes = output.stdout.len().checked_add(output.stderr.len()).ok_or(
+            InstallError::GeneratorOutputTooLarge {
+                generator: request.generator,
+                bytes: usize::MAX,
+                limit: combined_limit,
+            },
+        )?;
+        if output.stdout.len() > stdout_limit
+            || output.stderr.len() > MAX_GENERATOR_OUTPUT_BYTES
+            || bytes > combined_limit
+        {
+            return Err(InstallError::GeneratorOutputTooLarge {
+                generator: request.generator,
+                bytes,
+                limit: combined_limit,
+            });
+        }
+        if output.status != 0 {
+            return Err(InstallError::GeneratorExited {
+                generator: request.generator,
+                status: output.status,
+            });
+        }
+        self.checkpoint(FailurePoint::AfterGenerator {
+            generator: request.generator,
+        })?;
+        Ok(output)
     }
 
     fn revalidate_root(&self) -> Result<(), InstallError> {
-        validate_root_path(&self.root.path, &self.metadata, self.policy)?;
+        match self.root_mode {
+            InstallerRootMode::AlternateRoot => {
+                validate_root_path(&self.root.path, &self.metadata, self.policy)?;
+            }
+            InstallerRootMode::LiveRoot => {
+                if self.root.path != Path::new("/") {
+                    return Err(InstallError::UnsafePath {
+                        path: self.root.path.clone(),
+                        reason: "live-root installer escaped the exact root".into(),
+                    });
+                }
+                check_existing_node(
+                    &self.root.path,
+                    &self.metadata,
+                    self.policy,
+                    Some(NodeKind::Directory),
+                )?;
+            }
+        }
         let current = self
             .metadata
             .symlink_metadata(&self.root.path)
@@ -4452,11 +7456,12 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         ordered.sort_by_key(|path| Path::new(path).components().count());
         ordered.dedup();
         for path in ordered {
-            let mode = if state && path.starts_with("/var/lib/bootart") {
-                0o700
-            } else {
-                0o755
-            };
+            let mode =
+                if (state && path.starts_with("/var/lib/bootart")) || path == CANDIDATE_DIRECTORY {
+                    0o700
+                } else {
+                    0o755
+                };
             self.create_dir(&path, mode)?;
         }
         Ok(())
@@ -4738,7 +7743,10 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         transaction: &str,
     ) -> Result<(), InstallError> {
         let temporary = self.atomic_temporary_path(absolute, transaction)?;
-        self.remove_regular_file(&temporary)
+        // Both atomic_write and atomic_symlink use the same transaction-derived
+        // temporary name. A crash may leave either leaf type behind; unlink a
+        // validated regular file or symlink without ever following the latter.
+        self.remove_symlink_or_file(&temporary)
     }
 
     fn cleanup_transaction_temporaries(&self, journal: &Journal) -> Result<(), InstallError> {
@@ -5017,6 +8025,48 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 }
             }
         }
+        let image_verification = if let Some(image) = &manifest.image {
+            let mut modified = Vec::new();
+            for (path, expected) in [
+                (image.active_image.as_str(), image.active_digest),
+                (image.known_good_image.as_str(), image.known_good_digest),
+                (image.grub_script_path.as_str(), image.grub_script_digest),
+            ] {
+                match self.validate_guest_components(path, None)? {
+                    Some(metadata) if metadata.kind == NodeKind::File => {
+                        let limit = if path.starts_with("/boot/") {
+                            MAX_CANDIDATE_BYTES
+                        } else {
+                            MAX_STATE_DOCUMENT_BYTES
+                        };
+                        let (bytes, _) = self.read_regular_file_limited(path, limit)?;
+                        if sha256(&bytes) != expected {
+                            modified.push(path.to_owned());
+                        }
+                    }
+                    _ => modified.push(path.to_owned()),
+                }
+            }
+            if self
+                .validate_guest_components(&image.candidate_image, None)?
+                .is_some()
+            {
+                modified.push(image.candidate_image.clone());
+            }
+            if modified.is_empty() {
+                ImageVerificationStatus::Verified {
+                    active_digest: image.active_digest,
+                    known_good_digest: image.known_good_digest,
+                    bootart_digest: image.bootart_digest,
+                }
+            } else {
+                ImageVerificationStatus::Modified { paths: modified }
+            }
+        } else {
+            ImageVerificationStatus::Unresolved {
+                blocker: IMAGE_VERIFICATION_BLOCKER,
+            }
+        };
         Ok(StatusReport {
             installed: true,
             provenance: Some(InstallProvenanceStatus {
@@ -5029,9 +8079,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 ManifestInventoryState::Complete => ManifestInventoryStatus::Complete,
                 ManifestInventoryState::Partial => ManifestInventoryStatus::Partial,
             },
-            image_verification: ImageVerificationStatus::Unresolved {
-                blocker: IMAGE_VERIFICATION_BLOCKER,
-            },
+            image_verification,
             files,
         })
     }
@@ -5334,6 +8382,9 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         let mut errors = Vec::new();
         let transaction_dir = format!("{TRANSACTIONS_DIR}/{transaction}");
         let transaction_host = self.guest_path(&transaction_dir)?;
+        if let Err(error) = self.remove_dracut_systemd_inspection_tree(transaction) {
+            errors.push(error.to_string());
+        }
         if self.optional_metadata(&transaction_host)?.is_some() {
             self.validate_node(&transaction_host, Some(NodeKind::Directory))?;
             let entries = fs::read_dir(&transaction_host)
@@ -5368,6 +8419,64 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         } else {
             Err(InstallError::CleanupFailed(errors))
         }
+    }
+
+    fn remove_dracut_systemd_inspection_tree(&self, transaction: &str) -> Result<(), InstallError> {
+        if !transaction_is_safe(transaction) {
+            return Err(InstallError::CorruptJournal(
+                "unsafe transaction id for inspection cleanup".into(),
+            ));
+        }
+        let absolute = format!("{TRANSACTIONS_DIR}/{transaction}/unpacked-candidate");
+        let host = self.guest_path(&absolute)?;
+        let Some(metadata) = self.optional_metadata(&host)? else {
+            return Ok(());
+        };
+        if metadata.kind != NodeKind::Directory
+            || metadata.owner_uid != self.policy.expected_owner_uid
+            || metadata.mode != 0o700
+        {
+            return Err(InstallError::UnsafePath {
+                path: host,
+                reason: "inspection cleanup root changed type, owner, or private mode".into(),
+            });
+        }
+
+        fn remove_children(path: &Path, expected_owner_uid: u32) -> Result<(), InstallError> {
+            let entries = fs::read_dir(path)
+                .map_err(|error| io_error("enumerate private inspection cleanup", path, error))?;
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    io_error("read private inspection cleanup entry", path, error)
+                })?;
+                let child = entry.path();
+                let metadata = fs::symlink_metadata(&child).map_err(|error| {
+                    io_error("inspect private inspection cleanup entry", &child, error)
+                })?;
+                if metadata.uid() != expected_owner_uid {
+                    return Err(InstallError::UnsafePath {
+                        path: child,
+                        reason: "inspection cleanup entry is not installer-owned".into(),
+                    });
+                }
+                if metadata.is_dir() {
+                    remove_children(&child, expected_owner_uid)?;
+                    fs::remove_dir(&child).map_err(|error| {
+                        io_error("remove private inspection directory", &child, error)
+                    })?;
+                } else {
+                    fs::remove_file(&child).map_err(|error| {
+                        io_error("remove private inspection member", &child, error)
+                    })?;
+                }
+            }
+            Ok(())
+        }
+
+        remove_children(&host, self.policy.expected_owner_uid)?;
+        fs::remove_dir(&host)
+            .map_err(|error| io_error("remove private inspection root", &host, error))?;
+        self.fsync_directory(host.parent().expect("inspection root has parent"))
     }
 
     fn cleanup_backup_files(&self, journal: &Journal) -> Result<(), InstallError> {
@@ -5476,11 +8585,320 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
         }
     }
 
-    /// Production always stops at [`InstallError::MutationLocked`]. The
-    /// non-default alternate-root seam exercises only transactional file
-    /// payloads; managed snippets and activation links remain explicit,
-    /// unsupported preview records and are never created here.
+    /// Generic alternate-root entry. The public production alternate-root
+    /// constructor remains mutation-locked; only the exact live-root dracut-systemd
+    /// entry below supplies both the command runner and verified image contract.
     pub fn apply(&mut self, plan: &InstallPlan) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(plan, None)
+    }
+
+    /// Applies the VM-proven dracut-systemd 26.04 systemd-dracut transaction using the
+    /// exact bytes reopened once from `/proc/self/exe`.
+    pub fn apply_dracut_systemd(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &DracutSystemdContract,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let bootart = read_running_bootart_elf()?;
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Dracut(contract), &bootart)),
+        )
+    }
+
+    /// Applies the exact initramfs-tools + systemd image transaction using the
+    /// ordinary running Bootart ELF. Pair support remains separately governed
+    /// by the adapter proof state.
+    pub fn apply_initramfs_tools_systemd(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &InitramfsToolsSystemdContract,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let bootart = read_running_bootart_elf()?;
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::InitramfsTools(contract), &bootart)),
+        )
+    }
+
+    /// Applies the exact mkinitcpio BusyBox + systemd image transaction using
+    /// the ordinary running Bootart ELF.
+    pub fn apply_mkinitcpio_systemd(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitcpioSystemdContract,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let bootart = read_running_bootart_elf()?;
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Mkinitcpio(contract), &bootart)),
+        )
+    }
+
+    /// Applies the exact mkinitfs + OpenRC image transaction using the ordinary
+    /// running Bootart ELF. Support remains governed by the pair's VM evidence.
+    pub fn apply_mkinitfs_openrc(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitfsOpenRcContract,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let bootart = read_running_bootart_elf()?;
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::MkinitfsOpenRc(contract), &bootart)),
+        )
+    }
+
+    /// Applies the exact mkinitfs + boot-deploy + OpenRC transaction using the
+    /// ordinary running Bootart ELF. The mechanism remains experimental until
+    /// its complete disposable-VM proof surface is promoted.
+    pub fn apply_mkinitfs_boot_deploy_openrc(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitfsBootDeployOpenRcContract,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let bootart = read_running_bootart_elf()?;
+        self.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::MkinitfsBootDeployOpenRc(contract),
+                &bootart,
+            )),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_dracut_systemd_for_tests(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &DracutSystemdContract,
+        expected_bootart: &[u8],
+    ) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Dracut(contract), expected_bootart)),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_initramfs_tools_systemd_for_tests(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &InitramfsToolsSystemdContract,
+        expected_bootart: &[u8],
+    ) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::InitramfsTools(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitcpio_systemd_for_tests(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitcpioSystemdContract,
+        expected_bootart: &[u8],
+    ) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Mkinitcpio(contract), expected_bootart)),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitfs_openrc_for_tests(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitfsOpenRcContract,
+        expected_bootart: &[u8],
+    ) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::MkinitfsOpenRc(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitfs_boot_deploy_openrc_for_tests(
+        &mut self,
+        plan: &InstallPlan,
+        contract: &MkinitfsBootDeployOpenRcContract,
+        expected_bootart: &[u8],
+    ) -> Result<ApplyOutcome, InstallError> {
+        self.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::MkinitfsBootDeployOpenRc(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    /// Runs the same live-root transaction but simulates process loss at one
+    /// dynamically enumerated durable checkpoint. This capability exists only
+    /// in the VM-test ELF; release builds contain neither the injector nor its
+    /// hidden CLI option.
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_dracut_systemd_interrupted_for_tests(
+        &self,
+        plan: &InstallPlan,
+        contract: &DracutSystemdContract,
+        expected_bootart: &[u8],
+        checkpoint: u16,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let mut interrupted = Installer {
+            root: self.root.clone(),
+            root_mode: self.root_mode,
+            metadata: OsMetadataSource,
+            policy: self.policy,
+            commands: OsCommandRunner,
+            faults: InterruptAtCheckpoint {
+                target: checkpoint,
+                seen: 0,
+            },
+            mutation_unlocked: self.mutation_unlocked,
+        };
+        interrupted.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Dracut(contract), expected_bootart)),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_initramfs_tools_systemd_interrupted_for_tests(
+        &self,
+        plan: &InstallPlan,
+        contract: &InitramfsToolsSystemdContract,
+        expected_bootart: &[u8],
+        checkpoint: u16,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let mut interrupted = Installer {
+            root: self.root.clone(),
+            root_mode: self.root_mode,
+            metadata: OsMetadataSource,
+            policy: self.policy,
+            commands: OsCommandRunner,
+            faults: InterruptAtCheckpoint {
+                target: checkpoint,
+                seen: 0,
+            },
+            mutation_unlocked: self.mutation_unlocked,
+        };
+        interrupted.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::InitramfsTools(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitcpio_systemd_interrupted_for_tests(
+        &self,
+        plan: &InstallPlan,
+        contract: &MkinitcpioSystemdContract,
+        expected_bootart: &[u8],
+        checkpoint: u16,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let mut interrupted = Installer {
+            root: self.root.clone(),
+            root_mode: self.root_mode,
+            metadata: OsMetadataSource,
+            policy: self.policy,
+            commands: OsCommandRunner,
+            faults: InterruptAtCheckpoint {
+                target: checkpoint,
+                seen: 0,
+            },
+            mutation_unlocked: self.mutation_unlocked,
+        };
+        interrupted.apply_internal(
+            plan,
+            Some((InitramfsContractRef::Mkinitcpio(contract), expected_bootart)),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitfs_openrc_interrupted_for_tests(
+        &self,
+        plan: &InstallPlan,
+        contract: &MkinitfsOpenRcContract,
+        expected_bootart: &[u8],
+        checkpoint: u16,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let mut interrupted = Installer {
+            root: self.root.clone(),
+            root_mode: self.root_mode,
+            metadata: OsMetadataSource,
+            policy: self.policy,
+            commands: OsCommandRunner,
+            faults: InterruptAtCheckpoint {
+                target: checkpoint,
+                seen: 0,
+            },
+            mutation_unlocked: self.mutation_unlocked,
+        };
+        interrupted.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::MkinitfsOpenRc(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn apply_mkinitfs_boot_deploy_openrc_interrupted_for_tests(
+        &self,
+        plan: &InstallPlan,
+        contract: &MkinitfsBootDeployOpenRcContract,
+        expected_bootart: &[u8],
+        checkpoint: u16,
+    ) -> Result<ApplyOutcome, InstallError> {
+        let mut interrupted = Installer {
+            root: self.root.clone(),
+            root_mode: self.root_mode,
+            metadata: OsMetadataSource,
+            policy: self.policy,
+            commands: OsCommandRunner,
+            faults: InterruptAtCheckpoint {
+                target: checkpoint,
+                seen: 0,
+            },
+            mutation_unlocked: self.mutation_unlocked,
+        };
+        interrupted.apply_internal(
+            plan,
+            Some((
+                InitramfsContractRef::MkinitfsBootDeployOpenRc(contract),
+                expected_bootart,
+            )),
+        )
+    }
+
+    fn apply_internal(
+        &mut self,
+        plan: &InstallPlan,
+        initramfs_contract: Option<(InitramfsContractRef<'_>, &[u8])>,
+    ) -> Result<ApplyOutcome, InstallError> {
         self.require_mutation_unlocked()?;
         self.revalidate_root()?;
         self.require_mutation_identity()?;
@@ -5492,6 +8910,29 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 planned: plan.root.clone(),
                 actual: self.root.path.clone(),
             });
+        }
+        if let Some((contract, expected_bootart)) = initramfs_contract {
+            if plan.selection.initramfs() != contract.adapter()
+                || plan.selection.real_root() != contract.real_root_adapter()
+                || contract.generate().alternate_root != self.root.path
+                || contract
+                    .update_bootloader()
+                    .is_some_and(|request| request.alternate_root != self.root.path)
+            {
+                return Err(InstallError::InvalidPlan(
+                    "initramfs transaction does not match the exact root and adapter pair".into(),
+                ));
+            }
+            validate_static_elf(expected_bootart)?;
+            let expected_digest = sha256(expected_bootart);
+            if !plan.operations.iter().any(|operation| {
+                operation.path == BOOTART_BINARY_PATH && operation.digest == expected_digest
+            }) {
+                return Err(InstallError::InvalidPlan(
+                    "initramfs transaction ELF differs from the install plan".into(),
+                ));
+            }
+            contract.validate()?;
         }
         if self.read_journal_optional()?.is_some() {
             return Err(InstallError::RecoveryRequired);
@@ -5507,11 +8948,28 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 .filter(|file| !file.state.is_exact())
                 .map(|file| file.path.clone())
                 .collect::<Vec<_>>();
-            return if modified.is_empty() {
+            let image_current = match (initramfs_contract, &status.image_verification) {
+                (None, _) => true,
+                (
+                    Some((_, expected_bootart)),
+                    ImageVerificationStatus::Verified { bootart_digest, .. },
+                ) => *bootart_digest == sha256(expected_bootart),
+                (Some(_), _) => false,
+            };
+            return if modified.is_empty() && image_current {
                 Ok(ApplyOutcome::AlreadyCurrent)
             } else {
+                let mut modified = modified;
+                if !image_current {
+                    modified.push("<initramfs-image-state>".into());
+                }
                 Err(InstallError::ManagedFilesModified(modified))
             };
+        }
+        if initramfs_contract
+            .is_some_and(|(contract, _)| contract.generator_configuration_already_active())
+        {
+            return Err(InstallError::ExistingInstallationConflict);
         }
 
         enum ActionItem {
@@ -5526,6 +8984,8 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 mode: u32,
                 digest: Sha256Digest,
                 content: Vec<u8>,
+                expected_original_digest: Option<Sha256Digest>,
+                expected_original_mode: Option<u32>,
             },
             Symlink {
                 path: String,
@@ -5543,6 +9003,16 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             }
         }
 
+        #[derive(Debug, Clone, Copy)]
+        struct ImageJournalIndices {
+            known_good: usize,
+            boot_entry: usize,
+            candidate: usize,
+            active: usize,
+            boot_config: Option<usize>,
+            candidate_seed: Option<usize>,
+        }
+
         let mut actions = Vec::new();
         for op in &plan.operations {
             actions.push(ActionItem::File {
@@ -5550,6 +9020,40 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 mode: op.mode,
                 digest: op.digest,
                 content: op.content.clone(),
+            });
+        }
+
+        if let Some((path, mode, original, activated)) = initramfs_contract
+            .and_then(|(contract, _)| contract.generator_configuration_activation())
+        {
+            let (current, current_mode) = self.read_regular_file(path)?;
+            if current != original || current_mode != mode {
+                return Err(InstallError::ManagedFilesModified(vec![path.to_owned()]));
+            }
+            actions.push(ActionItem::PatchedFile {
+                path: path.to_owned(),
+                mode,
+                digest: sha256(activated),
+                content: activated.to_vec(),
+                expected_original_digest: Some(sha256(original)),
+                expected_original_mode: Some(mode),
+            });
+        }
+
+        if let Some((path, mode, original, activated)) = initramfs_contract
+            .and_then(|(contract, _)| contract.presentation_boot_entry_activation())
+        {
+            let (current, current_mode) = self.read_regular_file(path)?;
+            if current != original || current_mode != mode {
+                return Err(InstallError::ManagedFilesModified(vec![path.to_owned()]));
+            }
+            actions.push(ActionItem::PatchedFile {
+                path: path.to_owned(),
+                mode,
+                digest: sha256(activated),
+                content: activated.to_vec(),
+                expected_original_digest: Some(sha256(original)),
+                expected_original_mode: Some(mode),
             });
         }
 
@@ -5574,6 +9078,16 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                             "managed snippet target {target} is incompatible: {error}"
                         ))
                     })?;
+                } else if op.adapter == AdapterId::MkinitfsBootDeploy {
+                    patched_str = patch_init_functions_2nd(
+                        &patched_str,
+                        REVIEWED_BOOT_DEPLOY_INITRAMFS_VERSION,
+                    )
+                    .map_err(|error| {
+                        InstallError::InvalidPlan(format!(
+                            "managed snippet target {target} is incompatible: {error}"
+                        ))
+                    })?;
                 }
             }
             let patched_bytes = patched_str.into_bytes();
@@ -5583,6 +9097,8 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 mode,
                 digest: patched_digest,
                 content: patched_bytes,
+                expected_original_digest: None,
+                expected_original_mode: None,
             });
         }
 
@@ -5620,13 +9136,23 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                         }
                     }
                 }
-                ActionItem::PatchedFile { path, .. } => {
+                ActionItem::PatchedFile {
+                    path,
+                    expected_original_digest,
+                    expected_original_mode,
+                    ..
+                } => {
                     let preimage = self.capture_preimage(path)?;
-                    if !matches!(preimage, CapturedPreimage::File(_)) {
+                    let CapturedPreimage::File(file) = &preimage else {
                         return Err(InstallError::UnsafePath {
                             path: self.guest_path(path)?,
                             reason: "patched snippet target is not a regular file".into(),
                         });
+                    };
+                    if expected_original_digest.is_some_and(|digest| sha256(&file.bytes) != digest)
+                        || expected_original_mode.is_some_and(|mode| file.mode != mode)
+                    {
+                        return Err(InstallError::ManagedFilesModified(vec![path.clone()]));
                     }
                     captured.push(preimage);
                 }
@@ -5637,6 +9163,109 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             }
             created_dirs.extend(self.missing_parent_dirs(action.path())?);
         }
+
+        let mut candidate_seed_source = None;
+        let image_indices = if let Some((contract, _)) = initramfs_contract {
+            if let Some(directory) = contract.candidate_directory()
+                && self.validate_guest_components(directory, None)?.is_some()
+            {
+                collisions.push(directory.to_owned());
+            }
+            let mut image_paths = vec![
+                contract.known_good_image(),
+                contract.boot_entry_path(),
+                contract.candidate_image(),
+                contract.active_image(),
+            ];
+            if let Some(path) = contract.boot_config_path() {
+                image_paths.push(path);
+            }
+            if let Some((_, destination)) = contract.candidate_seed() {
+                image_paths.push(destination);
+            }
+            for path in image_paths {
+                created_dirs.extend(self.missing_parent_dirs(path)?);
+            }
+            let known_good = captured.len();
+            for path in [
+                contract.known_good_image(),
+                contract.boot_entry_path(),
+                contract.candidate_image(),
+            ] {
+                match self.validate_guest_components(path, None)? {
+                    None => captured.push(CapturedPreimage::Absent {
+                        path: path.to_owned(),
+                    }),
+                    Some(_) => collisions.push(path.to_owned()),
+                }
+            }
+            let boot_entry = known_good + 1;
+            let candidate = known_good + 2;
+            let (active_bytes, active_mode) =
+                self.read_regular_file_limited(contract.active_image(), MAX_CANDIDATE_BYTES)?;
+            if active_bytes.is_empty()
+                || sha256(&active_bytes) != contract.known_good_digest()
+                || active_mode & 0o022 != 0
+            {
+                return Err(InstallError::InvalidPlan(
+                    "active initramfs changed after the known-good preflight".into(),
+                ));
+            }
+            let active = captured.len();
+            captured.push(CapturedPreimage::File(CapturedFile {
+                path: contract.active_image().to_owned(),
+                mode: active_mode,
+                bytes: active_bytes,
+            }));
+            let boot_config = if let Some(path) = contract.boot_config_path() {
+                let (bytes, mode) = self.read_regular_file_limited(path, MAX_GRUB_CONFIG_BYTES)?;
+                if bytes.is_empty() || mode & 0o022 != 0 {
+                    return Err(InstallError::InvalidPlan(
+                        "boot-loader configuration is empty or writable by an unsafe principal"
+                            .into(),
+                    ));
+                }
+                let index = captured.len();
+                captured.push(CapturedPreimage::File(CapturedFile {
+                    path: path.to_owned(),
+                    mode,
+                    bytes,
+                }));
+                Some(index)
+            } else {
+                None
+            };
+            let candidate_seed = if let Some((source, destination)) = contract.candidate_seed() {
+                let (bytes, mode) = self.read_regular_file_limited(source, MAX_CANDIDATE_BYTES)?;
+                if bytes.is_empty() || mode & 0o022 != 0 {
+                    return Err(InstallError::InvalidPlan(
+                        "candidate kernel seed is empty or has an unsafe mode".into(),
+                    ));
+                }
+                match self.validate_guest_components(destination, None)? {
+                    None => {}
+                    Some(_) => collisions.push(destination.to_owned()),
+                }
+                candidate_seed_source = Some((source.to_owned(), bytes, mode));
+                let index = captured.len();
+                captured.push(CapturedPreimage::Absent {
+                    path: destination.to_owned(),
+                });
+                Some(index)
+            } else {
+                None
+            };
+            Some(ImageJournalIndices {
+                known_good,
+                boot_entry,
+                candidate,
+                active,
+                boot_config,
+                candidate_seed,
+            })
+        } else {
+            None
+        };
 
         if !collisions.is_empty() {
             return Err(InstallError::DestinationCollision(collisions));
@@ -5723,8 +9352,220 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 journal.entries[index].progress = EntryProgress::Applied;
                 self.write_journal(&journal)?;
             }
+            let mut image_manifest_entries = Vec::new();
+            let image = if let Some((contract, expected_bootart)) = initramfs_contract {
+                let indices = image_indices.ok_or_else(|| {
+                    InstallError::InvalidPlan("initramfs journal indices are absent".into())
+                })?;
+
+                if let (Some(seed_index), Some((source, bytes, mode)), Some((_, destination))) = (
+                    indices.candidate_seed,
+                    candidate_seed_source.as_ref(),
+                    contract.candidate_seed(),
+                ) {
+                    let (current, current_mode) =
+                        self.read_regular_file_limited(source, MAX_CANDIDATE_BYTES)?;
+                    if &current != bytes || current_mode != *mode {
+                        return Err(InstallError::ManagedFilesModified(vec![source.clone()]));
+                    }
+                    journal.entries[seed_index].progress = EntryProgress::InProgress;
+                    self.write_journal(&journal)?;
+                    self.atomic_write(destination, bytes, *mode, &transaction)?;
+                    journal.entries[seed_index].progress = EntryProgress::Applied;
+                    self.write_journal(&journal)?;
+                }
+
+                self.checkpoint(FailurePoint::BeforeCandidateGeneration)?;
+                journal.entries[indices.candidate].progress = EntryProgress::InProgress;
+                self.write_journal(&journal)?;
+                self.run_generator(contract.generate())?;
+                let (candidate, candidate_mode) = self
+                    .read_regular_file_limited(contract.candidate_image(), MAX_CANDIDATE_BYTES)?;
+                if candidate.is_empty() || candidate_mode & 0o022 != 0 {
+                    return Err(InstallError::InvalidPlan(
+                        "generated initramfs candidate is empty or has an unsafe mode".into(),
+                    ));
+                }
+                journal.entries[indices.candidate].progress = EntryProgress::Applied;
+                self.write_journal(&journal)?;
+                if let Some((_, destination)) = contract.candidate_seed() {
+                    self.remove_regular_file(destination)?;
+                }
+                self.checkpoint(FailurePoint::CandidateGenerated)?;
+
+                self.checkpoint(FailurePoint::BeforeCandidateInspection)?;
+                let inspection = if let Some(inspection) =
+                    contract.inspect_candidate(&candidate, expected_bootart)?
+                {
+                    inspection
+                } else {
+                    let inspection_directory =
+                        format!("{TRANSACTIONS_DIR}/{transaction}/unpacked-candidate");
+                    self.create_dir(&inspection_directory, 0o700)?;
+                    let unpack = contract.unpack_request(&transaction)?.ok_or_else(|| {
+                        InstallError::InvalidPlan(
+                            "archive contract has neither direct nor external inspection".into(),
+                        )
+                    })?;
+                    let inspection_result = (|| {
+                        self.run_generator(&unpack)?;
+                        let inspection_host = self.guest_path(&inspection_directory)?;
+                        contract.inspect_inventory(
+                            &inspection_host,
+                            self.policy.expected_owner_uid,
+                            expected_bootart,
+                        )
+                    })();
+                    let cleanup_result = self.remove_dracut_systemd_inspection_tree(&transaction);
+                    match (inspection_result, cleanup_result) {
+                        (Ok(inspection), Ok(())) => inspection,
+                        (Err(error), Ok(())) => return Err(error),
+                        (Ok(_), Err(error)) => return Err(error),
+                        (Err(error), Err(cleanup)) => {
+                            return Err(InstallError::CleanupFailed(vec![
+                                error.to_string(),
+                                cleanup.to_string(),
+                            ]));
+                        }
+                    }
+                };
+                self.checkpoint(FailurePoint::CandidateInspected)?;
+                let image = contract.verified_record(&candidate, &inspection, expected_bootart)?;
+
+                let CapturedPreimage::File(active_preimage) = &captured[indices.active] else {
+                    return Err(InstallError::InvalidPlan(
+                        "active initramfs image preimage was not captured".into(),
+                    ));
+                };
+                for (index, path, bytes, mode) in [
+                    (
+                        indices.known_good,
+                        contract.known_good_image(),
+                        active_preimage.bytes.as_slice(),
+                        active_preimage.mode,
+                    ),
+                    (
+                        indices.boot_entry,
+                        contract.boot_entry_path(),
+                        contract.boot_entry(),
+                        contract.boot_entry_mode(),
+                    ),
+                ] {
+                    journal.entries[index].progress = EntryProgress::InProgress;
+                    self.write_journal(&journal)?;
+                    self.atomic_write(path, bytes, mode, &transaction)?;
+                    journal.entries[index].progress = EntryProgress::Applied;
+                    self.write_journal(&journal)?;
+                }
+
+                let updated_boot_config = match (
+                    contract.update_bootloader(),
+                    contract.boot_config_path(),
+                    indices.boot_config,
+                ) {
+                    (Some(request), Some(path), Some(index)) => {
+                        self.checkpoint(FailurePoint::BeforeGrubUpdate)?;
+                        journal.entries[index].progress = EntryProgress::InProgress;
+                        self.write_journal(&journal)?;
+                        self.run_generator(request)?;
+                        let (bytes, mode) =
+                            self.read_regular_file_limited(path, MAX_GRUB_CONFIG_BYTES)?;
+                        if bytes.is_empty()
+                            || !bytes
+                                .windows(b"bootart-known-good".len())
+                                .any(|window| window == b"bootart-known-good")
+                        {
+                            return Err(InstallError::InvalidPlan(
+                                "updated boot-loader configuration does not contain the known-good entry"
+                                    .into(),
+                            ));
+                        }
+                        journal.entries[index].progress = EntryProgress::Applied;
+                        self.write_journal(&journal)?;
+                        Some((path, index, bytes, mode))
+                    }
+                    (None, None, None) => None,
+                    _ => {
+                        return Err(InstallError::InvalidPlan(
+                            "boot-loader update request/config/index contract is inconsistent"
+                                .into(),
+                        ));
+                    }
+                };
+
+                self.checkpoint(FailurePoint::BeforeImageActivation)?;
+                journal.entries[indices.active].progress = EntryProgress::InProgress;
+                self.write_journal(&journal)?;
+                let (current_candidate, current_candidate_mode) = self
+                    .read_regular_file_limited(contract.candidate_image(), MAX_CANDIDATE_BYTES)?;
+                let (current_active, current_active_mode) =
+                    self.read_regular_file_limited(contract.active_image(), MAX_CANDIDATE_BYTES)?;
+                let candidate_metadata = self
+                    .validate_guest_components(contract.candidate_image(), Some(NodeKind::File))?
+                    .expect("bounded candidate read requires a present file");
+                let active_metadata = self
+                    .validate_guest_components(contract.active_image(), Some(NodeKind::File))?
+                    .expect("bounded active read requires a present file");
+                if candidate_metadata.device != active_metadata.device
+                    || current_candidate != candidate
+                    || current_candidate_mode != candidate_mode
+                    || sha256(&current_candidate) != image.candidate_digest
+                    || current_active != active_preimage.bytes
+                    || current_active_mode != active_preimage.mode
+                    || sha256(&current_active) != contract.known_good_digest()
+                {
+                    return Err(InstallError::InvalidPlan(
+                        "initramfs image identities changed before atomic activation".into(),
+                    ));
+                }
+                let candidate_host = self.guest_path(contract.candidate_image())?;
+                let active_host = self.guest_path(contract.active_image())?;
+                fs::rename(&candidate_host, &active_host).map_err(|error| {
+                    io_error(
+                        "atomically activate candidate initramfs",
+                        &active_host,
+                        error,
+                    )
+                })?;
+                self.fsync_directory(active_host.parent().expect("active image has parent"))?;
+                journal.entries[indices.active].progress = EntryProgress::Applied;
+                self.write_journal(&journal)?;
+                self.checkpoint(FailurePoint::ImageActivated)?;
+
+                image_manifest_entries.extend([
+                    ManifestEntry::File {
+                        path: contract.known_good_image().to_owned(),
+                        installed_mode: active_preimage.mode,
+                        installed_digest: contract.known_good_digest(),
+                        original: journal.entries[indices.known_good].preimage.clone(),
+                    },
+                    ManifestEntry::File {
+                        path: contract.boot_entry_path().to_owned(),
+                        installed_mode: contract.boot_entry_mode(),
+                        installed_digest: image.grub_script_digest,
+                        original: journal.entries[indices.boot_entry].preimage.clone(),
+                    },
+                    ManifestEntry::File {
+                        path: contract.active_image().to_owned(),
+                        installed_mode: candidate_mode,
+                        installed_digest: image.active_digest,
+                        original: journal.entries[indices.active].preimage.clone(),
+                    },
+                ]);
+                if let Some((path, index, bytes, mode)) = updated_boot_config {
+                    image_manifest_entries.push(ManifestEntry::File {
+                        path: path.to_owned(),
+                        installed_mode: mode,
+                        installed_digest: sha256(&bytes),
+                        original: journal.entries[index].preimage.clone(),
+                    });
+                }
+                Some(image)
+            } else {
+                None
+            };
             self.checkpoint(FailurePoint::BeforeManifestCommit)?;
-            let manifest_entries = actions
+            let mut manifest_entries = actions
                 .iter()
                 .zip(&journal.entries)
                 .map(|(action, journal_entry)| match action {
@@ -5750,7 +9591,9 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                         original: journal_entry.preimage.clone(),
                     },
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            manifest_entries.append(&mut image_manifest_entries);
+            manifest_entries.sort_by(|left, right| left.path().cmp(right.path()));
 
             let manifest = Manifest {
                 transaction: transaction.clone(),
@@ -5758,6 +9601,7 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 resource_set_version: RESOURCE_SET_VERSION,
                 inventory_state: ManifestInventoryState::Complete,
                 adapters: plan.selection.ids().to_vec(),
+                image,
                 entries: manifest_entries,
                 created_dirs,
                 state_created_dirs,
@@ -5829,6 +9673,26 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
     }
 
     pub fn uninstall(&mut self) -> Result<UninstallReport, InstallError> {
+        self.uninstall_internal(false)
+    }
+
+    /// Removes the exact dracut-systemd integration only after generating and
+    /// inspecting a Bootart-free replacement initramfs.
+    pub fn uninstall_dracut_systemd(&mut self) -> Result<UninstallReport, InstallError> {
+        self.uninstall_internal(true)
+    }
+
+    /// Exact injected alternate-root uninstall path for tests.
+    #[cfg(feature = "installer-test-seams")]
+    #[doc(hidden)]
+    pub fn uninstall_dracut_systemd_for_tests(&mut self) -> Result<UninstallReport, InstallError> {
+        self.uninstall_internal(true)
+    }
+
+    fn uninstall_internal(
+        &mut self,
+        generate_bootart_free_dracut_systemd_image: bool,
+    ) -> Result<UninstallReport, InstallError> {
         self.require_mutation_unlocked()?;
         self.revalidate_root()?;
         self.require_mutation_identity()?;
@@ -5846,6 +9710,27 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             });
         };
         let status = self.manifest_status(&manifest)?;
+        let uninstall_image = if generate_bootart_free_dracut_systemd_image {
+            let image = manifest.image.clone().ok_or_else(|| {
+                InstallError::InvalidPlan(
+                    "dracut-systemd uninstall requires an exact installed image record".into(),
+                )
+            })?;
+            validate_dracut_systemd_image_record(&image)?;
+            if !matches!(
+                status.image_verification,
+                ImageVerificationStatus::Verified { .. }
+            ) {
+                return Err(InstallError::ManagedFilesModified(vec![
+                    "<dracut_systemd-initramfs-image-state>".into(),
+                ]));
+            }
+            let generate = dracut_systemd_bootart_free_generate_request(&image, &self.root.path)?;
+            validate_dracut_systemd_generator_request(&generate)?;
+            Some((image, generate))
+        } else {
+            None
+        };
         let exact_paths = status
             .files
             .iter()
@@ -5858,6 +9743,29 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             .filter(|file| !file.state.is_exact())
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
+        if let Some((image, _)) = &uninstall_image {
+            let required_exact = [
+                image.active_image.as_str(),
+                image.known_good_image.as_str(),
+                image.grub_script_path.as_str(),
+            ];
+            let modified = required_exact
+                .into_iter()
+                .filter(|path| !exact_paths.contains(*path))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !modified.is_empty() {
+                return Err(InstallError::ManagedFilesModified(modified));
+            }
+            if self
+                .validate_guest_components(&image.candidate_image, None)?
+                .is_some()
+            {
+                return Err(InstallError::DestinationCollision(vec![
+                    image.candidate_image.clone(),
+                ]));
+            }
+        }
         if exact_paths.is_empty() {
             return Ok(UninstallReport {
                 removed: Vec::new(),
@@ -5873,10 +9781,19 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             .filter(|entry| exact_paths.contains(entry.path()))
             .cloned()
             .collect::<Vec<_>>();
-        let captured = exact_entries
+        let mut captured = exact_entries
             .iter()
             .map(|entry| self.capture_preimage(entry.path()))
             .collect::<Result<Vec<_>, _>>()?;
+        let dracut_systemd_candidate_index = if let Some((image, _)) = &uninstall_image {
+            let index = captured.len();
+            captured.push(CapturedPreimage::Absent {
+                path: image.candidate_image.clone(),
+            });
+            Some(index)
+        } else {
+            None
+        };
         let captured_bytes = captured
             .iter()
             .filter_map(|preimage| match preimage {
@@ -5972,6 +9889,11 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                 resource_set_version: manifest.resource_set_version,
                 inventory_state: ManifestInventoryState::Partial,
                 adapters: manifest.adapters.clone(),
+                image: if uninstall_image.is_some() {
+                    None
+                } else {
+                    manifest.image.clone()
+                },
                 entries: manifest
                     .entries
                     .iter()
@@ -5983,6 +9905,62 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
             })
         };
         let result = (|| {
+            let clean_candidate = if let Some((image, generate)) = &uninstall_image {
+                let candidate_index = dracut_systemd_candidate_index
+                    .expect("dracut-systemd uninstall candidate has a journal entry");
+                self.checkpoint(FailurePoint::BeforeCandidateGeneration)?;
+                journal.entries[candidate_index].progress = EntryProgress::InProgress;
+                self.write_journal(&journal)?;
+                self.run_generator(generate)?;
+                let (candidate, candidate_mode) =
+                    self.read_regular_file_limited(&image.candidate_image, MAX_CANDIDATE_BYTES)?;
+                if candidate.is_empty() || candidate_mode & 0o022 != 0 {
+                    return Err(InstallError::InvalidPlan(
+                        "generated Bootart-free dracut-systemd candidate is empty or has an unsafe mode"
+                            .into(),
+                    ));
+                }
+                journal.entries[candidate_index].progress = EntryProgress::Applied;
+                self.write_journal(&journal)?;
+                self.checkpoint(FailurePoint::CandidateGenerated)?;
+
+                let inspection_directory =
+                    format!("{TRANSACTIONS_DIR}/{transaction}/unpacked-candidate");
+                self.create_dir(&inspection_directory, 0o700)?;
+                let unpack = dracut_systemd_bootart_free_unpack_request(
+                    image,
+                    &self.root.path,
+                    &transaction,
+                )?;
+                validate_dracut_systemd_generator_request(&unpack)?;
+                self.checkpoint(FailurePoint::BeforeCandidateInspection)?;
+                let inspection_result = (|| {
+                    self.run_generator(&unpack)?;
+                    let inspection_host = self.guest_path(&inspection_directory)?;
+                    let inventory = collect_unpacked_dracut_inventory(
+                        &inspection_host,
+                        self.policy.expected_owner_uid,
+                    )?;
+                    inspect_bootart_free_dracut_inventory(&inventory)
+                })();
+                let cleanup_result = self.remove_dracut_systemd_inspection_tree(&transaction);
+                match (inspection_result, cleanup_result) {
+                    (Ok(_), Ok(())) => {}
+                    (Err(error), Ok(())) => return Err(error),
+                    (Ok(_), Err(error)) => return Err(error),
+                    (Err(error), Err(cleanup)) => {
+                        return Err(InstallError::CleanupFailed(vec![
+                            error.to_string(),
+                            cleanup.to_string(),
+                        ]));
+                    }
+                }
+                self.checkpoint(FailurePoint::CandidateInspected)?;
+                Some((candidate, candidate_mode))
+            } else {
+                None
+            };
+
             for (index, entry) in exact_entries.iter().enumerate() {
                 self.checkpoint(FailurePoint::BeforePayload {
                     index,
@@ -6028,7 +10006,39 @@ impl<M: MetadataSource, C: CommandRunner, F: FaultInjector> Installer<M, C, F> {
                     index,
                     path: entry.path().to_string(),
                 })?;
-                self.restore_preimage(entry.path(), entry.original(), &transaction)?;
+                if let (Some((image, _)), Some((candidate, candidate_mode))) =
+                    (&uninstall_image, &clean_candidate)
+                    && entry.path() == image.active_image
+                {
+                    let (current_candidate, current_candidate_mode) = self
+                        .read_regular_file_limited(&image.candidate_image, MAX_CANDIDATE_BYTES)?;
+                    let candidate_metadata = self
+                        .validate_guest_components(&image.candidate_image, Some(NodeKind::File))?
+                        .expect("bounded clean-candidate read requires a file");
+                    let active_metadata = self
+                        .validate_guest_components(&image.active_image, Some(NodeKind::File))?
+                        .expect("exact installed active image requires a file");
+                    if candidate_metadata.device != active_metadata.device
+                        || current_candidate != *candidate
+                        || current_candidate_mode != *candidate_mode
+                    {
+                        return Err(InstallError::InvalidPlan(
+                            "Bootart-free dracut-systemd candidate changed before atomic activation".into(),
+                        ));
+                    }
+                    let candidate_host = self.guest_path(&image.candidate_image)?;
+                    let active_host = self.guest_path(&image.active_image)?;
+                    fs::rename(&candidate_host, &active_host).map_err(|error| {
+                        io_error(
+                            "atomically activate Bootart-free initramfs",
+                            &active_host,
+                            error,
+                        )
+                    })?;
+                    self.fsync_directory(active_host.parent().expect("active image has parent"))?;
+                } else {
+                    self.restore_preimage(entry.path(), entry.original(), &transaction)?;
+                }
                 journal.entries[index].progress = EntryProgress::Applied;
                 self.write_journal(&journal)?;
             }
@@ -6190,7 +10200,7 @@ enum ExpectedCurrentManifestEntry {
     },
     PatchedFile {
         path: &'static str,
-        mode: u32,
+        mode: Option<u32>,
     },
     Symlink {
         path: &'static str,
@@ -6210,6 +10220,7 @@ impl ExpectedCurrentManifestEntry {
 
 fn expected_current_manifest_inventory(
     adapters: &[AdapterId],
+    include_generator_configuration: bool,
 ) -> Result<Vec<ExpectedCurrentManifestEntry>, InstallError> {
     let mut expected = vec![ExpectedCurrentManifestEntry::File {
         path: BOOTART_BINARY_PATH,
@@ -6233,12 +10244,26 @@ fn expected_current_manifest_inventory(
                     if !expected.iter().any(|item| item.path() == target) {
                         expected.push(ExpectedCurrentManifestEntry::PatchedFile {
                             path: target,
-                            mode: 0o755,
+                            // Shared mkinitfs sources are data consumed by the
+                            // generator, not executables in the real root.
+                            mode: None,
                         });
                     }
                 }
             }
         }
+    }
+    if include_generator_configuration && adapters.contains(&AdapterId::MkinitfsBusybox) {
+        expected.push(ExpectedCurrentManifestEntry::PatchedFile {
+            path: MKINITFS_CONFIG_PATH,
+            mode: None,
+        });
+    }
+    if include_generator_configuration && adapters.contains(&AdapterId::MkinitcpioBusybox) {
+        expected.push(ExpectedCurrentManifestEntry::PatchedFile {
+            path: MKINITCPIO_CONFIG_PATH,
+            mode: Some(0o644),
+        });
     }
     for spec in ACTIVATION_SPECS {
         if adapters.contains(&spec.adapter) && spec.scope == ActivationScope::RealRoot {
@@ -6305,7 +10330,11 @@ fn validate_current_manifest_entry(
                 mode: exp_mode,
             },
         ) => {
-            if path != exp_path || installed_mode != exp_mode {
+            if path != exp_path
+                || exp_mode.is_some_and(|mode| *installed_mode != mode)
+                || (exp_mode.is_none()
+                    && (*installed_mode & 0o022 != 0 || *installed_mode & 0o400 == 0))
+            {
                 return Err(InstallError::CorruptManifest(format!(
                     "current manifest inventory entry {} has a foreign, omitted, or noncanonical path/mode",
                     index + 1
@@ -6342,9 +10371,10 @@ fn validate_current_manifest_entry(
 
 fn validate_complete_current_manifest_inventory(
     adapters: &[AdapterId],
+    image: Option<&DracutSystemdImageRecord>,
     entries: &[ManifestEntry],
 ) -> Result<(), InstallError> {
-    let expected = expected_current_manifest_inventory(adapters)?;
+    let expected = expected_current_manifest_inventory(adapters, image.is_some())?;
 
     let binary_entries = entries
         .iter()
@@ -6355,23 +10385,62 @@ fn validate_complete_current_manifest_inventory(
             "current manifest must contain exactly one mode-0755 /usr/bin/bootart entry".into(),
         ));
     }
-    if entries.len() != expected.len() {
+    let expected_image_entries = if image.is_some() {
+        initramfs_manifest_entry_count(adapters)?
+    } else {
+        0
+    };
+    if entries.len() != expected.len() + expected_image_entries {
         return Err(InstallError::CorruptManifest(
             "current manifest does not contain the complete selected-adapter file inventory".into(),
         ));
     }
-    for (index, (entry, expected)) in entries.iter().zip(&expected).enumerate() {
-        validate_current_manifest_entry(entry, expected, index)?;
+    if entries
+        .windows(2)
+        .any(|pair| pair[0].path() >= pair[1].path())
+    {
+        return Err(InstallError::CorruptManifest(
+            "current manifest file inventory is not in canonical path order".into(),
+        ));
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        if let Ok(expected_index) =
+            expected.binary_search_by(|candidate| candidate.path().cmp(entry.path()))
+        {
+            validate_current_manifest_entry(entry, &expected[expected_index], index)?;
+        } else if let Some(image) = image {
+            validate_initramfs_manifest_entry(adapters, entry, image, index)?;
+        } else {
+            return Err(InstallError::CorruptManifest(format!(
+                "current manifest inventory entry {} is foreign to the selected adapters",
+                index + 1
+            )));
+        }
+    }
+    if let Some(image) = image {
+        for required in initramfs_manifest_paths(adapters, image)? {
+            if !entries.iter().any(|entry| entry.path() == required) {
+                return Err(InstallError::CorruptManifest(format!(
+                    "current manifest omits initramfs image-owned path {required}"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
 fn validate_partial_current_manifest_inventory(
     adapters: &[AdapterId],
+    image: Option<&DracutSystemdImageRecord>,
     entries: &[ManifestEntry],
 ) -> Result<(), InstallError> {
-    let expected = expected_current_manifest_inventory(adapters)?;
-    if entries.len() >= expected.len() {
+    let expected = expected_current_manifest_inventory(adapters, image.is_some())?;
+    let expected_image_entries = if image.is_some() {
+        initramfs_manifest_entry_count(adapters)?
+    } else {
+        0
+    };
+    if entries.len() >= expected.len() + expected_image_entries {
         return Err(InstallError::CorruptManifest(
             "current partial manifest must be a strict subset of the selected-adapter file inventory"
                 .into(),
@@ -6386,15 +10455,140 @@ fn validate_partial_current_manifest_inventory(
         ));
     }
     for (index, entry) in entries.iter().enumerate() {
-        let expected_index = expected
-            .binary_search_by(|candidate| candidate.path().cmp(entry.path()))
-            .map_err(|_| {
-                InstallError::CorruptManifest(format!(
-                    "current partial manifest inventory entry {} is foreign to the selected adapters",
-                    index + 1
-                ))
-            })?;
-        validate_current_manifest_entry(entry, &expected[expected_index], index)?;
+        if let Ok(expected_index) =
+            expected.binary_search_by(|candidate| candidate.path().cmp(entry.path()))
+        {
+            validate_current_manifest_entry(entry, &expected[expected_index], index)?;
+        } else if let Some(image) = image {
+            validate_initramfs_manifest_entry(adapters, entry, image, index)?;
+        } else {
+            return Err(InstallError::CorruptManifest(format!(
+                "current partial manifest inventory entry {} is foreign to the selected adapters",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn initramfs_manifest_entry_count(adapters: &[AdapterId]) -> Result<usize, InstallError> {
+    match adapters {
+        [AdapterId::DracutSystemd, AdapterId::SystemdRealRoot]
+        | [AdapterId::InitramfsToolsBusybox, AdapterId::SystemdRealRoot]
+        | [AdapterId::MkinitcpioBusybox, AdapterId::SystemdRealRoot]
+        | [AdapterId::MkinitfsBusybox, AdapterId::OpenRcRealRoot]
+        | [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot] => Ok(4),
+        _ => Err(InstallError::CorruptManifest(
+            "initramfs image inventory has an incompatible adapter pair".into(),
+        )),
+    }
+}
+
+fn initramfs_manifest_paths<'a>(
+    adapters: &[AdapterId],
+    image: &'a DracutSystemdImageRecord,
+) -> Result<Vec<&'a str>, InstallError> {
+    let mut paths = vec![
+        image.active_image.as_str(),
+        image.known_good_image.as_str(),
+        image.grub_script_path.as_str(),
+    ];
+    if initramfs_manifest_entry_count(adapters)? == 4 {
+        paths.push(image.grub_config_path.as_str());
+    }
+    Ok(paths)
+}
+
+fn validate_initramfs_manifest_entry(
+    adapters: &[AdapterId],
+    entry: &ManifestEntry,
+    image: &DracutSystemdImageRecord,
+    index: usize,
+) -> Result<(), InstallError> {
+    if adapters == [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot]
+        && entry.path() == image.grub_config_path
+    {
+        let ManifestEntry::PatchedFile {
+            path,
+            installed_mode,
+            original,
+            ..
+        } = entry
+        else {
+            return Err(InstallError::CorruptManifest(format!(
+                "initramfs image inventory entry {} is not the active BLS patched file",
+                index + 1
+            )));
+        };
+        if !crate::install::mkinitfs_boot_deploy_openrc::safe_loader_entry(path)
+            || !safe_bls_entry_mode(*installed_mode)
+            || !matches!(original, Preimage::File { .. })
+        {
+            return Err(InstallError::CorruptManifest(format!(
+                "initramfs image inventory entry {} violates the active BLS path/mode/preimage contract",
+                index + 1
+            )));
+        }
+        return Ok(());
+    }
+
+    let ManifestEntry::File {
+        path,
+        installed_mode,
+        installed_digest,
+        original,
+    } = entry
+    else {
+        return Err(InstallError::CorruptManifest(format!(
+            "initramfs image inventory entry {} is not a regular file",
+            index + 1
+        )));
+    };
+
+    let (expected_digest, expected_mode, original_must_be_absent) = if path == &image.active_image {
+        (Some(image.active_digest), None, false)
+    } else if path == &image.known_good_image {
+        (Some(image.known_good_digest), None, true)
+    } else if path == &image.grub_script_path {
+        let mode = match adapters {
+            [AdapterId::MkinitfsBusybox, AdapterId::OpenRcRealRoot] => 0o644,
+            [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot]
+                if safe_bls_entry_mode(*installed_mode) =>
+            {
+                *installed_mode
+            }
+            [AdapterId::DracutSystemd, AdapterId::SystemdRealRoot]
+            | [AdapterId::InitramfsToolsBusybox, AdapterId::SystemdRealRoot]
+            | [AdapterId::MkinitcpioBusybox, AdapterId::SystemdRealRoot] => 0o755,
+            _ => {
+                return Err(InstallError::CorruptManifest(
+                    "initramfs image inventory has an incompatible adapter pair".into(),
+                ));
+            }
+        };
+        (Some(image.grub_script_digest), Some(mode), true)
+    } else if path == &image.grub_config_path
+        && adapters != [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot]
+    {
+        (None, None, false)
+    } else {
+        return Err(InstallError::CorruptManifest(format!(
+            "current manifest inventory entry {} is foreign to the initramfs image transaction",
+            index + 1
+        )));
+    };
+
+    if installed_mode & 0o022 != 0
+        || installed_mode & 0o400 == 0
+        || expected_mode.is_some_and(|mode| *installed_mode != mode)
+        || expected_digest.is_some_and(|digest| *installed_digest != digest)
+        || (original_must_be_absent && !matches!(original, Preimage::Absent))
+        || (!original_must_be_absent && !matches!(original, Preimage::File { .. }))
+    {
+        return Err(InstallError::CorruptManifest(format!(
+            "initramfs image inventory entry {} violates its path/mode/hash/preimage contract",
+            index + 1
+        )));
     }
     Ok(())
 }
@@ -6412,6 +10606,37 @@ fn serialize_manifest(manifest: &Manifest) -> Vec<u8> {
         output.push_str("adapter\t");
         output.push_str(adapter_metadata(*id).name);
         output.push('\n');
+    }
+    if let Some(image) = &manifest.image {
+        let image_kind = match manifest.adapters.as_slice() {
+            [AdapterId::DracutSystemd, AdapterId::SystemdRealRoot] => "dracut-systemd-image",
+            [AdapterId::InitramfsToolsBusybox, AdapterId::SystemdRealRoot] => {
+                "initramfs-tools-systemd-image"
+            }
+            [AdapterId::MkinitcpioBusybox, AdapterId::SystemdRealRoot] => {
+                "mkinitcpio-systemd-image"
+            }
+            [AdapterId::MkinitfsBusybox, AdapterId::OpenRcRealRoot] => "mkinitfs-openrc-image",
+            [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot] => {
+                "mkinitfs-boot-deploy-openrc-image"
+            }
+            _ => "invalid-initramfs-image",
+        };
+        output.push_str(&format!(
+            "{image_kind}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            encode_hex(image.kernel_version.as_bytes()),
+            encode_hex(image.active_image.as_bytes()),
+            image.active_digest,
+            encode_hex(image.candidate_image.as_bytes()),
+            image.candidate_digest,
+            image.candidate_bytes,
+            encode_hex(image.known_good_image.as_bytes()),
+            image.known_good_digest,
+            encode_hex(image.grub_script_path.as_bytes()),
+            image.grub_script_digest,
+            encode_hex(image.grub_config_path.as_bytes()),
+            image.bootart_digest,
+        ));
     }
     for path in &manifest.created_dirs {
         output.push_str("created-dir\t");
@@ -6532,6 +10757,7 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
     };
 
     let mut adapters = Vec::new();
+    let mut image = None;
     let mut entries = Vec::new();
     let mut created_dirs = Vec::new();
     let mut state_created_dirs = Vec::new();
@@ -6551,6 +10777,104 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
                     return Err(InstallError::CorruptManifest("duplicate adapter".into()));
                 }
                 adapters.push(id);
+            }
+            [
+                image_kind @ ("dracut-systemd-image"
+                | "initramfs-tools-systemd-image"
+                | "mkinitcpio-systemd-image"
+                | "mkinitfs-openrc-image"
+                | "mkinitfs-boot-deploy-openrc-image"),
+                encoded_kernel,
+                encoded_active,
+                active_digest,
+                encoded_candidate,
+                candidate_digest,
+                candidate_bytes_text,
+                encoded_known_good,
+                known_good_digest,
+                encoded_grub_script,
+                grub_script_digest,
+                encoded_grub_config,
+                bootart_digest,
+            ] => {
+                if image.is_some() {
+                    return Err(InstallError::CorruptManifest(
+                        "duplicate initramfs image record".into(),
+                    ));
+                }
+                let expected_adapters = match *image_kind {
+                    "dracut-systemd-image" => {
+                        [AdapterId::DracutSystemd, AdapterId::SystemdRealRoot]
+                    }
+                    "initramfs-tools-systemd-image" => {
+                        [AdapterId::InitramfsToolsBusybox, AdapterId::SystemdRealRoot]
+                    }
+                    "mkinitcpio-systemd-image" => {
+                        [AdapterId::MkinitcpioBusybox, AdapterId::SystemdRealRoot]
+                    }
+                    "mkinitfs-openrc-image" => {
+                        [AdapterId::MkinitfsBusybox, AdapterId::OpenRcRealRoot]
+                    }
+                    "mkinitfs-boot-deploy-openrc-image" => {
+                        [AdapterId::MkinitfsBootDeploy, AdapterId::OpenRcRealRoot]
+                    }
+                    _ => unreachable!("slice pattern admits only implemented image kinds"),
+                };
+                if adapters != expected_adapters {
+                    return Err(InstallError::CorruptManifest(
+                        "initramfs image record is not attached to its exact adapter pair".into(),
+                    ));
+                }
+                let candidate_bytes = candidate_bytes_text.parse::<u64>().map_err(|_| {
+                    InstallError::CorruptManifest("invalid candidate image byte count".into())
+                })?;
+                if candidate_bytes.to_string() != *candidate_bytes_text {
+                    return Err(InstallError::CorruptManifest(
+                        "noncanonical candidate image byte count".into(),
+                    ));
+                }
+                let record = DracutSystemdImageRecord {
+                    kernel_version: decode_text(encoded_kernel)
+                        .map_err(InstallError::CorruptManifest)?,
+                    active_image: decode_text(encoded_active)
+                        .map_err(InstallError::CorruptManifest)?,
+                    active_digest: Sha256Digest::from_hex(active_digest).ok_or_else(|| {
+                        InstallError::CorruptManifest("invalid active image digest".into())
+                    })?,
+                    candidate_image: decode_text(encoded_candidate)
+                        .map_err(InstallError::CorruptManifest)?,
+                    candidate_digest: Sha256Digest::from_hex(candidate_digest).ok_or_else(
+                        || InstallError::CorruptManifest("invalid candidate image digest".into()),
+                    )?,
+                    candidate_bytes,
+                    known_good_image: decode_text(encoded_known_good)
+                        .map_err(InstallError::CorruptManifest)?,
+                    known_good_digest: Sha256Digest::from_hex(known_good_digest).ok_or_else(
+                        || InstallError::CorruptManifest("invalid known-good image digest".into()),
+                    )?,
+                    grub_script_path: decode_text(encoded_grub_script)
+                        .map_err(InstallError::CorruptManifest)?,
+                    grub_script_digest: Sha256Digest::from_hex(grub_script_digest).ok_or_else(
+                        || InstallError::CorruptManifest("invalid GRUB script digest".into()),
+                    )?,
+                    grub_config_path: decode_text(encoded_grub_config)
+                        .map_err(InstallError::CorruptManifest)?,
+                    bootart_digest: Sha256Digest::from_hex(bootart_digest).ok_or_else(|| {
+                        InstallError::CorruptManifest("invalid initramfs Bootart digest".into())
+                    })?,
+                };
+                match *image_kind {
+                    "mkinitfs-openrc-image" => validate_mkinitfs_openrc_image_record(&record),
+                    "mkinitfs-boot-deploy-openrc-image" => {
+                        validate_mkinitfs_boot_deploy_openrc_image_record(&record)
+                    }
+                    "dracut-systemd-image"
+                    | "initramfs-tools-systemd-image"
+                    | "mkinitcpio-systemd-image" => validate_dracut_systemd_image_record(&record),
+                    _ => unreachable!("slice pattern admits only implemented image kinds"),
+                }
+                .map_err(|error| InstallError::CorruptManifest(error.to_string()))?;
+                image = Some(record);
             }
             ["created-dir", encoded] => {
                 let path = decode_text(encoded).map_err(InstallError::CorruptManifest)?;
@@ -6711,10 +11035,10 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
     if plan_version == PLAN_VERSION && resource_set_version == RESOURCE_SET_VERSION {
         match inventory_state {
             ManifestInventoryState::Complete => {
-                validate_complete_current_manifest_inventory(&adapters, &entries)?
+                validate_complete_current_manifest_inventory(&adapters, image.as_ref(), &entries)?
             }
             ManifestInventoryState::Partial => {
-                validate_partial_current_manifest_inventory(&adapters, &entries)?
+                validate_partial_current_manifest_inventory(&adapters, image.as_ref(), &entries)?
             }
         }
     }
@@ -6724,6 +11048,7 @@ fn parse_manifest(contents: &[u8]) -> Result<Manifest, InstallError> {
         resource_set_version,
         inventory_state,
         adapters,
+        image,
         entries,
         created_dirs,
         state_created_dirs,

@@ -36,6 +36,13 @@ for run_dir in "${runs[@]}"; do
     # an additional guard; the explicit mount check also catches same-device
     # bind mounts.
     vm_assert_no_mount_below "$run_dir"
+    foreign="$(find "$run_dir" -xdev ! -user "$(id -u)" -print -quit)"
+    [[ -z "$foreign" ]] || vm_die \
+        "run contains a foreign-owned entry; preserving $run_dir: $foreign"
+    # Runner command namespaces are intentionally mode 0500 while a lane is
+    # active. Restore owner traversal/write permission only after all ownership
+    # and mount checks, otherwise find cannot unlink their children.
+    find "$run_dir" -xdev -type d -exec chmod u+rwx -- '{}' +
     find "$run_dir" -xdev -depth -delete
     printf 'bootart-vm: removed owned run: %s\n' "$run_dir"
 done

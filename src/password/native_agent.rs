@@ -68,6 +68,9 @@ static NATIVE_OUTPUT_CLAIMED: AtomicBool = AtomicBool::new(false);
 pub enum NativeAdapter {
     DracutClassic = 1,
     InitramfsToolsBusybox = 2,
+    MkinitfsBusybox = 3,
+    MkinitfsBootDeploy = 4,
+    MkinitcpioBusybox = 5,
 }
 
 impl NativeAdapter {
@@ -80,6 +83,16 @@ impl NativeAdapter {
             // cryptsetup-initramfs's stock askpass emits the exact passphrase
             // bytes to `run_keyscript | unlock_mapping`, with no terminator.
             Self::InitramfsToolsBusybox => PipeSecretFraming::Exact,
+            // mkinitfs 3.14.0 nlplug-findfs reads one line with fgets and
+            // strips the trailing newline before libcryptsetup activation.
+            Self::MkinitfsBusybox => PipeSecretFraming::NewlineTerminated,
+            // The reviewed unl0kr producer writes to the left side of the
+            // stock `unl0kr | cryptsetup ... -` anonymous pipe.
+            Self::MkinitfsBootDeploy => PipeSecretFraming::NewlineTerminated,
+            // mkinitcpio's BusyBox encrypt hook uses `--key-file=-`; unlike
+            // cryptsetup's interactive stdin path, every pipe byte is key
+            // material, so appending a newline changes the LUKS passphrase.
+            Self::MkinitcpioBusybox => PipeSecretFraming::Exact,
         }
     }
 
@@ -87,6 +100,9 @@ impl NativeAdapter {
         match self {
             Self::DracutClassic => "dracut-classic-native",
             Self::InitramfsToolsBusybox => "initramfs-tools-busybox-native",
+            Self::MkinitfsBusybox => "mkinitfs-busybox-native",
+            Self::MkinitfsBootDeploy => "mkinitfs-boot-deploy-native",
+            Self::MkinitcpioBusybox => "mkinitcpio-busybox-native",
         }
     }
 }
@@ -98,6 +114,9 @@ impl TryFrom<u8> for NativeAdapter {
         match value {
             1 => Ok(Self::DracutClassic),
             2 => Ok(Self::InitramfsToolsBusybox),
+            3 => Ok(Self::MkinitfsBusybox),
+            4 => Ok(Self::MkinitfsBootDeploy),
+            5 => Ok(Self::MkinitcpioBusybox),
             _ => Err(NativeAgentError::InvalidProtocol),
         }
     }
@@ -745,7 +764,14 @@ pub fn run_native_askpass_client_at(
         policy,
     ) {
         Ok(outcome) => outcome,
-        Err(_) => NativeAskpassClientOutcome::ConsoleFallback,
+        Err(error) => {
+            // This channel carries only bounded transport-class diagnostics;
+            // prompt text and credential bytes are never included. Adapter
+            // wrappers may route it to the kernel log before restoring the
+            // stock console path.
+            eprintln!("bootart native askpass unavailable: {error}");
+            NativeAskpassClientOutcome::ConsoleFallback
+        }
     }
 }
 
@@ -1351,6 +1377,36 @@ mod tests {
             NativeAdapter::InitramfsToolsBusybox.secret_framing(),
             PipeSecretFraming::Exact
         );
+        assert_eq!(
+            NativeAdapter::MkinitfsBusybox.secret_framing(),
+            PipeSecretFraming::NewlineTerminated
+        );
+        assert_eq!(
+            NativeAdapter::MkinitfsBootDeploy.secret_framing(),
+            PipeSecretFraming::NewlineTerminated
+        );
+        assert_eq!(
+            NativeAdapter::MkinitcpioBusybox.secret_framing(),
+            PipeSecretFraming::Exact
+        );
+
+        let mut mkinitfs = request_metadata(9, 13, 2_000_000);
+        mkinitfs.adapter = NativeAdapter::MkinitfsBusybox;
+        let packet = encode_request(&mkinitfs).expect("encode mkinitfs pipe adapter");
+        assert_eq!(packet[6], NativeAdapter::MkinitfsBusybox as u8);
+        assert_eq!(decode_request(&packet, 1_000_000).unwrap(), mkinitfs);
+
+        let mut boot_deploy = request_metadata(10, 14, 2_000_000);
+        boot_deploy.adapter = NativeAdapter::MkinitfsBootDeploy;
+        let packet = encode_request(&boot_deploy).expect("encode boot-deploy pipe adapter");
+        assert_eq!(packet[6], NativeAdapter::MkinitfsBootDeploy as u8);
+        assert_eq!(decode_request(&packet, 1_000_000).unwrap(), boot_deploy);
+
+        let mut mkinitcpio = request_metadata(11, 15, 2_000_000);
+        mkinitcpio.adapter = NativeAdapter::MkinitcpioBusybox;
+        let packet = encode_request(&mkinitcpio).expect("encode mkinitcpio pipe adapter");
+        assert_eq!(packet[6], NativeAdapter::MkinitcpioBusybox as u8);
+        assert_eq!(decode_request(&packet, 1_000_000).unwrap(), mkinitcpio);
 
         let wrong_framing = PipeAskpassMetadata::new(
             "Please unlock disk cryptroot: ",

@@ -1,0 +1,152 @@
+#cloud-config
+hostname: bootart-alpine-provision
+manage_etc_hosts: true
+ssh_pwauth: false
+users:
+  - default
+write_files:
+  - path: /usr/local/sbin/bootart-provision-alpine
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      set -eu
+      umask 077
+
+      fail() {
+          status=$?
+          printf 'BOOTART_VM_ALPINE_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
+          poweroff -f || :
+          exit "$status"
+      }
+      trap fail 0
+
+      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'
+      target=/dev/vdb
+      boot=${target}1
+      encrypted=${target}2
+
+      test -b "$target"
+      test ! -b /dev/vdc
+      apk add --no-cache cryptsetup e2fsprogs e2fsprogs-extra util-linux syslinux
+
+      # The installer transaction keeps known-good and candidate images and
+      # therefore enforces its reviewed 1.5 GiB free-space guard on /boot.
+      printf 'label: dos\n,2G,83,*\n,,83\n' | sfdisk --wipe always "$target"
+      mdev -s
+      sleep 2
+      test -b "$boot"
+      test -b "$encrypted"
+      mkfs.ext4 -F -q -O '^64bit' "$boot"
+      printf '%s' "$bootart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
+          --pbkdf pbkdf2 --iter-time 100 --key-file - "$encrypted"
+      printf '%s' "$bootart_luks" | cryptsetup open --key-file - "$encrypted" root
+      unset bootart_luks
+      cryptsetup status root >/dev/null
+      mkfs.ext4 -F -q /dev/mapper/root
+
+      mkdir -p /mnt/boot
+      mount /dev/mapper/root /mnt
+      mkdir -p /mnt/boot
+      mount "$boot" /mnt/boot
+      # Keep serial boot evidence, but leave tty0 as the final kernel console.
+      # The stock nlplug-findfs request and Bootart's replacement then receive
+      # the same emulated keyboard path used by a real local machine.
+      BOOTLOADER=syslinux SWAP_SIZE=0 \
+          KERNELOPTS='quiet console=ttyS0,115200n8 console=tty0' \
+          setup-disk -m sys -B syslinux -b "$target" -k virt /mnt
+
+      # The alternate generic kernel keeps the QEMU virtio disk drivers as
+      # modules rather than building them in like linux-virt.  Persist the
+      # actual VM hardware modules in the installed boot configuration so a
+      # normal later kernel package transaction remains bootable.
+      sed -i \
+          's/^modules=.*/modules=sd-mod,usb-storage,ext4,virtio,virtio_pci,virtio_blk/' \
+          /mnt/etc/update-extlinux.conf
+      grep -Fxq \
+          'modules=sd-mod,usb-storage,ext4,virtio,virtio_pci,virtio_blk' \
+          /mnt/etc/update-extlinux.conf
+      sed -i \
+          's/modules=sd-mod,usb-storage,ext4/modules=sd-mod,usb-storage,ext4,virtio,virtio_pci,virtio_blk/' \
+          /mnt/boot/extlinux.conf
+      grep -Fq \
+          'modules=sd-mod,usb-storage,ext4,virtio,virtio_pci,virtio_blk' \
+          /mnt/boot/extlinux.conf
+
+      # setup-disk deliberately warns that mounted-root BIOS installs may
+      # still need boot code in the MBR.  Its syslinux mbr.bin contains only
+      # the 440-byte bootstrap, so this cannot overwrite the partition table.
+      mbr=/usr/share/syslinux/mbr.bin
+      test -f "$mbr"
+      test "$(stat -c %s "$mbr")" -eq 440
+      dd if="$mbr" of="$target" bs=440 count=1 conv=notrunc status=none
+
+      test -x /mnt/sbin/mkinitfs
+      test -x /mnt/sbin/update-extlinux
+      test -x /mnt/sbin/extlinux
+      test -x /mnt/sbin/openrc
+      test -x /mnt/sbin/nlplug-findfs
+      grep -Eq '^features="([^"]* )?cryptsetup( [^"]*)?"$' /mnt/etc/mkinitfs/mkinitfs.conf
+      grep -Eq 'cryptroot=UUID=[0-9a-f-]+' /mnt/etc/update-extlinux.conf
+      grep -Fq 'cryptdm=root' /mnt/etc/update-extlinux.conf
+      grep -Fq 'root=/dev/mapper/root' /mnt/etc/update-extlinux.conf
+      grep -Eq 'cryptroot=UUID=[0-9a-f-]+' /mnt/boot/extlinux.conf
+      grep -Fq 'cryptdm=root' /mnt/boot/extlinux.conf
+      grep -Fq 'root=/dev/mapper/root' /mnt/boot/extlinux.conf
+      cryptsetup luksDump "$encrypted" | grep -Eq '^Version:[[:space:]]+2$'
+
+      # Cache the exact signed alternate kernel inside the encrypted guest so
+      # the later proof boot remains networkless and the Bootart transport
+      # still contains only the one product ELF.
+      seed_mount=/media/bootart-kernel-seed
+      package_cache=/mnt/var/cache/bootart-kernel-update
+      mkdir -p "$seed_mount" "$package_cache"
+      mount -o ro /dev/sr0 "$seed_mount"
+      (cd "$seed_mount/kernel-packages" && sha256sum -c SHA256SUMS)
+      cp "$seed_mount/kernel-packages/linux-stable-7.1.5-r0.apk" "$package_cache/"
+      cp "$seed_mount/kernel-packages/SHA256SUMS" "$package_cache/"
+      chmod 0400 "$package_cache/linux-stable-7.1.5-r0.apk" \
+          "$package_cache/SHA256SUMS"
+      (cd "$package_cache" && sha256sum -c SHA256SUMS)
+      umount "$seed_mount"
+      rmdir "$seed_mount"
+
+      if ! grep -Fq 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' /mnt/etc/inittab; then
+          printf '%s\n' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /mnt/etc/inittab
+      fi
+      printf '%s\n' bootart-vm > /mnt/etc/hostname
+      printf '%s\n' 'root:alpine' | chroot /mnt chpasswd
+      grep -Fq 'alpine:' /mnt/etc/passwd
+      printf '%s\n' 'alpine:alpine' | chroot /mnt chpasswd
+      apk --root /mnt add doas
+      # The cloud image's world file is copied by setup-disk.  Remove its
+      # provisioning agent from the installed target so a networkless stock
+      # boot cannot spend minutes probing metadata services.
+      apk --root /mnt del cloud-init
+      rm -f /mnt/etc/runlevels/*/cloud-*
+      ! find /mnt/etc/runlevels -type l -name 'cloud-*' | grep -q .
+      mkdir -p /mnt/etc/doas.d
+      printf '%s\n' 'permit nopass alpine as root' > /mnt/etc/doas.d/50-bootart-vm.conf
+
+      rm -rf /mnt/var/lib/cloud /mnt/var/log/cloud-init.log \
+          /mnt/var/log/cloud-init-output.log
+      scan=112
+      scan=${scan}358
+      if printf '%s\n' "$scan" | grep -r -a -F -l --devices=skip -f - \
+          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/bootart-secret-paths; then
+          sed 's|^/mnt||' /tmp/bootart-secret-paths >/dev/ttyS0 || :
+          exit 1
+      fi
+      rm -f /tmp/bootart-secret-paths
+      unset scan
+
+      sync
+      umount /mnt/boot
+      umount /mnt
+      cryptsetup close root
+      printf '%s\n' BOOTART_VM_ALPINE_PROVISION_PASS_V1 >/dev/ttyS0
+      trap - 0
+      poweroff
+runcmd:
+  - [ /usr/local/sbin/bootart-provision-alpine ]
+final_message: bootart Alpine provisioning cloud-init completed

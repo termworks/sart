@@ -40,7 +40,14 @@ count_fixed_occurrences() {
 
 require_one_exact_occurrence() {
     local marker=$1 label=$2 exact_count occurrence_count
-    exact_count="$(grep -Fxc -- "$marker" "$serial" || true)"
+    exact_count="$(awk -v marker="$marker" '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line == marker) count++
+        }
+        END { print count + 0 }
+    ' "$serial")"
     occurrence_count="$(count_fixed_occurrences "$marker")"
     [[ "$exact_count" -eq 1 && "$occurrence_count" -eq 1 ]] || {
         printf 'bootart-vm: adapter transcript requires one exact %s oracle and no extra occurrences: %s\n' \
@@ -57,9 +64,19 @@ require_one_exact_occurrence "$pass_oracle" PASS
     exit 1
 }
 
-provisioned_line="$(grep -nFx -- "$provisioned_oracle" "$serial" | cut -d: -f1)"
-early_line="$(grep -nFx -- "$early_oracle" "$serial" | cut -d: -f1)"
-pass_line="$(grep -nFx -- "$pass_oracle" "$serial" | cut -d: -f1)"
+exact_line() {
+    local marker=$1
+    awk -v marker="$marker" '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line == marker) print NR
+        }
+    ' "$serial"
+}
+provisioned_line="$(exact_line "$provisioned_oracle")"
+early_line="$(exact_line "$early_oracle")"
+pass_line="$(exact_line "$pass_oracle")"
 [[ "$provisioned_line" =~ ^[1-9][0-9]*$ && "$early_line" =~ ^[1-9][0-9]*$ && \
    "$pass_line" =~ ^[1-9][0-9]*$ && \
    "$provisioned_line" -lt "$early_line" && "$early_line" -lt "$pass_line" ]] || {

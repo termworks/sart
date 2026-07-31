@@ -86,9 +86,11 @@ recipe_line_number() {
 }
 
 for public_target in \
-    static-build artifact-check release-package release-readiness \
-    guest-install-plan guest-install-status clean vm-test-lifecycle-alpine \
-    '$(VM_ADAPTER_TEST_TARGETS)' vm-test-adapters vm-test
+    static-build artifact-check artifact-cli-check release-package release-readiness \
+    clean vm-test-lifecycle-alpine \
+    '$(VM_ADAPTER_TEST_TARGETS)' vm-test-ubuntu-26.04-dracut-systemd \
+    vm-test-release-ubuntu-26.04-dracut-systemd \
+    vm-run-gui-ubuntu-26.04-dracut-systemd vm-test-adapters vm-test
 do
     require_first_recipe_command "$public_target" \
         "bash scripts/artifact-lock.sh '\$(CURDIR)' \\"
@@ -175,8 +177,10 @@ require_ready_script_lock prepare-smoke.sh \
     'vm_validate_run "$vm_root" "$run_dir"' \
     'bootart_physical="$(readlink -f -- "$bootart_bin")" || \'
 for locked_target in \
-    _static-build-locked _artifact-check-locked _release-package-locked \
-    _release-readiness-locked _clean-locked
+    _static-build-locked _artifact-check-locked _artifact-cli-check-locked \
+    _release-package-locked \
+    _release-readiness-locked _vm-test-release-ubuntu-26.04-dracut-systemd-locked \
+    _clean-locked
 do
     require_first_recipe_command "$locked_target" \
         "bash scripts/artifact-lock-assert.sh '\$(CURDIR)' >/dev/null"
@@ -192,7 +196,7 @@ package_line=$(recipe_line_number _release-readiness-locked \
 manifest_line=$(recipe_line_number _release-readiness-locked \
     'generation="$$(bash scripts/release-package-generation.sh \')
 vm_line=$(recipe_line_number _release-readiness-locked \
-    '$(MAKE) --no-print-directory vm-test \')
+    '$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \')
 pin_line=$(recipe_line_number _release-readiness-locked \
     'BOOTART_BIN="$$generation/release/bootart"; \')
 for line in "$package_line" "$manifest_line" "$vm_line" "$pin_line"; do

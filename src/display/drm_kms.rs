@@ -1,7 +1,8 @@
 //! Linux DRM/KMS display backend.
 //!
-//! Provides direct KMS modesetting presentation under the one-static-ELF constraint
-//! with automatic fallback to the Linux Virtual Terminal (`TextVtBackend`).
+//! This currently provides only the backend lifecycle scaffold and a bounded
+//! card-path presence probe. It does not open DRM, modeset, allocate a buffer,
+//! present pixels, restore a mode, or implement the text-VT fallback yet.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,7 +38,7 @@ impl Default for DrmKmsConfig {
     }
 }
 
-/// Direct DRM/KMS modesetting display owner with automatic VT fallback.
+/// DRM/KMS lifecycle scaffold; not yet a modesetting display owner.
 #[derive(Debug)]
 pub struct DrmKmsBackend {
     config: DrmKmsConfig,

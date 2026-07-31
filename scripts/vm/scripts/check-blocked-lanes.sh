@@ -93,15 +93,15 @@ unverified_rows=0
 unimplemented_rows=0
 while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" == \#* ]] && continue
-    IFS='|' read -r pair _ _ image_id lane _ _ _ _ oracle matrix_status <<< "$line"
+    IFS='|' read -r pair _ _ image_id lane _ _ _ _ oracle matrix_status fixture <<< "$line"
     case "$matrix_status" in
         blocked-unverified)
-            expected="$(vm_emit_lane_status "$pair" "$lane" BLOCKED_UNVERIFIED \
+            expected="$(vm_emit_lane_status "$fixture" "$pair" "$lane" BLOCKED_UNVERIFIED \
                 "$image_id" "$oracle" immutable-image-not-pinned)"
             unverified_rows=$((unverified_rows + 1))
             ;;
         blocked-unimplemented)
-            expected="$(vm_emit_lane_status "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
+            expected="$(vm_emit_lane_status "$fixture" "$pair" "$lane" BLOCKED_UNIMPLEMENTED \
                 "$image_id" "$oracle" adapter-runner-missing)"
             unimplemented_rows=$((unimplemented_rows + 1))
             ;;
@@ -117,7 +117,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         QEMU="$qemu_shim" QEMU_IMG="$qemu_img_shim" \
         bash "$SCRIPT_DIR/run-adapter-lane.sh" \
         "$repo_root" "$vm_root" "$lock_file" "$matrix_file" "$pair" "$lane" \
-        "$product_shim" 2>&1)"
+        "$product_shim" "$fixture" 2>&1)"
     result=$?
     set -e
     [[ $result -eq 3 ]] || vm_die "blocked lane returned $result instead of 3: $pair/$lane"

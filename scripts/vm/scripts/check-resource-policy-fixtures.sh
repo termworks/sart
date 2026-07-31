@@ -10,6 +10,8 @@ source "$SCRIPT_DIR/lib.sh"
 repo_root=$1
 vm_check_layout "$repo_root" "$repo_root/target/vm"
 vm_validate_lock "$repo_root/scripts/vm/images.lock"
+vm_validate_kernel_package_lock "$repo_root/scripts/vm/kernel-packages.lock"
+vm_validate_postmarketos_source_lock "$repo_root/scripts/vm/postmarketos-sources.lock"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootart-resource-policy.XXXXXXXXXX")" ||
     vm_die 'cannot allocate resource policy fixture root'
@@ -31,6 +33,7 @@ trap 'exit 143' TERM
 lock="$tmp/images.lock"
 sha='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 blocked='blocked-image|blocked|https://blocked.invalid/image.qcow2|BLOCKED_UNVERIFIED|qcow2|x86_64|image.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED'
+blocked_aarch64='blocked-aarch64|blocked|https://blocked.invalid/image-aarch64.qcow2|BLOCKED_UNVERIFIED|qcow2|aarch64|image-aarch64.qcow2|-|-|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED|UNRESOLVED'
 verified="verified-image|verified|https://example.invalid/image.qcow2|$sha|qcow2|x86_64|image.qcow2|-|-|4096|32768|40000|16384|1024|512"
 verified_iso="verified-iso|verified|https://example.invalid/image.iso|$sha|iso|x86_64|image.iso|/boot/kernel|/boot/initrd|4096|4096|72000|16384|1024|512"
 
@@ -45,7 +48,17 @@ expect_lock_rejected() {
     fi
 }
 
+package_lock="$tmp/kernel-packages.lock"
+expect_package_lock_rejected() {
+    local label=$1
+    if (vm_validate_kernel_package_lock "$package_lock") >/dev/null 2>&1; then
+        vm_die "kernel package lock fixture unexpectedly passed: $label"
+    fi
+}
+
 write_lock "$blocked"
+vm_validate_lock "$lock"
+write_lock "$blocked_aarch64"
 vm_validate_lock "$lock"
 write_lock "$verified"
 vm_validate_lock "$lock"
@@ -79,6 +92,23 @@ do
         "verified-image|verified|https://example.invalid/image.qcow2|$sha|qcow2|x86_64|image.qcow2|-|-|4096|8192|$invalid_count|16384|1024|512"
 done
 
+cp -- "$repo_root/scripts/vm/kernel-packages.lock" "$package_lock"
+vm_validate_kernel_package_lock "$package_lock"
+sed -i 's#https://archive\.ubuntu\.com/ubuntu/pool/main/l/#https://example.invalid/#' "$package_lock"
+expect_package_lock_rejected non-ubuntu-origin
+cp -- "$repo_root/scripts/vm/kernel-packages.lock" "$package_lock"
+sed -i '0,/17185544/s//536870913/' "$package_lock"
+expect_package_lock_rejected oversized-package
+cp -- "$repo_root/scripts/vm/kernel-packages.lock" "$package_lock"
+sed -i '0,/verified/s//blocked/' "$package_lock"
+expect_package_lock_rejected unverified-package
+cp -- "$repo_root/scripts/vm/kernel-packages.lock" "$package_lock"
+sed -i '0,/linux-image-7.1.0-5-generic_7.1.0-5.5+1_amd64.deb/s//..\/kernel.deb/' "$package_lock"
+expect_package_lock_rejected unsafe-package-filename
+cp -- "$repo_root/scripts/vm/kernel-packages.lock" "$package_lock"
+sed -i '/ubuntu-7.1.0-5-zfs-amd64/d' "$package_lock"
+expect_package_lock_rejected missing-circular-dependency
+
 sample="$tmp/sample"
 printf 1234 > "$sample"
 vm_assert_file_size_exact "$sample" 4 sample
@@ -90,6 +120,74 @@ if (vm_assert_file_size_at_most "$sample" 3 sample) >/dev/null 2>&1; then
     vm_die 'at-most-size helper accepted an oversized file'
 fi
 vm_require_free_bytes "$tmp" 1
+
+postmarketos_lock="$tmp/postmarketos-sources.lock"
+cp -- "$repo_root/scripts/vm/postmarketos-sources.lock" "$postmarketos_lock"
+vm_validate_postmarketos_source_lock "$postmarketos_lock"
+sed -i '0,/gitlab\.postmarketos\.org/s//example.invalid/' "$postmarketos_lock"
+if (vm_validate_postmarketos_source_lock "$postmarketos_lock") >/dev/null 2>&1; then
+    vm_die 'postmarketOS source lock accepted a foreign archive origin'
+fi
+cp -- "$repo_root/scripts/vm/postmarketos-sources.lock" "$postmarketos_lock"
+sed -i '/^pmaports|/d' "$postmarketos_lock"
+if (vm_validate_postmarketos_source_lock "$postmarketos_lock") >/dev/null 2>&1; then
+    vm_die 'postmarketOS source lock accepted a missing component'
+fi
+cp -- "$repo_root/scripts/vm/postmarketos-sources.lock" "$postmarketos_lock"
+sed -i 's/^postmarketos-mkinitfs|2\.11\.1|/postmarketos-mkinitfs|2.11.2|/' "$postmarketos_lock"
+if (vm_validate_postmarketos_source_lock "$postmarketos_lock") >/dev/null 2>&1; then
+    vm_die 'postmarketOS source lock accepted an unreviewed package version'
+fi
+cp -- "$repo_root/scripts/vm/postmarketos-sources.lock" "$postmarketos_lock"
+sed -i 's#postmarketOS/buffybox/#postmarketOS/unl0kr/#' "$postmarketos_lock"
+if (vm_validate_postmarketos_source_lock "$postmarketos_lock") >/dev/null 2>&1; then
+    vm_die 'postmarketOS source lock accepted a mismatched package archive path'
+fi
+
+# The password evidence scan is exact for ordinary artifacts and
+# boundary-aware only for the raw disk image. This rejects actual retained
+# credential values without treating digits inside an unrelated kernel address
+# as password material.
+secret=112
+secret+=358
+secret_run="$tmp/secret-run"
+mkdir -- "$secret_run"
+secret_overlay="$secret_run/overlay.qcow2"
+secret_prefix="$secret_run/chunk-prefix"
+truncate -s 67108861 -- "$secret_prefix"
+cat -- "$secret_prefix" > "$secret_overlay"
+printf 'a%sbgeneric-kernel-address' "$secret" >> "$secret_overlay"
+truncate -s 134217728 -- "$secret_overlay"
+rm -f -- "$secret_prefix"
+exec 8< <(printf '%s\n' "$secret")
+set +e
+bash "$SCRIPT_DIR/scan-secret-artifacts.sh" \
+    "$secret_run" "$secret_overlay" 8 >/dev/null
+secret_scan_status=$?
+set -e
+exec 8<&-
+[[ $secret_scan_status -eq 1 ]] ||
+    vm_die 'secret scan treated an embedded disk-image numeral as a credential'
+
+printf 'prefix%suffix\n' "$secret" > "$secret_run/ordinary.log"
+exec 8< <(printf '%s\n' "$secret")
+if ! bash "$SCRIPT_DIR/scan-secret-artifacts.sh" \
+    "$secret_run" "$secret_overlay" 8 >/dev/null; then
+    exec 8<&-
+    vm_die 'secret scan missed exact bytes in an ordinary retained artifact'
+fi
+exec 8<&-
+rm -f -- "$secret_run/ordinary.log"
+
+printf 'credential=%s\n' "$secret" > "$secret_overlay"
+exec 8< <(printf '%s\n' "$secret")
+if ! bash "$SCRIPT_DIR/scan-secret-artifacts.sh" \
+    "$secret_run" "$secret_overlay" 8 >/dev/null; then
+    exec 8<&-
+    vm_die 'secret scan missed a delimited credential in the disk image'
+fi
+exec 8<&-
+unset secret
 
 # Canonical path alone is insufficient when a package manager atomically
 # replaces an executable. Device/inode pinning must reject that replacement,
@@ -439,5 +537,194 @@ done
 (( strict_first < pin_first && pin_first < install_first && install_first < recheck_first && \
    recheck_first < strict_last && strict_last < archive_line )) ||
     vm_die 'guest sources must be validated, pinned, copied, rechecked, then archived'
+
+# Runner command dispatch must preserve the `env` basename. This matters on
+# NixOS where command resolution may end at the coreutils multicall binary.
+grep -F '"$runner_bin/env" -i' "$adapter" >/dev/null ||
+    vm_die 'adapter runner environment no longer preserves env argv[0] dispatch'
+! grep -F 'env_executable=' "$adapter" >/dev/null ||
+    vm_die 'adapter runner regressed to physical coreutils env invocation'
+
+# The interactive lane must query the exact executable instead of assuming the
+# Make-selected headless QEMU contains GTK. Its host fallback and stale display
+# recovery remain deliberately narrow and cannot affect automated lanes.
+gui="$repo_root/scripts/vm/scripts/run-gui.sh"
+for required in \
+    '"$executable" -display help' \
+    'qemu_candidates+=(/usr/bin/qemu-system-x86_64)' \
+    '-display "$display_backend"' \
+    'timeout --signal=TERM --kill-after=2s 20s "$qemu"' \
+    '124|137)' \
+    '! -L "$XDG_RUNTIME_DIR/wayland-0"' \
+    '"$(vm_stat_uid "$XDG_RUNTIME_DIR/wayland-0")" == "$(id -u)"'
+do
+    grep -F -- "$required" "$gui" >/dev/null ||
+        vm_die "GUI QEMU/display fallback guard is missing: $required"
+done
+
+guest_lifecycle="$repo_root/scripts/vm/guest/lifecycle"
+for required in \
+    'duration_ms=4000' \
+    "printf '\\033[2J\\033[H'" \
+    '--fps 30 --seed 42 --clear-first' \
+    '--fps 10 --seed 42 --no-color' \
+    'Bootart exited. Guest userspace boot continued.' \
+    'BOOTART_VM_GUI_PASSWORD_PROMPT_V1' \
+    'BOOTART_VM_GUI_PASSWORD_PASS_V1' \
+    'test_passphrase_hint=112' \
+    'test_passphrase_hint="${test_passphrase_hint}358"' \
+    'Enter test passphrase $test_passphrase_hint (attempt $attempt of 3)' \
+    'unset test_passphrase_hint' \
+    '--password-broker native' \
+    '/usr/sbin/cryptsetup open --type luks2 --key-file -'
+do
+    grep -F -- "$required" "$guest_lifecycle" >/dev/null ||
+        vm_die "GUI lifecycle clear/animation guard is missing: $required"
+done
+
+# The encrypted preview may mutate only regular files below its validated run
+# directory. The host creates LUKS bytes in a regular file, converts those
+# bytes to qcow2, and leaves all mapping/open operations inside the guest.
+password_gui="$repo_root/scripts/vm/scripts/run-gui-password.sh"
+for required in \
+    'raw="$run_dir/.encrypted-drive.raw"' \
+    'drive="$run_dir/encrypted-drive.qcow2"' \
+    '"$cryptsetup" luksFormat --batch-mode --type luks2' \
+    '"$qemu_img" convert -f raw -O qcow2 "$raw" "$drive"' \
+    'file=$drive,format=qcow2,if=none,id=encrypted' \
+    'virtio-blk-pci,drive=encrypted' \
+    'test_passphrase=112358' \
+    'type 112358 when Bootart asks' \
+    'unset test_passphrase'
+do
+    grep -F -- "$required" "$password_gui" >/dev/null ||
+        vm_die "encrypted GUI regular-file/manual-input guard is missing: $required"
+done
+! grep -F -- 'input-send-event' "$password_gui" >/dev/null ||
+    vm_die 'interactive encrypted GUI must not auto-type the passphrase'
+for forbidden in \
+    '"$cryptsetup" open' \
+    'lose''tup ' \
+    'qemu-nbd ' \
+    '/dev/''loop' \
+    '/dev/''nbd' \
+    ' mou''nt '
+do
+    ! grep -F -- "$forbidden" "$password_gui" >/dev/null ||
+        vm_die "encrypted GUI contains a forbidden host-device operation: $forbidden"
+done
+
+password_preparer="$repo_root/scripts/vm/scripts/prepare-password-smoke.sh"
+for required in \
+    '/boot/modloop-virt' \
+    'dm-mod.ko' \
+    'encrypted-keys.ko' \
+    'dm-crypt.ko' \
+    'password-initramfs-overlay'
+do
+    grep -F -- "$required" "$password_preparer" >/dev/null ||
+        vm_die "password initramfs preparation guard is missing: $required"
+done
+
+# Normal Ubuntu provisioning must not treat an arbitrary successful QEMU exit
+# as an installer oracle. The subsequent stock proof is disk/firmware only,
+# routes keyboard input to tty0, and retains no plaintext passphrase evidence.
+ubuntu_template="$repo_root/scripts/vm/ubuntu-26.04-autoinstall.user-data.in"
+ubuntu_provisioner="$repo_root/scripts/vm/scripts/provision-ubuntu-26.04.sh"
+ubuntu_stock="$repo_root/scripts/vm/scripts/verify-ubuntu-26.04-base.sh"
+ubuntu_stock_policy="$repo_root/scripts/vm/scripts/check-stock-installed-command.sh"
+for required in \
+    'GRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=tty0\"' \
+    '/target/var/cache/bootart-kernel-update' \
+    '/run/bootart-kernel-seed/kernel-packages/SHA256SUMS' \
+    'shut''down: power''off'
+do
+    grep -F -- "$required" "$ubuntu_template" >/dev/null ||
+        vm_die "Ubuntu autoinstall console/power guard is missing: $required"
+done
+for required in \
+    "install_finish_count=\"\$(grep -a -Fc 'finish: subiquity/Install/install: '" \
+    "late_finish_count=\"\$(grep -a -Fc 'finish: subiquity/Late/run_user_supplied: '" \
+    'target_actual_bytes >= 1073741824' \
+    'for retained_evidence in "$serial_log" "$args_file" "$run_dir/provision-qemu.policy.sha256"' \
+    'vm_validate_kernel_package_lock "$package_lock"' \
+    'kernel_package_lock_sha256=' \
+    'kernel_package_set_sha256=' \
+    'kernel-packages/SHA256SUMS=$kernel_package_manifest' \
+    'ovmf_vars_sha256='
+do
+    grep -F -- "$required" "$ubuntu_provisioner" >/dev/null ||
+        vm_die "Ubuntu provision completion guard is missing: $required"
+done
+for required in \
+    'for key in 0 0 0 0 0 0 ret' \
+    'for key in 1 1 2 3 5 8 ret' \
+    "! grep -a -F -q 'bootart-vm login:'" \
+    "wait_for_log 'Please enter passphrase for disk crypt-root:'" \
+    '-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0' \
+    "printf -v secret_pattern '%s%s' 112 358" \
+    'lsinitrd --unpack "$image"' \
+    "guest_remove='r''m'" \
+    '/etc /var/lib /var/log /boot "$work"' \
+    'boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"' \
+    'BOOTART_VM_PACKAGE|\${binary:Package}|\${Version}' \
+    'BOOTART_VM_SECRET_PATH|%s' \
+    'BOOTART_VM_KERNEL_CACHE_PASS_V1' \
+    'kernel_package_lock_sha256=' \
+    'kernel_package_set_sha256=' \
+    'for retained_evidence in "$serial_log" "$args_file"' \
+    "-nic none" \
+    "-vga std"
+do
+    grep -F -- "$required" "$ubuntu_stock" >/dev/null ||
+        vm_die "stock Ubuntu proof guard is missing: $required"
+done
+for required in \
+    '-nic none' \
+    '-boot c,strict=on' \
+    'sealed base may be reachable only through the private overlay backing file' \
+    '(^|,)hostfwd=|(^|,)guestfwd=|^-virtfs$|^-fsdev$|^virtio-9p([,-]|$)|^vhost-user-fs([,-]|$)|^usb-host([,-]|$)'
+do
+    grep -F -- "$required" "$ubuntu_stock_policy" >/dev/null ||
+        vm_die "stock Ubuntu QEMU policy guard is missing: $required"
+done
+
+kernel_runner="$repo_root/scripts/vm/runners/dracut-systemd/kernel-update.sh"
+for required in \
+    '-graft-points /bootart="$bootart"' \
+    '-nic' \
+    'none' \
+    '--install $package_cache/linux-main-modules-zfs-7.1.0-5-generic_7.1.0-5.5_amd64.deb' \
+    'new_kernel=7.1.0-5-generic' \
+    '/usr/bin/cmp /mnt/bootart-transport/bootart usr/bin/bootart' \
+    'test \"\$(uname -r)\" = $new_kernel' \
+    'BOOTART_VM_KERNEL_UPDATE_REBOOT_HASH_V1'
+do
+    grep -F -- "$required" "$kernel_runner" >/dev/null ||
+        vm_die "kernel-update runner guard is missing: $required"
+done
+[[ "$(grep -Fc '/bootart=' "$kernel_runner")" == 1 ]] ||
+    vm_die 'kernel-update product transport must contain exactly one Bootart file'
+! grep -F -- '-nic user' "$kernel_runner" >/dev/null ||
+    vm_die 'kernel-update proof runner must not expose guest networking'
+
+# Guarded cleanup must be able to remove the intentionally non-writable private
+# runner command namespace without weakening validation before deletion.
+cleanup_repo="$tmp/cleanup-repo"
+cleanup_vm="$cleanup_repo/target/vm"
+cleanup_run="$cleanup_vm/runs/run.ABCDEFGHIJ"
+mkdir -p -- "$cleanup_vm/cache" "$cleanup_run/runner-bin"
+chmod 0700 -- "$cleanup_repo" "$cleanup_repo/target" "$cleanup_vm" \
+    "$cleanup_vm/cache" "$cleanup_vm/runs" "$cleanup_run"
+vm_state_sentinel_text "$cleanup_repo" "$cleanup_vm" > "$cleanup_vm/.bootart-vm-state"
+chmod 0600 -- "$cleanup_vm/.bootart-vm-state"
+vm_run_sentinel_text "$cleanup_vm" "$cleanup_run" > "$cleanup_run/.bootart-vm-run"
+chmod 0600 -- "$cleanup_run/.bootart-vm-run"
+ln -s -- "$(command -v true)" "$cleanup_run/runner-bin/true"
+chmod 0500 -- "$cleanup_run/runner-bin"
+bash "$repo_root/scripts/vm/scripts/cleanup-runs.sh" \
+    "$cleanup_repo" "$cleanup_vm" >/dev/null
+[[ ! -e "$cleanup_run" ]] ||
+    vm_die 'guarded cleanup retained a mode-0500 runner command namespace'
 
 printf 'bootart-vm: resource lock/limit fixtures PASS (no network, runner, product, or QEMU)\n'
