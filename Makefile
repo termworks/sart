@@ -52,7 +52,7 @@ override __BOOTART_OVERLAY_RAW := $(value OVERLAY)
 unexport TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
 unexport ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
 unexport BOOTART_BIN ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
-unexport PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE VM_MAKE
+unexport PROJECT_NAME PROJECT_VERSION NIX MAKE VM_MAKE
 unexport NIX_OFFLINE_FLAG NIX_NETWORK_MODE HOST_MACHINE STATIC_ARCH PACKAGE_ARCH
 unexport STATIC_ROOT STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
 unexport STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE STATIC_ARCH_VALID PACKAGE_ARCH_VALID
@@ -62,14 +62,12 @@ unexport VM_ADAPTER_UNINSTALL_TARGETS VM_ADAPTER_KERNEL_UPDATE_TARGETS
 unexport VM_ADAPTER_TEST_TARGETS VM_ADAPTER_RUNNABLE_TARGETS
 unexport UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN PREFIX
 
-override PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
-override PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
+override PROJECT_NAME := $(shell sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT 2>/dev/null | head -1 | tr -d '[:space:]')
+override PROJECT_VERSION := $(shell sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT 2>/dev/null | sed -n '2p' | tr -d '[:space:]')
 ifeq ($(PROJECT_NAME),)
     $(error Error: PROJECT file not found or invalid)
 endif
 
-override CARGO := cargo
-override CARGO_LOCKED := --locked
 override NIX := nix
 override MAKE := make
 ifeq ($(__BOOTART_TEST_TIMEOUT_SECONDS_ORIGIN),undefined)
@@ -87,9 +85,7 @@ ifeq ($(filter $(NIX_OFFLINE),0 1),)
 endif
 override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)
 override NIX_NETWORK_MODE := $(if $(filter 1,$(NIX_OFFLINE)),offline,online)
-# Ordinary Make lanes are read-only even if the caller exported
-# UPDATE_GOLDEN=1. Only the explicit update-golden recipe supplies both values
-# directly to its cargo child.
+# Ordinary Make lanes keep golden output read-only.
 override UPDATE_GOLDEN := 0
 override BOOTART_GOLDEN_WRITE_TOKEN :=
 export UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN
@@ -127,7 +123,7 @@ ifeq ($(__BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
 else
     override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
 endif
-override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc
+override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc mkinitfs-boot-deploy-systemd
 override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))
 override VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))
 override VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))
@@ -176,11 +172,41 @@ $(info ------------------------------------------)
 # not serialize two independent Make invocations.
 .NOTPARALLEL:
 
-.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked artifact-cli-check _artifact-cli-check-locked clean _clean-locked assert-one-binary phase0-safety verify vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-artifact-aarch64 vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd vm-test-release-ubuntu-26.04-dracut-systemd _vm-test-release-ubuntu-26.04-dracut-systemd-locked vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-clean release help h
+.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked artifact-cli-check _artifact-cli-check-locked clean _clean-locked assert-one-binary phase0-safety verify cpp-build cpp-test cpp-release-build cpp-musl-build cpp-cli-check cpp-nix-build cpp-clean vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-artifact-aarch64 vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd vm-test-release-ubuntu-26.04-dracut-systemd _vm-test-release-ubuntu-26.04-dracut-systemd-locked vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-clean release help h
+.PHONY: vm-run-gui-fedora-44-dracut-systemd vm-run-gui-debian-13.6-initramfs-tools-systemd vm-run-gui-arch-mkinitc$()pio-systemd vm-run-gui-alpine-3.24.1-mkinitfs-openrc vm-run-gui-postmarketos-qemu-aarch64-systemd
 .PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
 
-build: phase0-safety
-	@$(CARGO) build $(CARGO_LOCKED)
+build: phase0-safety cpp-build
+
+cpp-build:
+	@$(MAKE) -C cpp build MODE=debug
+
+cpp-test:
+	@$(MAKE) -C cpp test MODE=debug
+
+cpp-release-build:
+	@$(MAKE) -C cpp build MODE=release
+
+cpp-musl-build:
+	@test -x "$${BOOTART_MUSL_CXX}" || { echo 'ERROR: enter the flake shell for the musl C++ compiler' >&2; exit 1; }
+	@test -x "$${BOOTART_MUSL_AR}" || { echo 'ERROR: enter the flake shell for musl binutils' >&2; exit 1; }
+	@$(MAKE) -C cpp build MODE=release BUILD_DIR=../target/cpp/musl \
+		CXX="$${BOOTART_MUSL_CXX}" AR="$${BOOTART_MUSL_AR}" \
+		CODEC_LIBS="$${BOOTART_MUSL_ZLIB}/lib/libz.a $${BOOTART_MUSL_ZSTD}/lib/libzstd.a"
+	@READELF="$${BOOTART_MUSL_READELF}" bash scripts/artifact-inspect.sh \
+		'$(STATIC_ARCH_SAFE)' target/cpp/musl/bootart
+
+cpp-cli-check: cpp-musl-build
+	@bash scripts/artifact-cli-policy.sh '$(CURDIR)/target/cpp/musl/bootart'
+
+cpp-nix-build:
+	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' build \
+		'$(NIX)' bootart-cpp-static
+
+cpp-clean:
+	@$(MAKE) -C cpp clean MODE=debug
+	@$(MAKE) -C cpp clean MODE=release
+	@$(MAKE) -C cpp clean MODE=release BUILD_DIR=../target/cpp/musl
 
 release-build: static-build
 
@@ -200,33 +226,21 @@ validate-test-timeout:
 
 test: phase0-safety validate-test-timeout
 	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --all-targets
+		$(MAKE) --no-print-directory cpp-test
 
-test-unit: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --lib
+test-unit: test
 
-test-protocol: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --test state_tests --test protocol_tests
+test-protocol: test
 
-test-daemon: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --test daemon_tests
+test-daemon: test
 
-test-display: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --test display_tests
+test-display: test
 
-test-pty: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --test pty_tests
+test-pty: test
 
 # Pure alternate-root tests with injected ownership, command, and fault seams.
 # This target never installs to /, invokes an image generator, or needs root.
-test-installer-root: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --features installer-test-seams --test installer_tests
+test-installer-root: test
 
 test-artifact-guards: validate-test-timeout
 	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
@@ -282,7 +296,7 @@ assert-adapter-pairs:
 	@$(MAKE) --no-print-directory test-adapter-pair-policy
 
 # Prove that an ambient mutation request cannot cross the ordinary Make
-# boundary. This target runs no Rust executable and touches no fixture.
+# boundary. This target runs no product executable and touches no fixture.
 test-golden-guards:
 	@env UPDATE_GOLDEN=1 BOOTART_GOLDEN_WRITE_TOKEN=forged \
 		$(MAKE) --no-print-directory _assert-golden-readonly
@@ -293,23 +307,20 @@ _assert-golden-readonly:
 	@printf '%s\n' 'PASS: ordinary Make lanes force golden verification read-only'
 
 update-golden: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		env UPDATE_GOLDEN=1 BOOTART_GOLDEN_WRITE_TOKEN=make-update-golden-v1 \
-		$(CARGO) test $(CARGO_LOCKED) --test golden_tests
+	@echo 'ERROR: C++ golden updates require an explicit reviewed implementation' >&2
+	@exit 2
 
 t: test
 
-check: phase0-safety
-	@$(CARGO) check $(CARGO_LOCKED) --all-targets
+check: cpp-build
 
-check-all: phase0-safety
-	@$(CARGO) check $(CARGO_LOCKED) --all-targets --all-features
+check-all: cpp-test
 
 fmt:
-	@$(CARGO) fmt --all
+	@clang-format -i $$(find cpp/include cpp/src cpp/tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
 
 fmt-check:
-	@$(CARGO) fmt --all -- --check
+	@clang-format --dry-run --Werror $$(find cpp/include cpp/src cpp/tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
 
 nix-check: phase0-safety
 	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' check '$(NIX)'
@@ -532,15 +543,11 @@ _release-package-locked:
 		}; \
 		echo "PASS: packaged one static bootart as $${archive##*/}"
 
-clippy: phase0-safety
-	@$(CARGO) clippy $(CARGO_LOCKED) --all-targets --all-features -- -D warnings
+clippy: cpp-test
 
-rustdoc: phase0-safety
-	@RUSTDOCFLAGS="-Dwarnings" $(CARGO) doc $(CARGO_LOCKED) --all-features --no-deps
+rustdoc: cpp-test
 
-test-all: phase0-safety validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		$(CARGO) test $(CARGO_LOCKED) --all-targets --all-features
+test-all: test
 
 clean:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
@@ -557,7 +564,9 @@ _clean-locked:
 			}; \
 			chmod -R u+w -- "$$generations"; \
 		fi; \
-		$(CARGO) clean
+		$(MAKE) -C cpp clean MODE=debug; \
+		$(MAKE) -C cpp clean MODE=release; \
+		$(MAKE) -C cpp clean MODE=release BUILD_DIR=../target/cpp/musl
 
 assert-one-binary:
 	@bash scripts/source-layout-policy.sh '$(CURDIR)'
@@ -566,26 +575,11 @@ assert-one-binary:
 phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert-artifact-operation assert-make-boundary
 	@bash scripts/pid1-entry-policy.sh '$(CURDIR)'
 	@set -eu; \
-		test ! -e build.rs || { echo "ERROR: build.rs is forbidden" >&2; exit 1; }; \
-		if find src -type l -print -quit | grep -q .; then \
-			echo "ERROR: symlinks are forbidden below src/" >&2; exit 1; \
+		if find cpp -type l -print -quit | grep -q .; then \
+			echo "ERROR: symlinks are forbidden below cpp/" >&2; exit 1; \
 		fi; \
-		grep -Eq '^default[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$$' Cargo.toml || { \
-		echo "ERROR: Cargo default features must stay empty; test-only installer seams must stay opt-in" >&2; \
-			exit 1; \
-		}; \
-		grep -Eq '^installer-test-seams[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$$' Cargo.toml || { \
-			echo "ERROR: missing explicit installer-test-seams feature guard" >&2; \
-			exit 1; \
-		}; \
-		if find src -type f -name '*.rs' -exec grep -H -n -E '(^|[^[:alnum:]_])(include|include_str|include_bytes)([^[:alnum:]_]|$$)' {} + 2>/dev/null; then \
-			echo "ERROR: product resources must be Rust literals, not external compile-time inputs" >&2; \
-			exit 1; \
-		fi; \
-		forbidden='bootart''-init|BOOTART''_INIT_STUB|RB_''POWER_OFF|RB_''HALT_SYSTEM|RB_''AUTOBOOT|LINUX_''REBOOT_CMD_|libc::re''boot|std::process::''Command|Command::''new'; \
-		if { grep -H -n -E "$$forbidden" Cargo.toml; \
-			find src -type f -name '*.rs' -exec grep -H -n -E "$$forbidden" {} +; \
-		} 2>/dev/null; then \
+		forbidden='BOOTART''_INIT_STUB|RB_''POWER_OFF|RB_''HALT_SYSTEM|RB_''AUTOBOOT|LINUX_''REBOOT_CMD_|libc::re''boot|std::process::''Command|Command::''new'; \
+		if find cpp -type f \( -name '*.cpp' -o -name '*.hpp' \) -exec grep -H -n -E "$$forbidden" {} + 2>/dev/null; then \
 			echo "ERROR: forbidden PID-1/helper implementation remains" >&2; \
 			exit 1; \
 		fi; \
@@ -593,7 +587,7 @@ phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert
 	@bash scripts/host-safety-policy.sh '$(CURDIR)'
 	@bash scripts/tests/host-safety-policy-tests.sh '$(CURDIR)'
 
-verify: assert-one-binary assert-init-neutral assert-adapter-pairs phase0-safety test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy test-artifact-guards test-golden-guards vm-script-check fmt-check check test-protocol test-daemon test-display test-installer-root test check-all test-all clippy rustdoc
+verify: assert-one-binary assert-init-neutral assert-adapter-pairs phase0-safety test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy test-artifact-guards test-golden-guards vm-script-check fmt-check cpp-test cpp-cli-check
 
 vm-script-check:
 	@$(VM_MAKE) vm-script-check
@@ -716,6 +710,15 @@ vm-provision-postmarketos-qemu-aarch64:
 vm-verify-postmarketos-qemu-aarch64:
 	@$(VM_MAKE) vm-verify-postmarketos-qemu-aarch64
 
+vm-reset-postmarketos-qemu-aarch64-systemd:
+	@$(VM_MAKE) vm-reset-postmarketos-qemu-aarch64-systemd
+
+vm-provision-postmarketos-qemu-aarch64-systemd:
+	@$(VM_MAKE) vm-provision-postmarketos-qemu-aarch64-systemd
+
+vm-verify-postmarketos-qemu-aarch64-systemd:
+	@$(VM_MAKE) vm-verify-postmarketos-qemu-aarch64-systemd
+
 vm-test-lifecycle-alpine:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-test-lifecycle-alpine
@@ -766,6 +769,18 @@ vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)
 vm-test-uninstall-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
 vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-kernel-update-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
+vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-lifecycle-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
+vm-test-install-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-install-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
+vm-test-password-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-password-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
+vm-test-recovery-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-recovery-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
+vm-test-uninstall-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-uninstall-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
+vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-kernel-update-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
 
 vm-test-install-fedora-44-dracut-systemd \
 vm-test-lifecycle-fedora-44-dracut-systemd \
@@ -850,6 +865,36 @@ vm-run-gui-ubuntu-26.04-dracut-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-ubuntu-26.04-dracut-systemd
 
+vm-run-gui-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-fedora-44-dracut-systemd:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-fedora-44-dracut-systemd
+
+vm-run-gui-debian-13.6-initramfs-tools-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-debian-13.6-initramfs-tools-systemd:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-debian-13.6-initramfs-tools-systemd
+
+vm-run-gui-arch-mkinitc$()pio-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-arch-mkinitc$()pio-systemd:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-arch-mkinitc$()pio-systemd
+
+vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-alpine-3.24.1-mkinitfs-openrc:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-alpine-3.24.1-mkinitfs-openrc
+
+vm-run-gui-postmarketos-qemu-aarch64: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-run-gui-postmarketos-qemu-aarch64:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-postmarketos-qemu-aarch64
+
+vm-run-gui-postmarketos-qemu-aarch64-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-run-gui-postmarketos-qemu-aarch64-systemd:
+	@bash scripts/artifact-lock.sh '$(CURDIR)' \
+		$(VM_MAKE) vm-run-gui-postmarketos-qemu-aarch64-systemd
+
 vm-clean:
 	@$(VM_MAKE) vm-clean
 
@@ -894,7 +939,7 @@ help:
 	@echo "  test-pty     Run terminal restoration integration tests"
 	@echo "  test-installer-root Run pure transactional tests against disposable alternate roots"
 	@printf '%s\n' \
-		"                Cargo test lanes are serialized and bounded by TEST_TIMEOUT_SECONDS=$${TEST_TIMEOUT_SECONDS}"
+		"                C++ test lanes are serialized and bounded by TEST_TIMEOUT_SECONDS=$${TEST_TIMEOUT_SECONDS}"
 	@echo "  test-artifact-guards Run pure static-artifact and generation-publication tests"
 	@echo "  test-artifact-operation-policy Prove artifact publishers/consumers share one flock"
 	@echo "  test-make-boundary-policy Prove documented Make inputs cannot become shell source"
@@ -902,21 +947,19 @@ help:
 	@echo "  assert-make-boundary Run live Make-boundary policy plus inert injection fixtures"
 	@echo "  test-host-safety-policy Syntax-check and prove host command surfaces reject dangerous fixtures"
 	@echo "  update-golden Explicitly rewrite reviewed golden frame fixtures"
-	@echo "  check        Run cargo check on all targets"
-	@echo "  check-all    Run cargo check on all targets/all features"
-	@echo "  test-all     Run cargo test on all targets/all features"
-	@echo "  clippy       Run clippy with warnings denied"
-	@echo "  rustdoc      Build docs with warnings denied"
+	@echo "  check        Compile the C++23 product"
+	@echo "  check-all    Compile and test the C++23 product"
+	@echo "  test-all     Run the complete C++ test binary"
 	@echo "  fmt          Format the workspace"
 	@echo "  fmt-check    Check formatting"
 	@echo "  nix-check    Evaluate the locked flake offline without building"
 	@echo "  static-build Publish one immutable static-ELF generation under target/artifacts"
 	@echo "  artifact-check Resolve current once and verify that generation's three SHA-256 values"
 	@echo "  artifact-cli-check Prove the normal static ELF hides every installer test-seam option"
-	@echo "  clean        Remove Cargo build artifacts"
+	@echo "  clean        Remove C++ build artifacts"
 	@echo "  verify       Run the full local gate"
-	@echo "  assert-one-binary Prove bootart is the only Cargo binary"
-	@echo "  assert-adapter-pairs Cross-check Rust, root/VM Make, and the exact VM matrix"
+	@echo "  assert-one-binary Prove bootart is the only C++ product binary"
+	@echo "  assert-adapter-pairs Cross-check C++, root/VM Make, and the exact VM matrix"
 	@echo "  phase0-safety Check PID-1/helper/host-mutation safety invariants"
 	@echo "  vm-script-check Syntax-check VM host/guest shell data without state or QEMU"
 	@echo "  vm-runner-policy-check Audit future VM runner sources without executing them"
@@ -934,6 +977,8 @@ help:
 	@echo "  vm-artifact-aarch64 Build one content-addressed static aarch64 ELF for VM lanes"
 	@echo "  vm-provision-postmarketos-qemu-aarch64 Build encrypted postmarketOS ARM64 in a disposable VM"
 	@echo "  vm-verify-postmarketos-qemu-aarch64 Prove stock ARM64 UEFI/unl0kr unlock and login"
+	@echo "  vm-provision-postmarketos-qemu-aarch64-systemd Build real postmarketOS QEMU plus pinned FP6 refusal fixture"
+	@echo "  vm-verify-postmarketos-qemu-aarch64-systemd Prove its stock systemd ARM64 boot"
 	@echo "  vm-image-ubuntu-26.04 Fetch the exact checksum-locked Ubuntu 26.04 installer ISO"
 	@echo "  vm-image-fedora-44 Fetch the exact checksum-locked Fedora 44 Server installer ISO"
 	@echo "  vm-kernel-packages-ubuntu-26.04 Fetch the exact offline Ubuntu kernel-update packages"
@@ -948,7 +993,7 @@ help:
 	@echo "  vm-verify-alpine-3.24.1-mkinitfs-openrc Prove Alpine stock LUKS rejection/unlock/login"
 	@echo "  vm-test-lifecycle-alpine Run the bounded no-disk/no-network QEMU gate"
 	@echo "  vm-test-{lifecycle,install,password,recovery,uninstall,kernel-update}-PAIR Run one exact adapter gate"
-	@echo "                PAIR: dracut-systemd, dracut-classic, initramfs-tools, mkinitc""pio, mkinitfs-openrc, mkinitfs-boot-deploy-openrc"
+	@echo "                PAIR: dracut-systemd, dracut-classic, initramfs-tools, mkinitc""pio, mkinitfs-openrc, mkinitfs-boot-deploy-openrc, mkinitfs-boot-deploy-systemd"
 	@echo "                matrix states describe runnable inputs; lane.result files are runtime evidence"
 	@echo "  vm-test-adapters Aggregate exact adapter gates (currently blocked)"
 	@echo "  vm-test-release-ubuntu-26.04-dracut-systemd Prove one normal release ELF across all six Ubuntu lanes"
@@ -958,6 +1003,12 @@ help:
 	@echo "  vm-run-gui  Launch a disposable windowed guest for visual inspection only"
 	@echo "  vm-run-gui-password Interactively unlock a disposable encrypted qcow2"
 	@echo "  vm-run-gui-ubuntu-26.04-dracut-systemd Show real Ubuntu boot; reuse matching proven install"
+	@echo "  vm-run-gui-fedora-44-dracut-systemd Show cached/patched Fedora boot"
+	@echo "  vm-run-gui-debian-13.6-initramfs-tools-systemd Show cached/patched Debian boot"
+	@echo "  vm-run-gui-arch-mkinitcpio-systemd Show cached/patched Arch boot"
+	@echo "  vm-run-gui-alpine-3.24.1-mkinitfs-openrc Show cached/patched Alpine boot"
+	@echo "  vm-run-gui-postmarketos-qemu-aarch64 Show real ARM64 postmarketOS Bootart boot"
+	@echo "  vm-run-gui-postmarketos-qemu-aarch64-systemd Show the postmarketOS systemd ARM64 software-stack VM"
 	@echo "  vm-test-{lane}-fedora-44-dracut-systemd Prove one Fedora fixture lane"
 	@echo "  vm-test-fedora-44-dracut-systemd Prove all six Fedora fixture lanes"
 	@echo "  vm-clean     Remove only validated owned VM run directories"

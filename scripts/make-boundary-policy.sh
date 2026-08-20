@@ -110,14 +110,12 @@ for guard in \
     'ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)' \
     'ifneq ($(words $(CURDIR)),1)' \
     "ifneq (\$(findstring ',\$(CURDIR)),)" \
-    'override CARGO := cargo' \
-    'override CARGO_LOCKED := --locked' \
     'override NIX := nix' \
     'override MAKE := make' \
     'override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)' \
     'override NIX_NETWORK_MODE := $(if $(filter 1,$(NIX_OFFLINE)),offline,online)' \
     'override VM_MAKE := $(MAKE) -C scripts/vm' \
-    'override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc' \
+    'override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc mkinitfs-boot-deploy-systemd' \
     'override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))' \
     'override VM_ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(VM_ADAPTER_PAIRS))' \
     'override VM_ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(VM_ADAPTER_PAIRS))' \
@@ -142,7 +140,7 @@ do
 done
 
 root_structural=(
-    SHELL CURDIR PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE
+    SHELL CURDIR PROJECT_NAME PROJECT_VERSION NIX MAKE
     NIX_OFFLINE_FLAG NIX_NETWORK_MODE VM_MAKE
     VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGETS
     VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_RECOVERY_TARGETS
@@ -157,7 +155,7 @@ for variable in "${root_structural[@]}"; do
 done
 
 root_pre_shell_fixed=(
-    PROJECT_NAME PROJECT_VERSION CARGO CARGO_LOCKED NIX MAKE VM_MAKE
+    PROJECT_NAME PROJECT_VERSION NIX MAKE VM_MAKE
     NIX_OFFLINE_FLAG NIX_NETWORK_MODE HOST_MACHINE STATIC_ARCH PACKAGE_ARCH STATIC_ROOT
     STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
     STATIC_ARCH_SAFE PACKAGE_ARCH_SAFE STATIC_ARCH_VALID PACKAGE_ARCH_VALID
@@ -181,7 +179,7 @@ for guard in \
     'override VM_SOURCE_ROOT := $(REPO_ROOT)/scripts/vm' \
     'override LOCK_FILE := $(VM_SOURCE_ROOT)/images.lock' \
     'override MATRIX_FILE := $(VM_SOURCE_ROOT)/adapter-matrix.lock' \
-    'override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc' \
+    'override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc mkinitfs-boot-deploy-systemd' \
     'override ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(ADAPTER_PAIRS))' \
     'override ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(ADAPTER_PAIRS))' \
     'override ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(ADAPTER_PAIRS))' \
@@ -292,8 +290,20 @@ for guard in \
     'vm-test-recovery-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
     'vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
     'vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-install-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-password-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-recovery-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-uninstall-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
     'vm-test-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
     'vm-run-gui-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-debian-13.6-initramfs-tools-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-arch-mkinitc$()pio-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'vm-run-gui-postmarketos-qemu-aarch64: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-run-gui-postmarketos-qemu-aarch64-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
     'override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)' \
     'override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)' \
     'override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)' \
@@ -308,7 +318,7 @@ for variable in TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID \
 do
     require_assignment_count "$root_make" "$variable" 2
 done
-require_assignment_count "$root_make" BOOTART_BIN 13
+require_assignment_count "$root_make" BOOTART_BIN 25
 for variable in ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY; do
     require_assignment_count "$root_make" "$variable" 1
 done

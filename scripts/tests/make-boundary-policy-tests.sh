@@ -200,7 +200,7 @@ if make -i --no-print-directory -C "$repo_root/scripts/vm" MAKEFLAGS= help >/dev
 fi
 
 # Nix path flakes copy their complete input directory before flake-level source
-# filtering. Prove the reviewed wrapper presents only the bounded Rust/package
+# filtering. Prove the reviewed wrapper presents only the bounded C++ package
 # closure, preserves currently untracked source files, forwards offline mode,
 # and removes its private target/ snapshot on every successful invocation.
 nix_wrapper=$repo_root/scripts/nix-source-command.sh
@@ -225,7 +225,7 @@ for argument in "$@"; do
 done
 [[ -n "$source_root" && -d "$source_root" && ! -L "$source_root" ]]
 [[ ! -e "$source_root/target" && ! -e "$source_root/.git" ]]
-[[ -f "$source_root/src/install/dracut_systemd.rs" ]]
+[[ -f "$source_root/cpp/src/installer_backend_dracut.cpp" ]]
 find "$source_root" -xdev -type l -print -quit | grep -q . && exit 91
 printf '%s\0' "$@" >"$BOOTART_NIX_TEST_CAPTURE"
 if [[ ${1-} == build ]]; then

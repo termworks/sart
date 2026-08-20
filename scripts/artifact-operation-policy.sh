@@ -187,9 +187,7 @@ do
 done
 
 require_first_recipe_command compile '$(MAKE) --no-print-directory clean'
-recipe_line_number _clean-locked '$(CARGO) clean' >/dev/null
-[[ "$(grep -Fc '$(CARGO) clean' "$makefile")" -eq 1 ]] ||
-    die 'Cargo cleanup must occur only in _clean-locked'
+recipe_line_number _clean-locked '$(MAKE) -C cpp clean MODE=debug; \' >/dev/null
 
 package_line=$(recipe_line_number _release-readiness-locked \
     '$(MAKE) --no-print-directory _release-package-locked')

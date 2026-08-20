@@ -19,8 +19,8 @@ repo_root=${1%/}
 root_make=$repo_root/Makefile
 vm_make=$repo_root/scripts/vm/Makefile
 matrix=$repo_root/scripts/vm/adapter-matrix.lock
-rust_registry=$repo_root/src/install/mod.rs
-for source in "$root_make" "$vm_make" "$matrix" "$rust_registry"; do
+cpp_registry=$repo_root/cpp/src/adapter.cpp
+for source in "$root_make" "$vm_make" "$matrix" "$cpp_registry"; do
     [[ -f "$source" && ! -L "$source" ]] || die "required source is missing or symlinked: $source"
 done
 
@@ -89,33 +89,31 @@ matrix_pairs=$(awk -F '|' '
 [[ "$root_pairs" == "$matrix_pairs" ]] ||
     die 'Make and adapter-matrix pair sets differ'
 
-registry=$(
-    sed -n '/^pub const ADAPTER_PAIRS:/,/^];/p' "$rust_registry"
-)
-[[ -n "$registry" ]] || die 'Rust exact-pair registry was not found'
-row_count=$(grep -Ec '^[[:space:]]*AdapterPairMetadata[[:space:]]*\{' <<< "$registry")
-rust_pairs=$(sed -n 's/^[[:space:]]*proof_slug: "\([a-z0-9][a-z0-9-]*\)",[[:space:]]*$/\1/p' \
+registry=$(sed -n '/^[[:space:]]*const std::array pairs{/,/^[[:space:]]*};/p' "$cpp_registry")
+[[ -n "$registry" ]] || die 'C++ exact-pair registry was not found'
+row_count=$(grep -Ec '^[[:space:]]*AdapterPairMetadata\{"' <<< "$registry")
+cpp_pairs=$(sed -n 's/^[[:space:]]*AdapterPairMetadata{"\([a-z0-9][a-z0-9-]*\)".*/\1/p' \
     <<< "$registry" | sort -u)
-rust_pair_count=$(wc -l <<< "$rust_pairs" | tr -d '[:space:]')
-[[ "$row_count" =~ ^[1-9][0-9]*$ && "$rust_pair_count" == "$row_count" ]] ||
-    die 'every Rust exact-pair row must own one unique proof_slug'
-[[ "$root_pairs" == "$rust_pairs" ]] ||
-    die 'Make/matrix and Rust exact-pair sets differ'
+cpp_pair_count=$(wc -l <<< "$cpp_pairs" | tr -d '[:space:]')
+[[ "$row_count" =~ ^[1-9][0-9]*$ && "$cpp_pair_count" == "$row_count" ]] ||
+    die 'every C++ exact-pair row must own one unique proof slug'
+[[ "$root_pairs" == "$cpp_pairs" ]] ||
+    die 'Make/matrix and C++ exact-pair sets differ'
 
-for pair in $rust_pairs; do
+for pair in $cpp_pairs; do
     for lane in lifecycle install password recovery uninstall kernel-update; do
-        count=$(grep -Fc "\"make vm-test-$lane-$pair\"," <<< "$registry" || true)
+        count=$(grep -Fc "\"make vm-test-$lane-$pair\"" "$cpp_registry" || true)
         [[ "$count" -eq 1 ]] ||
-            die "Rust pair $pair must own exactly one $lane proof gate"
+            die "C++ pair $pair must own exactly one $lane proof gate"
     done
-    total=$(grep -Ec "make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-$pair\"" <<< "$registry" || true)
-    [[ "$total" -eq 6 ]] || die "Rust pair $pair has an unexpected proof-gate set"
+    total=$(grep -Ec "make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-$pair\"" "$cpp_registry" || true)
+    [[ "$total" -eq 6 ]] || die "C++ pair $pair has an unexpected proof-gate set"
 done
 
-proof_gate_count=$(grep -Ec '"make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-[a-z0-9-]+",' \
-    <<< "$registry" || true)
+proof_gate_count=$(grep -Ec '"make vm-test-(lifecycle|install|password|recovery|uninstall|kernel-update)-[a-z0-9-]+"' \
+    "$cpp_registry" || true)
 [[ "$proof_gate_count" -eq $((row_count * 6)) ]] ||
-    die 'Rust registry contains an unowned or malformed proof gate'
+    die 'C++ registry contains an unowned or malformed proof gate'
 
 printf 'bootart-adapter-pairs: PASS: %s exact pairs share one 6-lane proof surface\n' \
     "$row_count"

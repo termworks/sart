@@ -1,5 +1,5 @@
 {
-  description = "bootart Rust and isolated QEMU development shell";
+  description = "bootart static-musl C++23 package and QEMU development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
@@ -13,7 +13,9 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
-        cargoPackage = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package;
+        projectLines = lib.filter (line: line != "") (lib.splitString "\n" (builtins.readFile ./PROJECT));
+        projectName = builtins.elemAt projectLines 0;
+        projectVersion = builtins.elemAt projectLines 1;
         supportedLinux = builtins.elem system [
           "x86_64-linux"
           "aarch64-linux"
@@ -28,59 +30,48 @@
         bootartSource = lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
-            ./Cargo.toml
-            ./Cargo.lock
+            ./PROJECT
             ./LICENSE
             ./README.md
-            ./src
-            # Cargo validates this explicitly declared, feature-gated test
-            # target while reading the manifest. It is never selected for the
-            # release build and cannot add a release payload.
-            ./tests/installer_tests.rs
+            ./Makefile
+            ./cpp
+            ./scripts/artifact-inspect.sh
           ];
         };
         mkBootartStatic =
           {
-            rustPlatform,
+            packageSet,
             buildPackages,
             expectedArchitecture,
             readelfProgram,
           }:
-          rustPlatform.buildRustPackage {
-            pname = cargoPackage.name;
-            version = cargoPackage.version;
+          packageSet.stdenv.mkDerivation {
+            pname = projectName;
+            version = projectVersion;
             src = bootartSource;
-
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [
-              "--no-default-features"
-              "--bin"
-              "bootart"
-            ];
-
-            # The repository's Make verification runs tests before packaging.
-            # pkgsStatic is a cross package set even when CPU architectures
-            # match, so executing test binaries here is toolchain-dependent.
-            doCheck = false;
             strictDeps = true;
-
-            # rustc otherwise embeds Nix's per-build temporary directory in
-            # panic/source-location strings from vendored crates.
-            preBuild = ''
-              export RUSTFLAGS="''${RUSTFLAGS:-} --remap-path-prefix=$NIX_BUILD_TOP=/build"
-            '';
-
+            dontConfigure = true;
             nativeBuildInputs = with buildPackages; [
               bash
               binutils
               coreutils
-              findutils
-              gnugrep
-              gnused
+              gnumake
             ];
-
-            # Inspect the final, stripped Nix output. Never use ldd here: ldd
-            # can execute an untrusted ELF on some systems.
+            buildInputs = with packageSet; [
+              zlib
+              zstd.dev
+              zstd.out
+            ];
+            buildPhase = ''
+              runHook preBuild
+              make cpp-release-build
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 target/cpp/release/bootart "$out/bin/bootart"
+              runHook postInstall
+            '';
             postFixup = ''
               READELF=${readelfProgram} \
                 ${buildPackages.bash}/bin/bash \
@@ -88,9 +79,8 @@
                 ${lib.escapeShellArg expectedArchitecture} \
                 "$out/bin/bootart" "$out/bin"
             '';
-
             meta = {
-              description = "Self-contained Plymouth-style text boot splash";
+              description = "Self-contained text boot splash";
               license = lib.licenses.mit;
               mainProgram = "bootart";
               platforms = [
@@ -100,10 +90,10 @@
             };
           };
         bootartStatic = mkBootartStatic {
-          rustPlatform = pkgs.pkgsStatic.rustPlatform;
+          packageSet = pkgs.pkgsStatic;
           buildPackages = pkgs.buildPackages;
           expectedArchitecture = expectedElfArch;
-          readelfProgram = "${pkgs.buildPackages.binutils}/bin/readelf";
+          readelfProgram = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
         };
         aarch64StaticPackageSet = pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
         bootartStaticAarch64 =
@@ -111,33 +101,30 @@
             bootartStatic
           else
             mkBootartStatic {
-              rustPlatform = aarch64StaticPackageSet.rustPlatform;
+              packageSet = aarch64StaticPackageSet;
               buildPackages = aarch64StaticPackageSet.buildPackages;
               expectedArchitecture = "aarch64";
-              readelfProgram = "${pkgs.buildPackages.binutils}/bin/readelf";
+              readelfProgram = "${aarch64StaticPackageSet.stdenv.cc.bintools.bintools}/bin/${aarch64StaticPackageSet.stdenv.cc.targetPrefix}readelf";
             };
       in
       (lib.optionalAttrs supportedLinux {
         packages.bootart-static = bootartStatic;
         packages.bootart-static-aarch64 = bootartStaticAarch64;
+        packages.bootart-cpp-static = bootartStatic;
         packages.default = bootartStatic;
         checks.bootart-static = bootartStatic;
+        checks.bootart-cpp-static = bootartStatic;
       })
       // {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
-            rustc
-            cargo
-            rustfmt
-            clippy
-            rust-analyzer
             gnumake
             pkg-config
             clang
             mold
             git-cliff
-
-            # Artifact and initramfs inspection.
+            pkgs.pkgsStatic.stdenv.cc
+            pkgs.pkgsStatic.stdenv.cc.bintools.bintools
             binutils
             diffutils
             file
@@ -145,13 +132,12 @@
             gzip
             xz
             zstd
+            zlib
+            pkgs.pkgsStatic.zlib
+            pkgs.pkgsStatic.zstd.dev
+            pkgs.pkgsStatic.zstd.out
             xorriso
             squashfsTools
-
-            # Disposable VM harness.
-            # Headless, host-CPU QEMU has no GTK makeCWrapper. The PID that
-            # Make records therefore becomes the exact validated QEMU ELF
-            # instead of immediately execing an unpinned hidden executable.
             qemu_test
             qemu-utils
             cryptsetup
@@ -168,6 +154,11 @@
           ];
 
           BOOTART_VM_ROOT = "${toString ./.}/target/vm";
+          BOOTART_MUSL_CXX = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}g++";
+          BOOTART_MUSL_AR = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}ar";
+          BOOTART_MUSL_READELF = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
+          BOOTART_MUSL_ZLIB = "${pkgs.pkgsStatic.zlib}";
+          BOOTART_MUSL_ZSTD = "${pkgs.pkgsStatic.zstd.out}";
         };
       }
     );

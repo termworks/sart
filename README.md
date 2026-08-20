@@ -8,24 +8,28 @@ It is never PID 1.
 ## Supported installation
 
 The production installer selects a backend from observed mechanisms, not from
-`/etc/os-release`. The currently implemented live mutation backend requires:
+`/etc/os-release`. The ordinary release ELF has production live-root installers
+for the exact proven mechanism pairs: dracut + systemd, initramfs-tools +
+systemd, mkinitcpio + systemd, mkinitfs + OpenRC, and mkinitfs + boot-deploy
+with either OpenRC or systemd. Architecture is matched to the ELF (`x86_64` or
+`aarch64`). Each pair has stricter requirements for its initramfs, boot
+loader/image layout, encrypted-root prompt path, ownership, capacity, and init
+supervisor.
 
-- x86_64 Linux;
-- UEFI and a supported GRUB command/layout contract;
-- a separate writable `/boot`;
-- LUKS2 encrypted root;
-- systemd-based dracut initramfs;
-- systemd as the real-root supervisor.
-
-That mechanism combination is proven on a normally installed Ubuntu 26.04 LTS
-disposable QEMU VM. Fedora 44 is the current second-fixture proof in progress;
-it does not become a support claim until all six exact VM lanes pass. Physical
-hardware has **not** been tested. Other initramfs and real-root backend pairs
-remain experimental and production mutation refuses them.
+Bounded proof lanes cover fresh disposable Ubuntu, Fedora, Debian, Arch,
+Alpine, and postmarketOS QEMU guests. The current matrix keeps runnable lanes
+`READY_UNPROVEN` until they pass against the exact C++ artifact. The
+postmarketOS ARM64 fixture uses the real software stack plus reviewed Fairphone
+6 deviceinfo/DTB data and a disposable active-slot raw boot partition. QEMU is
+the destructive proof environment, not a product restriction: the same
+ordinary release binary is installable on a physical machine when live
+discovery proves the exact contract. Unsupported or ambiguous combinations are
+refused before mutation.
 
 ## One-file product
 
-The shipped product is one static ELF named `bootart`. The daemon, control
+The implementation is C++23 and the shipped product is one musl-static ELF
+named `bootart`. The daemon, control
 client, installer, recovery, uninstaller, default art, systemd units, dracut
 module, and configuration templates are all compiled into it. Installation
 materializes embedded strings and the exact running ELF; no helper executable,
@@ -35,7 +39,8 @@ The installed Linux system still supplies the kernel, systemd, dracut,
 cryptsetup, and GRUB. The installer validates their exact approved paths and
 properties and never downloads packages.
 
-Build the immutable ELF through Make:
+`flake.nix` supplies the pinned compiler, musl toolchain, zlib, and zstd.
+Build the immutable dependency-free runtime ELF through Make:
 
 ```sh
 make static-build
@@ -78,6 +83,17 @@ Installation is transactional:
 4. generate and boundedly inspect a separate candidate initramfs;
 5. create/update the known-good GRUB entry;
 6. atomically activate the candidate and commit the manifest.
+
+On a supported Android-style mkinitfs + boot-deploy machine, Bootart also
+disables boot-deploy's unjournaled automatic flash, validates the complete
+Android v2 image, snapshots the exact active raw partition, durably activates
+and read-back verifies it, and records the partition identity in the manifest.
+Kernel-package refresh, crash recovery, rollback, and uninstall use that same
+transaction. Rollback and explicit recovery restore and verify the journaled
+full-partition preimage. Uninstall instead generates, inspects, durably
+activates, and reboots a Bootart-free image for the current kernel; restoring
+an install-time image after a kernel update could mismatch the kernel and its
+root-filesystem modules.
 
 An incomplete transaction is handled by explicit `install recover`. Uninstall
 builds and inspects a Bootart-free candidate before removing owned integration.

@@ -37,6 +37,7 @@ case "$operation:$package" in
     check:) ;;
     build:bootart-static) ;;
     build:bootart-static-aarch64) ;;
+    build:bootart-cpp-static) ;;
     *) die 'operation/package pair is not reviewed' ;;
 esac
 
@@ -70,19 +71,18 @@ copy_file() {
 }
 
 for relative in \
-    flake.nix flake.lock Cargo.toml Cargo.lock LICENSE README.md \
-    tests/installer_tests.rs scripts/artifact-inspect.sh
+    flake.nix flake.lock PROJECT LICENSE README.md Makefile scripts/artifact-inspect.sh
 do
     copy_file "$relative"
 done
 
-[[ -d "$repo_root/src" && ! -L "$repo_root/src" ]] ||
-    die 'src must be a regular directory'
-if unsafe_link=$(find "$repo_root/src" -xdev -type l -print -quit) &&
+[[ -d "$repo_root/cpp" && ! -L "$repo_root/cpp" ]] ||
+    die 'cpp must be a regular directory'
+if unsafe_link=$(find "$repo_root/cpp" -xdev -type l -print -quit) &&
    [[ -n "$unsafe_link" ]]; then
-    die "source snapshot refuses symlink: $unsafe_link"
+    die "C++ source snapshot refuses symlink: $unsafe_link"
 fi
-cp -R -- "$repo_root/src" "$stage/src"
+cp -R -- "$repo_root/cpp" "$stage/cpp"
 
 if unsafe_link=$(find "$stage" -xdev -type l -print -quit) &&
    [[ -n "$unsafe_link" ]]; then

@@ -41,7 +41,7 @@ expect_rejected() {
 bash "$policy" "$repo_root" >/dev/null
 
 fresh_makefile
-sed -i '0,/[$](MAKE) --no-print-directory clean/s//$(CARGO) clean/' "$tmp/Makefile"
+sed -i '0,/[$](MAKE) --no-print-directory clean/s//@true/' "$tmp/Makefile"
 expect_rejected compile-bypasses-lock
 
 fresh_makefile
