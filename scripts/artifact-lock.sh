@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Serialize every operation that can publish, consume, or remove static
-# artifacts. The lock file lives outside target/, so `cargo clean` cannot
-# unlink the lock while an operation still owns its open file description.
+# artifacts. The lock file is stored at the repository root.
 
 set -Eeuo pipefail
 export LC_ALL=C

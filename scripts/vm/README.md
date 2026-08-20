@@ -4,7 +4,7 @@ Everything below `scripts/vm/` is test infrastructure. Nothing here is
 embedded in or shipped beside the `sart` product ELF. Generated state is
 kept below `target/vm/`; the harness must never be run with `sudo`.
 
-Use the root Makefile for product-consuming lanes. Do not invoke QEMU, Cargo,
+Use the root Makefile for product-consuming lanes. Do not invoke QEMU,
 or mutating helper scripts directly.
 
 ## Safety boundary
