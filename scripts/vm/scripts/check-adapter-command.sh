@@ -15,6 +15,7 @@ base_image=$5
 overlay=$6
 arm64_firmware_code=${7:-}
 seed="$run_dir/seed.img"
+phone_boot="$run_dir/phone-boot.raw"
 policy_file="$run_dir/qemu.policy.sha256"
 serial_file="$run_dir/serial.log"
 serial_fifo="$run_dir/serial.fifo"
@@ -44,6 +45,22 @@ vm_assert_owned "$overlay"
 [[ -f "$seed" && ! -L "$seed" ]] || vm_die 'private read-only seed is missing'
 vm_assert_owned "$seed"
 [[ "$(vm_stat_mode "$seed")" == 400 ]] || vm_die 'private seed must have mode 0400'
+phone_boot_present=0
+if [[ -e "$phone_boot" || -L "$phone_boot" ]]; then
+    [[ -f "$phone_boot" && ! -L "$phone_boot" ]] ||
+        vm_die 'disposable phone boot disk must be a regular file'
+    vm_assert_owned "$phone_boot"
+    [[ "$(vm_stat_mode "$phone_boot")" == 600 &&
+       "$(vm_stat_size "$phone_boot")" == 134217728 ]] ||
+        vm_die 'disposable phone boot disk has the wrong mode or exact size'
+    phone_layout="$(sgdisk --print "$phone_boot")" ||
+        vm_die 'cannot inspect disposable phone GPT'
+    [[ "$(grep -Ec '^ *1 +2048 +198655 +96[.]0 MiB +8300 +boot_a$' <<< "$phone_layout")" == 1 &&
+       "$(grep -Ec '^ *[0-9]+ +[0-9]+ +[0-9]+ ' <<< "$phone_layout")" == 1 ]] ||
+        vm_die 'disposable phone GPT is not the exact single boot_a partition fixture'
+    unset phone_layout
+    phone_boot_present=1
+fi
 [[ -f "$serial_file" && ! -L "$serial_file" ]] ||
     vm_die 'bounded serial destination must be a precreated regular file'
 vm_assert_owned "$serial_file"
@@ -115,6 +132,8 @@ expect_value() {
 
 overlay_drive="file=$overlay,format=qcow2,if=virtio,cache=none,aio=threads"
 seed_drive="file=$seed,format=raw,if=virtio,readonly=on,cache=none,aio=threads"
+phone_boot_drive="file=$phone_boot,format=raw,if=virtio,cache=none,aio=threads"
+phone_boot_throttled_drive="$phone_boot_drive,bps_wr=4194304"
 transport_root_port='pcie-root-port,id=transport-root-port,bus=pcie.0,slot=2,chassis=2'
 transport_device='virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port'
 if [[ "$guest_arch" == aarch64 ]]; then
@@ -188,6 +207,10 @@ for ((i = 1; i < ${#argv[@]}; )); do
                         mark_seen drive-overlay
                     elif [[ "$value" == "$seed_drive" ]]; then
                         mark_seen drive-seed
+                    elif [[ $phone_boot_present -eq 1 &&
+                            ( "$value" == "$phone_boot_drive" ||
+                              "$value" == "$phone_boot_throttled_drive" ) ]]; then
+                        mark_seen drive-phone-boot
                     elif [[ $derived_uefi -eq 1 && "$guest_arch" == x86_64 &&
                             "$value" == if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE*.fd ]]; then
                         firmware_code=${value##*file=}
@@ -237,11 +260,15 @@ for option in "${required[@]}"; do
     [[ ${seen["$option"]:-0} -eq 1 ]] || vm_die "$option must occur exactly once"
 done
 expected_drives=2
+[[ $phone_boot_present -eq 1 ]] && expected_drives=$((expected_drives + 1))
 [[ $derived_uefi -eq 1 ]] && expected_drives=4
+[[ $derived_uefi -eq 1 && $phone_boot_present -eq 1 ]] && expected_drives=5
 [[ ${seen[-drive]:-0} -eq $expected_drives ]] ||
     vm_die "-drive must occur exactly $expected_drives times"
 [[ ${seen[drive-overlay]:-0} -eq 1 ]] || vm_die 'private root overlay drive must occur exactly once'
 [[ ${seen[drive-seed]:-0} -eq 1 ]] || vm_die 'read-only private seed drive must occur exactly once'
+[[ ${seen[drive-phone-boot]:-0} -eq $phone_boot_present ]] ||
+    vm_die 'disposable phone boot drive occurrence differs from its private file'
 if [[ $derived -eq 1 ]]; then
     expected_devices=4
     [[ ${seen[device-video]:-0} -eq 0 || ${seen[device-video]:-0} -eq 1 ]] ||
@@ -276,4 +303,4 @@ mv -T -- "$policy_temporary" "$policy_file" || {
     rm -f -- "$policy_temporary"
     vm_die 'cannot atomically publish QEMU policy digest'
 }
-printf 'bootart-vm: adapter QEMU command policy PASS\n'
+printf 'sart-vm: adapter QEMU command policy PASS\n'

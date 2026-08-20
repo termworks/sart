@@ -55,14 +55,14 @@ review_one() (
     tar -tzf "$pmaports" -- "$apkbuild" >/dev/null ||
         vm_die "pmaports lacks reviewed APKBUILD: $package_path"
     tar -xOzf "$pmaports" -- "$apkbuild" |
-        grep -Fqx "pkgver=$version" ||
+        grep -Fx "pkgver=$version" >/dev/null ||
         vm_die "pmaports package version drifted: $component"
     source_template=${source_url//"$version"/'$pkgver'}
     tar -xOzf "$pmaports" -- "$apkbuild" |
-        grep -Fq -- "$source_template" ||
+        grep -F -- "$source_template" >/dev/null ||
         vm_die "pmaports source URL drifted: $component"
     tar -xOzf "$pmaports" -- "$apkbuild" |
-        grep -Fq -- "$source_sha512  $component-$version.tar.gz" ||
+        grep -F -- "$source_sha512  $component-$version.tar.gz" >/dev/null ||
         vm_die "pmaports source digest drifted: $component"
 
     destination="$review_dir/$component-$version.tar.gz"
@@ -108,3 +108,64 @@ review_one boot-deploy 0.23.0 main/boot-deploy \
 review_one buffybox 3.5.1 main/unl0kr \
     'https://gitlab.postmarketos.org/postmarketOS/buffybox/-/archive/3.5.1/buffybox-3.5.1.tar.gz' \
     4558edf2d4f43adcee1d12da359ad5c4b9a3f65eadabc354b945c46a08f51f06e0323e0825953b2f9cf08aeefef3161e32dc359a1733cdc2f033c2d60c2c9b50
+
+# The bootable qemu-aarch64 image is a real postmarketOS software-stack test,
+# not a Fairphone hardware model. Audit the exact pinned Fairphone device
+# contract separately so a generic QEMU deviceinfo can never again be presented
+# as proof that candidate generation is side-effect confined.
+fairphone_deviceinfo="$pmaports_root/device/testing/device-fairphone-fp6/deviceinfo"
+fairphone_deviceinfo_sha="$(tar -xOzf "$pmaports" -- "$fairphone_deviceinfo" |
+    sha256sum | awk '{ print $1 }')"
+[[ "$fairphone_deviceinfo_sha" == \
+   2e9d77cba8c60cd6a58576cdcc24355d8c9d8a2a750bb3ce0399b79591a7eac9 ]] ||
+    vm_die 'pinned Fairphone 6 deviceinfo bytes drifted'
+for exact_setting in \
+    'deviceinfo_codename="fairphone-fp6"' \
+    'deviceinfo_generate_bootimg="true"' \
+    'deviceinfo_flash_method="fastboot"' \
+    'deviceinfo_flash_kernel_on_update="true"' \
+    'deviceinfo_header_version="2"'
+do
+    tar -xOzf "$pmaports" -- "$fairphone_deviceinfo" |
+        grep -Fx -- "$exact_setting" >/dev/null ||
+        vm_die "Fairphone 6 deviceinfo lost reviewed setting: $exact_setting"
+done
+
+mkinitfs_bootdeploy="$review_dir/postmarketos-mkinitfs-2.11.1.tar.gz"
+bootdeploy="$review_dir/boot-deploy-0.23.0.tar.gz"
+[[ -f "$mkinitfs_bootdeploy" && -f "$bootdeploy" ]] ||
+    vm_die 'reviewed mkinitfs/boot-deploy sources are absent'
+tar -xOzf "$mkinitfs_bootdeploy" \
+    postmarketos-mkinitfs-2.11.1/internal/bootdeploy/bootdeploy.go |
+    grep -F -- '"-o", b.outDir,' >/dev/null ||
+    vm_die 'mkinitfs no longer passes the candidate output directory to boot-deploy as reviewed'
+tar -xOzf "$mkinitfs_bootdeploy" \
+    postmarketos-mkinitfs-2.11.1/cmd/mkinitfs/main.go |
+    grep -F -- 'bootDeploy(workDir, *outDir, devinfo)' >/dev/null ||
+    vm_die 'mkinitfs no longer passes generated archives through the reviewed boot-deploy boundary'
+tar -xOzf "$bootdeploy" boot-deploy-0.23.0/boot-deploy-functions.sh |
+    grep -F -- '. /usr/share/misc/source_deviceinfo' >/dev/null ||
+    vm_die 'boot-deploy no longer uses the reviewed deviceinfo override helper'
+deviceinfo_helper="$pmaports_root/main/devicepkg-utils/source_deviceinfo"
+deviceinfo_sources="$(tar -xOzf "$pmaports" -- "$deviceinfo_helper" |
+    grep -F 'SOURCE_DEVICEINFO_ROOT' | grep -F 'deviceinfo" ] && .' || true)"
+[[ "$deviceinfo_sources" == *'/usr/share/deviceinfo/deviceinfo" ] && .'* &&
+   "$deviceinfo_sources" == *'/etc/deviceinfo" ] && .'* ]] ||
+    vm_die 'deviceinfo helper lost its reviewed vendor-plus-override contract'
+vendor_line="$(printf '%s\n' "$deviceinfo_sources" | grep -n -F '/usr/share/deviceinfo/deviceinfo' | cut -d: -f1)"
+override_line="$(printf '%s\n' "$deviceinfo_sources" | grep -n -F '/etc/deviceinfo' | cut -d: -f1)"
+[[ "$vendor_line" =~ ^[0-9]+$ && "$override_line" =~ ^[0-9]+$ &&
+   "$vendor_line" -lt "$override_line" ]] ||
+    vm_die 'deviceinfo helper no longer applies /etc/deviceinfo after the vendor contract'
+unset deviceinfo_helper deviceinfo_sources vendor_line override_line
+tar -xOzf "$bootdeploy" boot-deploy-0.23.0/boot-deploy-functions.sh |
+    grep -F -- '[ "${deviceinfo_flash_kernel_on_update}" = "true" ] || return 0' >/dev/null ||
+    vm_die 'boot-deploy raw-flash deviceinfo gate drifted'
+raw_writer='d''d'
+tar -xOzf "$bootdeploy" boot-deploy-0.23.0/boot-deploy-functions.sh |
+    grep -F -- "$raw_writer if=\"\$work_dir/\$bootimg_filename\" of=\"\$boot_partition\" bs=1M" >/dev/null ||
+    vm_die 'boot-deploy raw boot-partition write contract drifted'
+unset raw_writer
+printf 'SART_VM_FAIRPHONE_FP6_RAW_FLASH_CONTRACT_V1|%s|%s\n' \
+    "$pmaports_commit" "$fairphone_deviceinfo_sha"
+printf 'SART_VM_POSTMARKETOS_PERSISTENT_NO_FLASH_GUARD_CONTRACT_V1|mkinitfs-2.11.1|boot-deploy-0.23.0\n'

@@ -79,4 +79,4 @@ expected="$(awk -F '|' -v fixture="$fixture" \
     '$0 !~ /^#/ && NF && $10 == fixture { print $6 }' "$package_lock" | sort)"
 [[ "$actual" == "$expected" ]] ||
     vm_die 'kernel package cache contains an unexpected or missing file'
-printf 'bootart-vm: verified offline kernel package set for %s: %s\n' "$fixture" "$package_dir"
+printf 'sart-vm: verified offline kernel package set for %s: %s\n' "$fixture" "$package_dir"

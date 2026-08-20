@@ -5,7 +5,7 @@ set -euo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -13,7 +13,7 @@ usage() {
     cat >&2 <<'EOF'
 usage: artifact-gate.sh EXPECTED_ARCH RELEASE_DIR REAL_ROOT_ELF INITRAMFS_ELF
 
-RELEASE_DIR must contain the sole product payload as ./bootart. The other two
+RELEASE_DIR must contain the sole product payload as ./sart. The other two
 arguments are independently staged or extracted copies of that same ELF.
 EOF
     exit 2
@@ -28,7 +28,7 @@ initramfs_elf=$4
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 sha256_tool=${SHA256SUM:-sha256sum}
 cmp_tool=${CMP:-cmp}
-release_elf=$release_dir/bootart
+release_elf=$release_dir/sart
 
 case "$sha256_tool" in
     */*) [[ -x "$sha256_tool" ]] || die "SHA256SUM is not executable: $sha256_tool" ;;
@@ -66,13 +66,13 @@ real_root_sha=$(digest "$real_root_elf")
 initramfs_sha=$(digest "$initramfs_elf")
 
 [[ "$release_sha" == "$real_root_sha" ]] || \
-    die "real-root bootart SHA-256 differs: release=$release_sha real-root=$real_root_sha"
+    die "real-root sart SHA-256 differs: release=$release_sha real-root=$real_root_sha"
 [[ "$release_sha" == "$initramfs_sha" ]] || \
-    die "initramfs bootart SHA-256 differs: release=$release_sha initramfs=$initramfs_sha"
+    die "initramfs sart SHA-256 differs: release=$release_sha initramfs=$initramfs_sha"
 
 "$cmp_tool" -s -- "$release_elf" "$real_root_elf" || \
-    die 'real-root bootart is not byte-for-byte equal to the release artifact'
+    die 'real-root sart is not byte-for-byte equal to the release artifact'
 "$cmp_tool" -s -- "$release_elf" "$initramfs_elf" || \
-    die 'initramfs bootart is not byte-for-byte equal to the release artifact'
+    die 'initramfs sart is not byte-for-byte equal to the release artifact'
 
-printf 'bootart-artifact: PASS: release/real-root/initramfs SHA-256 %s\n' "$release_sha"
+printf 'sart-artifact: PASS: release/real-root/initramfs SHA-256 %s\n' "$release_sha"

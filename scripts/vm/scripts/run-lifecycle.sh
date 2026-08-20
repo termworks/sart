@@ -9,19 +9,19 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
 [[ $# -eq 5 ]] || vm_die \
-    'usage: run-lifecycle.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID BOOTART_BIN'
+    'usage: run-lifecycle.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID SART_BIN'
 repo_root=$1
 vm_root=$2
 lock_file=$3
 image_id=$4
-bootart_bin=$5
+sart_bin=$5
 qemu="$(vm_resolve_qemu "${QEMU:-qemu-system-x86_64}")"
 qemu_identity="$(vm_executable_identity "$qemu")"
 QEMU=$qemu
 export QEMU
 timeout_seconds=${TIMEOUT_SECONDS:-90}
-pass_marker='BOOTART_VM_LIFECYCLE_PASS_V1'
-fail_marker='BOOTART_VM_LIFECYCLE_FAIL_V1'
+pass_marker='SART_VM_LIFECYCLE_PASS_V1'
+fail_marker='SART_VM_LIFECYCLE_FAIL_V1'
 
 [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ && "$timeout_seconds" -le 900 ]] || \
     vm_die 'TIMEOUT_SECONDS must be an integer from 1 through 900'
@@ -50,7 +50,7 @@ printf '%s  %s\n' "$sha" "$image" | sha256sum --check --status - || \
 vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"
 
 run_dir="$(vm_create_run "$vm_root")"
-printf 'bootart-vm: run artifacts: %s\n' "$run_dir"
+printf 'sart-vm: run artifacts: %s\n' "$run_dir"
 
 qemu_started=0
 run_destination_is_safe() {
@@ -88,7 +88,7 @@ trap 'exit 143' TERM
 bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" \
     bash "$SCRIPT_DIR/prepare-smoke.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$image" \
-    "$kernel_member" "$initrd_member" "$bootart_bin" >/dev/null 2>&1
+    "$kernel_member" "$initrd_member" "$sart_bin" >/dev/null 2>&1
 
 vm_validate_state "$repo_root" "$vm_root"
 vm_validate_run "$vm_root" "$run_dir"
@@ -203,4 +203,4 @@ vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 printf '%s  %s\n' "$sha" "$image" | sha256sum --check --status - || \
     vm_die "immutable cached base changed during VM run: $image"
 bash "$SCRIPT_DIR/check-lifecycle-oracle.sh" "$serial" "$pass_marker" "$fail_marker"
-printf 'bootart-vm: lifecycle smoke PASS; artifacts retained: %s\n' "$run_dir"
+printf 'sart-vm: lifecycle smoke PASS; artifacts retained: %s\n' "$run_dir"

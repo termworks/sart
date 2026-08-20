@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 # V3 records the concrete distribution fixture separately from the generic
 # mechanism pair, allowing more than one installed system to prove one backend.
-VM_LANE_STATUS_SCHEMA='BOOTART_VM_LANE_STATUS_V3'
+VM_LANE_STATUS_SCHEMA='SART_VM_LANE_STATUS_V3'
 
 vm_expected_oracle() {
     local pair=$1 lane=$2 fixture=$3 token lane_token
@@ -16,7 +16,7 @@ vm_expected_oracle() {
     token=${token//-/_}
     lane_token=${lane^^}
     lane_token=${lane_token//-/_}
-    printf 'BOOTART_VM_%s_%s_PASS_V1\n' "$token" "$lane_token"
+    printf 'SART_VM_%s_%s_PASS_V1\n' "$token" "$lane_token"
 }
 
 vm_default_fixture() {
@@ -28,25 +28,31 @@ vm_default_fixture() {
         mkinitc''pio) printf '%s\n' arch-mkinitc''pio-systemd ;;
         mkinitfs-openrc) printf '%s\n' alpine-mkinitfs-openrc ;;
         mkinitfs-boot-deploy-openrc) printf '%s\n' postmarketos-qemu-aarch64 ;;
+        mkinitfs-boot-deploy-systemd) printf '%s\n' postmarketos-qemu-aarch64-systemd ;;
         *) vm_die "adapter pair has no default fixture: $pair" ;;
     esac
 }
 
 vm_matrix_runner_path() {
-    local repo_root=$1 pair=$2 lane=$3
+    local repo_root=$1 pair=$2 lane=$3 runner_pair
     [[ "$repo_root" == /* && "$repo_root" != *$'\n'* && "$repo_root" != *$'\r'* ]] ||
         vm_die 'repository root for adapter runner must be an absolute single-line path'
     [[ "$pair" =~ ^[a-z0-9][a-z0-9-]+$ ]] || vm_die 'unsafe adapter runner pair'
     [[ "$lane" =~ ^(lifecycle|install|password|recovery|uninstall|kernel-update)$ ]] ||
         vm_die 'unsafe adapter runner lane'
-    printf '%s/scripts/vm/runners/%s/%s.sh\n' "$repo_root" "$pair" "$lane"
+    runner_pair=$pair
+    # mkinitfs+boot-deploy has one mechanism runner. The selected real-root
+    # adapter is discovered and asserted by the product inside the guest.
+    [[ "$pair" != mkinitfs-boot-deploy-systemd ]] ||
+        runner_pair=mkinitfs-boot-deploy-openrc
+    printf '%s/scripts/vm/runners/%s/%s.sh\n' "$repo_root" "$runner_pair" "$lane"
 }
 
 vm_require_missing_matrix_runner() {
     local repo_root=$1 pair=$2 lane=$3 runner_root pair_root runner
     runner_root="$repo_root/scripts/vm/runners"
-    pair_root="$runner_root/$pair"
     runner="$(vm_matrix_runner_path "$repo_root" "$pair" "$lane")"
+    pair_root=${runner%/*}
     if [[ -e "$runner_root" || -L "$runner_root" ]]; then
         [[ -d "$runner_root" && ! -L "$runner_root" ]] ||
             vm_die "blocked-unimplemented adapter runner root is not a real directory: $pair/$lane"
@@ -62,8 +68,8 @@ vm_require_missing_matrix_runner() {
 vm_require_ready_matrix_runner() {
     local repo_root=$1 pair=$2 lane=$3 policy=$4 runner_root pair_root runner directory mode
     runner_root="$repo_root/scripts/vm/runners"
-    pair_root="$runner_root/$pair"
     runner="$(vm_matrix_runner_path "$repo_root" "$pair" "$lane")"
+    pair_root=${runner%/*}
     for directory in \
         "$repo_root" "$repo_root/scripts" "$repo_root/scripts/vm" \
         "$runner_root" "$pair_root"
@@ -98,6 +104,7 @@ vm_validate_matrix() {
         [mkinitc''pio]=mkinitc''pio-busybox
         [mkinitfs-openrc]=mkinitfs-busybox
         [mkinitfs-boot-deploy-openrc]=mkinitfs-boot-deploy
+        [mkinitfs-boot-deploy-systemd]=mkinitfs-boot-deploy
     )
     local -A expected_real_root=(
         [dracut-systemd]=systemd
@@ -106,6 +113,7 @@ vm_validate_matrix() {
         [mkinitc''pio]=systemd
         [mkinitfs-openrc]=openrc
         [mkinitfs-boot-deploy-openrc]=openrc
+        [mkinitfs-boot-deploy-systemd]=systemd
     )
     local -A expected_arch=(
         [dracut-systemd]=x86_64
@@ -114,6 +122,7 @@ vm_validate_matrix() {
         [mkinitc''pio]=x86_64
         [mkinitfs-openrc]=x86_64
         [mkinitfs-boot-deploy-openrc]=aarch64
+        [mkinitfs-boot-deploy-systemd]=aarch64
     )
 
     [[ -f "$matrix_file" && ! -L "$matrix_file" ]] ||
@@ -140,6 +149,7 @@ vm_validate_matrix() {
                 expected_timeout=300
                 [[ "$pair" == dracut-systemd ]] && expected_timeout=1800
                 [[ "$pair" == initramfs-tools ]] && expected_timeout=600
+                [[ "$pair" == mkinitfs-boot-deploy-systemd ]] && expected_timeout=420
                 [[ "$timeout_seconds" == "$expected_timeout" ]] ||
                     vm_die "lifecycle timeout must be exactly $expected_timeout seconds for $pair"
                 ;;
@@ -258,7 +268,7 @@ vm_emit_lane_status() {
     [[ "$status" =~ ^(PASS|FAIL|READY_UNPROVEN|BLOCKED_UNVERIFIED|BLOCKED_UNIMPLEMENTED)$ ]] ||
         vm_die 'unsafe result status'
     [[ "$image_id" =~ ^[a-z0-9][a-z0-9._-]+$ ]] || vm_die 'unsafe result image id'
-    [[ "$oracle" =~ ^BOOTART_VM_[A-Z0-9_]+_PASS_V1$ ]] || vm_die 'unsafe result oracle'
+    [[ "$oracle" =~ ^SART_VM_[A-Z0-9_]+_PASS_V1$ ]] || vm_die 'unsafe result oracle'
     [[ "$reason" =~ ^[a-z0-9][a-z0-9-]*$ ]] || vm_die 'unsafe result reason'
     printf '%s|fixture=%s|pair=%s|lane=%s|status=%s|image=%s|oracle=%s|reason=%s\n' \
         "$VM_LANE_STATUS_SCHEMA" "$fixture" "$pair" "$lane" "$status" "$image_id" "$oracle" "$reason"

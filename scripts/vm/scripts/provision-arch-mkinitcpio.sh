@@ -86,7 +86,7 @@ for input in "$template" "$metadata"; do
     (( (8#$mode & 0022) == 0 )) || vm_die "writable Arch NoCloud source: $input"
 done
 template_sha="$(sha256sum "$template" | awk '{ print $1 }')"
-[[ "$(grep -Fxc "      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'" "$template")" == 1 ]] ||
+[[ "$(grep -Fxc "      sart_luks='__SART_VM_LUKS_PASSPHRASE__'" "$template")" == 1 ]] ||
     vm_die 'Arch NoCloud template must contain one exact LUKS marker'
 
 provisioned="$vm_root/cache/provisioned"
@@ -100,7 +100,7 @@ if [[ -e "$base" || -L "$base" || -e "$lineage" || -L "$lineage" ]]; then
        "$(vm_stat_mode "$base")" == 400 && "$(vm_stat_mode "$lineage")" == 400 ]] ||
         vm_die 'partial or unsafe Arch provisioned cache entry exists'
     vm_assert_owned "$base"; vm_assert_owned "$lineage"
-    [[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_ARCH_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_ARCH_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED &&
        "$(sed -n 's/^source_sha256=//p' "$lineage")" == "$source_sha" &&
        "$(sed -n 's/^kernel_package_lock_sha256=//p' "$lineage")" == "$package_lock_sha" &&
@@ -112,7 +112,7 @@ if [[ -e "$base" || -L "$base" || -e "$lineage" || -L "$lineage" ]]; then
     printf '%s  %s\n' "$base_sha" "$base" | sha256sum --check --status - ||
         vm_die 'cached Arch base differs from lineage'
     QEMU_IMG="$qemu_img" vm_assert_qcow2_virtual_size "$base" "$derived_virtual" "$derived_virtual" >/dev/null
-    printf 'bootart-vm: validated cached, stock-unverified Arch base: %s\n' "$base"
+    printf 'sart-vm: validated cached, stock-unverified Arch base: %s\n' "$base"
     exit 0
 fi
 
@@ -146,8 +146,8 @@ trap 'exit 143' TERM
 
 printf -v luks_passphrase '%s%s' 112 358
 while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'" ]]; then
-        printf "      bootart_luks='%s'\n" "$luks_passphrase"
+    if [[ "$line" == "      sart_luks='__SART_VM_LUKS_PASSPHRASE__'" ]]; then
+        printf "      sart_luks='%s'\n" "$luks_passphrase"
     else
         printf '%s\n' "$line"
     fi
@@ -195,7 +195,7 @@ bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
     "$serial_log" "$serial_overflow" < "$serial_fifo" &
 capture_pid=$!
 vm_assert_executable_identity "$qemu" "$qemu_identity" 'Arch provisioning QEMU'
-printf 'bootart-vm: installing encrypted Arch inside QEMU (timeout %ss)\n' "$provision_timeout"
+printf 'sart-vm: installing encrypted Arch inside QEMU (timeout %ss)\n' "$provision_timeout"
 set +e
 timeout --signal=TERM --kill-after=10s "${provision_timeout}s" "${qemu_args[@]}" &
 qemu_pid=$!
@@ -205,9 +205,9 @@ kill -TERM "$capture_pid" 2>/dev/null || true; wait "$capture_pid" 2>/dev/null |
 rm -f -- "$serial_fifo"
 [[ $qemu_status -eq 0 ]] || vm_die "Arch provisioning QEMU failed or timed out: status $qemu_status"
 [[ ! -e "$serial_overflow" ]] || vm_die 'Arch provisioning serial output exceeded its bound'
-[[ "$(grep -a -Fc BOOTART_VM_ARCH_PROVISION_PASS_V1 "$serial_log" || true)" == 1 ]] ||
+[[ "$(grep -a -Fc SART_VM_ARCH_PROVISION_PASS_V1 "$serial_log" || true)" == 1 ]] ||
     vm_die "Arch provisioning completion oracle is absent; inspect $serial_log"
-! grep -a -Fq BOOTART_VM_ARCH_PROVISION_FAIL_V1 "$serial_log" ||
+! grep -a -Fq SART_VM_ARCH_PROVISION_FAIL_V1 "$serial_log" ||
     vm_die "Arch provisioning reported failure; inspect $serial_log"
 
 rm -f -- "$user_data" "$meta_data" "$seed_iso" "$kernel_package_manifest" "$source_overlay"
@@ -230,7 +230,7 @@ base_sha="$(sha256sum "$target_disk" | awk '{ print $1 }')"
 serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 lineage_tmp="$run_dir/base.provisioned"
 printf '%s\n' \
-    'schema=BOOTART_ARCH_PROVISIONED_V1' 'status=PROVISIONED_UNVERIFIED' \
+    'schema=SART_ARCH_PROVISIONED_V1' 'status=PROVISIONED_UNVERIFIED' \
     "source_id=$source_id" "source_url=$source_url" "source_sha256=$source_sha" \
     "source_bytes=$source_bytes" "base_sha256=$base_sha" \
     "base_virtual_bytes=$derived_virtual" "qemu_sha256=$qemu_sha" \
@@ -238,10 +238,10 @@ printf '%s\n' \
     "kernel_package_lock_sha256=$package_lock_sha" \
     "kernel_package_set_sha256=$kernel_package_set_sha" \
     "template_sha256=$template_sha" \
-    'provision_oracle=BOOTART_VM_ARCH_PROVISION_PASS_V1' > "$lineage_tmp"
+    'provision_oracle=SART_VM_ARCH_PROVISION_PASS_V1' > "$lineage_tmp"
 chmod 0400 -- "$target_disk" "$lineage_tmp"
 ln -- "$target_disk" "$base" || vm_die 'refusing to replace Arch provisioned base'
 ln -- "$lineage_tmp" "$lineage" || { rm -f -- "$base"; vm_die 'refusing to replace Arch lineage'; }
 rm -f -- "$lineage_tmp"
 published=yes
-printf 'bootart-vm: sealed stock-unverified encrypted Arch base: %s\n' "$base"
+printf 'sart-vm: sealed stock-unverified encrypted Arch base: %s\n' "$base"

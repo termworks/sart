@@ -6,14 +6,14 @@ umask 077
 
 [[ $# -eq 9 ]] || exit 2
 action=$1; repo_root=$2; vm_root=$3; run_dir=$4; base_image=$5
-overlay=$6; bootart=$7; oracle=$8; fixture=$9
+overlay=$6; sart=$7; oracle=$8; fixture=$9
 [[ "$fixture" == arch-mkinitcpio-systemd ]] || exit 2
 [[ -n "$repo_root" && -n "$vm_root" && -n "$base_image" ]] || exit 2
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -58,7 +58,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112; expected_secret+=358
@@ -68,8 +68,8 @@ EOF
         guest_sudo='su''do'; guest_install='in''stall'; guest_mkdir='mk''dir'
         guest_mount='mou''nt'; guest_umount='umou''nt'; guest_reboot='re''boot'
         guest_poweroff='power''off'; guest_rm='r''m'; guest_sh='s''h'
-        guest_dev='/''dev'; guest_transport="$guest_dev/disk/by-label/BOOTART"
-        shell_prompt='[bootart@bootart-vm ~]$'
+        guest_dev='/''dev'; guest_transport="$guest_dev/disk/by-label/SART"
+        shell_prompt='[sart@sart-vm ~]$'
         guest_image=/boot/initramfs-linux.img
 
         count_log() {
@@ -212,14 +212,14 @@ EOF
         unlock_stock() {
             wait_stock_password_prompt; sleep 2; qmp_type_secret; qmp_key ret
         }
-        unlock_bootart() {
+        unlock_sart() {
             wait_password_box; sleep 7; qmp_type_secret; qmp_key ret
         }
         login_guest() {
             local wanted=$1 password_count prompt_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:'); prompt_count=$(count_log "$shell_prompt")
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             wait_count "$shell_prompt" "$((prompt_count + 1))"
@@ -227,9 +227,9 @@ EOF
         root_step() {
             local request=$1 marker=$2 marker_count suffix
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$marker" "$((marker_count + 1))"
@@ -237,30 +237,30 @@ EOF
 
         unlock_stock
         login_guest 1
-        root_step "$guest_sudo -n $guest_mkdir -p /mnt/bootart-transport" BOOTART_VM_INSTALL_MOUNT_DIR_V1
-        root_step "$guest_sudo -n $guest_mount -o ro $guest_transport /mnt/bootart-transport" BOOTART_VM_INSTALL_TRANSPORT_MOUNTED_V1
-        root_step "$guest_sudo -n /mnt/bootart-transport/bootart $guest_install plan" 'status: READY'
-        root_step "$guest_sudo -n /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed'
-        root_step "$guest_sudo -n /usr/bin/bootart $guest_install status" BOOTART_VM_INSTALL_STATUS_VERIFIED_V1
-        root_step "$guest_sudo -n /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: already-current'
-        root_step "$guest_sudo -n cmp /mnt/bootart-transport/bootart /usr/bin/bootart" BOOTART_VM_INSTALL_REAL_ROOT_HASH_V1
-        root_step "$guest_sudo -n $guest_sh -c '$guest_rm -r -f /var/tmp/bootart-initramfs-check; $guest_mkdir /var/tmp/bootart-initramfs-check; cd /var/tmp/bootart-initramfs-check; /usr/bin/lsinitcpio -x $guest_image; cmp /mnt/bootart-transport/bootart usr/bin/bootart; cmp /usr/lib/bootart/mkinitcpio-plymouth usr/bin/plymouth; $guest_rm -r -f /var/tmp/bootart-initramfs-check'" BOOTART_VM_INSTALL_INITRAMFS_HASH_V1
+        root_step "$guest_sudo -n $guest_mkdir -p /mnt/sart-transport" SART_VM_INSTALL_MOUNT_DIR_V1
+        root_step "$guest_sudo -n $guest_mount -o ro $guest_transport /mnt/sart-transport" SART_VM_INSTALL_TRANSPORT_MOUNTED_V1
+        root_step "$guest_sudo -n /mnt/sart-transport/sart $guest_install plan" 'status: READY'
+        root_step "$guest_sudo -n /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed'
+        root_step "$guest_sudo -n /usr/bin/sart $guest_install status" SART_VM_INSTALL_STATUS_VERIFIED_V1
+        root_step "$guest_sudo -n /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: already-current'
+        root_step "$guest_sudo -n cmp /mnt/sart-transport/sart /usr/bin/sart" SART_VM_INSTALL_REAL_ROOT_HASH_V1
+        root_step "$guest_sudo -n $guest_sh -c '$guest_rm -r -f /var/tmp/sart-initramfs-check; $guest_mkdir /var/tmp/sart-initramfs-check; cd /var/tmp/sart-initramfs-check; /usr/bin/lsinitcpio -x $guest_image; cmp /mnt/sart-transport/sart usr/bin/sart; cmp /usr/lib/sart/mkinitcpio-plymouth usr/bin/plymouth; $guest_rm -r -f /var/tmp/sart-initramfs-check'" SART_VM_INSTALL_INITRAMFS_HASH_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        root_step "$guest_sudo -n $guest_umount /mnt/bootart-transport" BOOTART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
+        root_step "$guest_sudo -n $guest_umount /mnt/sart-transport" SART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 3
 
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         send_serial "$guest_sudo -n $guest_reboot"
-        unlock_bootart
+        unlock_sart
         login_guest "$((login_count + 1))"
-        root_step "$guest_sudo -n $guest_sh -c 'test ! -e $guest_transport; test ! -e /mnt/bootart-transport/bootart; /usr/bin/bootart $guest_install status'" BOOTART_VM_INSTALL_DISK_ONLY_V1
-        root_step "$guest_sudo -n $guest_sh -c '$guest_rm -r -f /var/tmp/bootart-initramfs-check; $guest_mkdir /var/tmp/bootart-initramfs-check; cd /var/tmp/bootart-initramfs-check; /usr/bin/lsinitcpio -x $guest_image; cmp /usr/bin/bootart usr/bin/bootart; cmp /usr/lib/bootart/mkinitcpio-plymouth usr/bin/plymouth; $guest_rm -r -f /var/tmp/bootart-initramfs-check'" BOOTART_VM_INSTALL_REBOOT_HASH_V1
+        root_step "$guest_sudo -n $guest_sh -c 'test ! -e $guest_transport; test ! -e /mnt/sart-transport/sart; /usr/bin/sart $guest_install status'" SART_VM_INSTALL_DISK_ONLY_V1
+        root_step "$guest_sudo -n $guest_sh -c '$guest_rm -r -f /var/tmp/sart-initramfs-check; $guest_mkdir /var/tmp/sart-initramfs-check; cd /var/tmp/sart-initramfs-check; /usr/bin/lsinitcpio -x $guest_image; cmp /usr/bin/sart usr/bin/sart; cmp /usr/lib/sart/mkinitcpio-plymouth usr/bin/plymouth; $guest_rm -r -f /var/tmp/sart-initramfs-check'" SART_VM_INSTALL_REBOOT_HASH_V1
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1
         wait_count "$oracle" 1

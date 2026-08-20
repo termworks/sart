@@ -35,7 +35,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         vm_assert_file_size_exact "$destination" "$download_bytes" 'cached source archive'
         printf '%s  %s\n' "$sha" "$destination" | sha256sum --check --status - ||
             vm_die "cached source checksum mismatch; remove only after review: $destination"
-        printf 'bootart-vm: verified cached postmarketOS source: %s\n' "$destination"
+        printf 'sart-vm: verified cached postmarketOS source: %s\n' "$destination"
         continue
     fi
 
@@ -55,5 +55,5 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     ln -- "$partial" "$destination" || vm_die 'refusing to replace or race a cached source'
     rm -f -- "$partial"
     trap - EXIT HUP INT TERM
-    printf 'bootart-vm: fetched and verified postmarketOS source: %s\n' "$destination"
+    printf 'sart-vm: fetched and verified postmarketOS source: %s\n' "$destination"
 done < "$source_lock"

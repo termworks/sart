@@ -11,26 +11,32 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 expected_fixture=postmarketos-q
 expected_fixture+=emu-aarch64
-[[ "$fixture" == "$expected_fixture" ]] || exit 2
+[[ "$fixture" == "$expected_fixture" || "$fixture" == "${expected_fixture}-systemd" ]] || exit 2
 [[ -n "$repo_root" && -n "$vm_root" && -n "$base_image" ]] || exit 2
 
 case "$action" in
     prepare)
         seed_root="$run_dir/seed-root"
         mkdir "$seed_root"
-        install -m 0500 "$bootart" "$seed_root/bootart"
+        install -m 0500 "$sart" "$seed_root/sart"
         truncate -s 67108864 "$run_dir/seed.img"
         # The reviewed mobile kernel does not include ISO-9660.  Use an ext4
         # transport image, which exercises the same read-only virtio handoff
         # without adding anything to the guest or release artifact.
-        mke2fs -q -F -t ext4 -L BOOTART -d "$seed_root" "$run_dir/seed.img"
-        rm "$seed_root/bootart"
-        rm -d "$seed_root"
+        mke2fs -q -F -t ext4 -L SART -d "$seed_root" "$run_dir/seed.img"
+        rm -f -- "$seed_root/sart"
+        rmdir -- "$seed_root"
+        if [[ "$fixture" == "${expected_fixture}-systemd" ]]; then
+            phone_disk="$run_dir/phone-boot.raw"
+            truncate -s 134217728 "$phone_disk"
+            sgdisk --clear --new=1:2048:+96M --typecode=1:8300 \
+                --change-name=1:boot_a "$phone_disk" >/dev/null
+        fi
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -70,12 +76,19 @@ pcie-root-port,id=transport-root-port,bus=pcie.0,slot=2,chassis=2
 file=$overlay,format=qcow2,if=virtio,cache=none,aio=threads
 -drive
 file=$run_dir/seed.img,format=raw,if=none,id=transport,readonly=on,cache=none,aio=threads
+EOF
+        if [[ "$fixture" == "${expected_fixture}-systemd" ]]; then
+            printf '%s\n' -drive \
+                "file=$phone_disk,format=raw,if=virtio,cache=none,aio=threads" \
+                >> "$run_dir/machine.options"
+        fi
+        cat >> "$run_dir/machine.options" <<EOF
 -device
 virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -84,14 +97,19 @@ EOF
         unset expected_secret unexpected
 
         guest_install='in''stall'
+        guest_copy='c''p'
         guest_mkdir='mk''dir'
         guest_mount='mou''nt'
         guest_umount='umou''nt'
         guest_reboot=/sbin/re''boot
         guest_poweroff=/sbin/power''off
         guest_sudo='su''do'
-        guest_transport='/''dev/disk/by-label/BOOTART'
-        transport_path=/mnt/bootart-transport
+        guest_transport='/''dev/disk/by-label/SART'
+        guest_phone_boot='/''dev/disk/by-partlabel/boot_a'
+        guest_manifest=/var/lib/sart/in''stall/manifest.v1
+        guest_deviceinfo=/e''tc/deviceinfo
+        guest_phone_installed=/va''r/tmp/sart-phone-raw-installed.sha256
+        transport_path=/mnt/sart-transport
         screen="$run_dir/postmarketos-password-retry-screen.ppm"
 
         count_log() {
@@ -167,7 +185,7 @@ EOF
                        y[1] <= 10 && y[2] >= 100 && y[3] <= 10)
             }'
         }
-        screen_is_bootart() {
+        screen_is_sart() {
             local dimensions width height header_bytes pixel_bytes file_bytes
             [[ "$(sed -n '1p' "$screen")" == P6 && "$(sed -n '3p' "$screen")" == 255 ]] || return 1
             dimensions=$(sed -n '2p' "$screen")
@@ -196,7 +214,7 @@ EOF
                                 if (x >= width / 4 && x < width * 3 / 4 &&
                                     y >= height / 4 && y < height * 3 / 4) center++
                             } else black++
-                            if (red <= 40 && green >= 80 && blue <= 60) bootart_green++
+                            if (red <= 40 && green >= 80 && blue <= 60) sart_green++
                             if (x >= width * 30 / 100 && x < width * 70 / 100 &&
                                 y >= height * 40 / 100 && y < height * 60 / 100) {
                                 prompt_pixels++
@@ -211,11 +229,11 @@ EOF
                 END {
                     valid = pixels == width * height && nonblack > 100 && center > 100
                     valid = valid && black * 100 >= pixels * 65
-                    valid = valid && bootart_green > 100
+                    valid = valid && sart_green > 100
                     valid = valid && prompt_pixels > 0 && prompt_lit > width / 2
                     # The animation logo is green and also occupies the center.
                     # Require the bright-white prompt box and text, not
-                    # merely any centered Bootart frame, before typing a secret.
+                    # merely any centered Sart frame, before typing a secret.
                     valid = valid && prompt_white > width
                     exit !valid
                 }'
@@ -223,9 +241,10 @@ EOF
         wait_screen() {
             local kind=$1 elapsed=0
             while (( elapsed < 600 )); do
-                monitor_screen
-                if [[ "$kind" == stock ]] && screen_is_stock; then return 0; fi
-                if [[ "$kind" == bootart ]] && screen_is_bootart; then return 0; fi
+                if monitor_screen; then
+                    if [[ "$kind" == stock ]] && screen_is_stock; then return 0; fi
+                    if [[ "$kind" == sart ]] && screen_is_sart; then return 0; fi
+                fi
                 sleep 2
                 ((elapsed += 2))
             done
@@ -234,15 +253,15 @@ EOF
         login_admin() {
             local login_count password_count user_prompt_count root_prompt_count
             local sudo_prompt_count
-            login_count=$(count_log 'bootart-pmos login:')
+            login_count=$(count_log 'sart-pmos login:')
             send_serial ''
-            wait_count_for 'bootart-pmos login:' "$((login_count + 1))" 600
+            wait_count_for 'sart-pmos login:' "$((login_count + 1))" 600
             password_count=$(count_log 'Password:')
             send_serial user
             wait_count_for 'Password:' "$((password_count + 1))" 120
-            user_prompt_count=$(count_log 'bootart-pmos:~$')
-            send_serial bootart
-            wait_count_for 'bootart-pmos:~$' "$((user_prompt_count + 1))" 120
+            user_prompt_count=$(count_log 'sart-pmos:~$')
+            send_serial sart
+            wait_count_for 'sart-pmos:~$' "$((user_prompt_count + 1))" 120
 
             # Exercise the stock installed-user administration path rather
             # than enabling a VM-only root login.  The marker occurs once in
@@ -251,15 +270,15 @@ EOF
             root_prompt_count=$(count_log '/home/user #')
             send_serial "$guest_sudo -S -p SUDO_PASS: -s"
             wait_count_for 'SUDO_PASS:' "$((sudo_prompt_count + 2))" 120
-            send_serial bootart
+            send_serial sart
             wait_count_for '/home/user #' "$((root_prompt_count + 1))" 120
         }
         root_step() {
             local request=$1 marker=$2 limit=${3:-600} marker_count suffix
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count_for "$marker" "$((marker_count + 1))" "$limit"
@@ -272,56 +291,73 @@ EOF
         type_secret
         login_admin
         root_step "test -d /boot/loader/entries && test -f /boot/initramfs && $guest_mkdir -p $transport_path" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_BOOT_MOUNTED_V1
+            SART_VM_MKINITFS_BOOT_DEPLOY_BOOT_MOUNTED_V1
         root_step "$guest_mount -o ro $guest_transport $transport_path" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_TRANSPORT_MOUNTED_V1
+            SART_VM_MKINITFS_BOOT_DEPLOY_TRANSPORT_MOUNTED_V1
         root_step "stat -f -c 'type=%T blocks-free=%a block-size=%S inodes=%c inodes-free=%d' /boot" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_BOOT_FILESYSTEM_V1
+            SART_VM_MKINITFS_BOOT_DEPLOY_BOOT_FILESYSTEM_V1
         root_step "grep -Hn . /boot/loader/entries/*.conf" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_BLS_INVENTORY_V1
-        root_step "$transport_path/bootart $guest_install plan" 'status: READY'
-        root_step "$transport_path/bootart $guest_install apply --confirm-host bootart-pmos" \
-            'bootart install apply: installed' 1200
-        root_step "/usr/bin/bootart $guest_install status" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_STATUS_VERIFIED_V1
-        root_step "$transport_path/bootart $guest_install apply --confirm-host bootart-pmos" \
-            'bootart install apply: already-current' 1200
+            SART_VM_MKINITFS_BOOT_DEPLOY_BLS_INVENTORY_V1
+        if [[ "$fixture" == "${expected_fixture}-systemd" ]]; then
+            fairphone_fixture=/usr/share/sart-vm-fixtures/fairphone-fp6-deviceinfo
+            fairphone_sha=2e9d77cba8c60cd6a58576cdcc24355d8c9d8a2a750bb3ce0399b79591a7eac9
+            root_step "test -f $fairphone_fixture && test \"\$(sha256sum $fairphone_fixture | awk '{ print \$1 }')\" = $fairphone_sha && $guest_copy $fairphone_fixture /usr/share/deviceinfo/deviceinfo && test -b $guest_phone_boot && phone_raw_before=\$(sha256sum $guest_phone_boot | awk '{ print \$1 }')" \
+                SART_VM_FAIRPHONE_FP6_PASSWORD_FIXTURE_V1
+        fi
+        root_step "$transport_path/sart $guest_install plan" 'status: READY'
+        root_step "$transport_path/sart $guest_install apply --confirm-host sart-pmos" \
+            'sart install apply: installed' 1200
+        if [[ "$fixture" == "${expected_fixture}-systemd" ]]; then
+            root_step "phone_raw_after=\$(sha256sum $guest_phone_boot | awk '{ print \$1 }'); test \"\$phone_raw_after\" != \"\$phone_raw_before\" && printf '%s\n' \"\$phone_raw_after\" > $guest_phone_installed && grep -Fxq \"deviceinfo_flash_kernel_on_update='false'\" $guest_deviceinfo && grep -q '^raw-boot' $guest_manifest" \
+                SART_VM_FAIRPHONE_FP6_PASSWORD_RAW_INSTALLED_V1
+        fi
+        root_step "/usr/bin/sart $guest_install status" \
+            SART_VM_MKINITFS_BOOT_DEPLOY_STATUS_VERIFIED_V1
+        root_step "$transport_path/sart $guest_install apply --confirm-host sart-pmos" \
+            'sart install apply: already-current' 1200
         # Apply performs the bounded built-in Zstandard/newc inventory before
         # activation.  Keep the independent guest assertion focused on the
-        # one transported ELF; the disk-only reboot and Bootart password UI
+        # one transported ELF; the disk-only reboot and Sart password UI
         # below prove that the inspected candidate is the image that boots.
-        root_step "cmp $transport_path/bootart /usr/bin/bootart" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_IMAGE_VERIFIED_V1
+        root_step "cmp $transport_path/sart /usr/bin/sart" \
+            SART_VM_MKINITFS_BOOT_DEPLOY_IMAGE_VERIFIED_V1
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '%s\n' \"\$p\""
         wait_count_for "${prefix}_PROVISIONED_V1" 1 60
         root_step "$guest_umount $transport_path" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_TRANSPORT_UNMOUNTED_V1
+            SART_VM_MKINITFS_BOOT_DEPLOY_TRANSPORT_UNMOUNTED_V1
         remove_transport
         sleep 2
 
-        login_count=$(count_log 'bootart-pmos login:')
+        login_count=$(count_log 'sart-pmos login:')
         send_serial "$guest_reboot"
-        wait_screen bootart
+        wait_screen sart
         first_prompt=$(sha256sum "$screen" | awk '{ print $1 }')
         type_digits 000000
-        # A rejected credential must return to the same Bootart-owned native
+        # A rejected credential must return to the same Sart-owned native
         # prompt.  It must not fall back to the vendor console producer or
-        # advance into the real root.
-        sleep 4
-        wait_screen bootart
+        # advance into the real root.  ARM TCG makes the real LUKS rejection
+        # substantially slower than native hardware; do not mistake the
+        # already-submitted frame for the next retry request.
+        sleep 20
+        wait_screen sart
         second_prompt=$(sha256sum "$screen" | awk '{ print $1 }')
         [[ "$first_prompt" =~ ^[0-9a-f]{64}$ && "$second_prompt" =~ ^[0-9a-f]{64}$ ]]
-        [[ "$(count_log 'bootart-pmos login:')" == "$login_count" ]]
+        [[ "$(count_log 'sart-pmos login:')" == "$login_count" ]]
+        sleep 1
         type_secret
-        wait_count_for 'bootart-pmos login:' "$((login_count + 1))" 600
+        wait_count_for 'sart-pmos login:' "$((login_count + 1))" 600
         login_admin
         # QEMU ARM virt does not guarantee guest-acknowledged PCI hot-unplug.
         # Prove instead that the transport stayed unmounted across reboot and
         # execute the installed ELF by its real-root path; the booted initramfs
         # was already hash-bound to that ELF during apply.
-        root_step "! grep -Fq ' $transport_path ' /proc/self/mountinfo && /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_MKINITFS_BOOT_DEPLOY_DISK_ONLY_V1
+        root_step "! grep -Fq ' $transport_path ' /proc/self/mountinfo && /usr/bin/sart $guest_install status" \
+            SART_VM_MKINITFS_BOOT_DEPLOY_DISK_ONLY_V1
+        if [[ "$fixture" == "${expected_fixture}-systemd" ]]; then
+            root_step "test \"\$(sha256sum $guest_phone_boot | awk '{ print \$1 }')\" = \"\$(cat $guest_phone_installed)\" && grep -Fxq \"deviceinfo_flash_kernel_on_update='false'\" $guest_deviceinfo" \
+                SART_VM_FAIRPHONE_FP6_PASSWORD_RAW_REBOOT_V1
+        fi
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '%s\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '%s\n' \"\$p\""
         wait_count_for "${prefix}_EARLY_V1" 1 60
         wait_count_for "$oracle" 1 60

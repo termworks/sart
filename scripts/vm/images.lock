@@ -1,4 +1,4 @@
-# bootart VM input lock, schema v2
+# sart VM input lock, schema v2
 #
 # Fields (pipe-separated):
 # id|status|url|sha256|format|arch|filename|kernel_member|initramfs_member|download_bytes|max_virtual_bytes|max_run_bytes|max_file_bytes|max_log_bytes|max_evidence_bytes
@@ -32,3 +32,4 @@ arch-mkinitcpio-systemd-amd64-derived|derived|https://geo.mirror.pkgbuild.com/im
 alpine-generic-3.24.1-x86_64-bios-cloudinit-r0|verified|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|x86_64|generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|-|-|183697408|209715200|805306368|268435456|16777216|1048576
 alpine-3.24.1-mkinitfs-openrc-amd64-derived|derived|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|x86_64|alpine-3.24.1-mkinitfs-openrc-amd64.qcow2|-|-|183697408|8589934592|21474836480|8589934592|67108864|4194304
 postmarketos-qemu-aarch64-derived|derived|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|aarch64|postmarketos-qemu-aarch64.qcow2|-|-|183697408|8589934592|42949672960|12884901888|134217728|8388608
+postmarketos-qemu-aarch64-systemd-derived|derived|https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2|6e2e6fe0572b6632527f268d3659e8fccebda4e1ee470fafe2c4d7b85b6a4df6|qcow2|aarch64|postmarketos-qemu-aarch64-systemd.qcow2|-|-|183697408|8589934592|42949672960|12884901888|134217728|8388608

@@ -35,7 +35,7 @@ for sealed in "$base" "$base_ovmf" "$lineage"; do
         vm_die "missing or unsealed Fedora provisioned input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_FEDORA_PROVISIONED_V1 &&
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_FEDORA_PROVISIONED_V1 &&
    "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
     vm_die 'Fedora provisioned lineage is not awaiting stock verification'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
@@ -50,18 +50,18 @@ printf '%s  %s\n' "$ovmf_sha" "$base_ovmf" | sha256sum --check --status - ||
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'Fedora stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_FEDORA_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_FEDORA_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^ovmf_vars_sha256=//p' "$verified")" == "$ovmf_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_FEDORA_44_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == SART_VM_FEDORA_44_BASE_PASS_V1 ]] ||
         vm_die 'Fedora stock-verification lineage is stale or invalid'
-    printf 'BOOTART_VM_FEDORA_44_BASE_PASS_V1\n'
+    printf 'SART_VM_FEDORA_44_BASE_PASS_V1\n'
     exit 0
 fi
 
-ovmf_code=${BOOTART_OVMF_CODE:-}
+ovmf_code=${SART_OVMF_CODE:-}
 if [[ -z "$ovmf_code" ]]; then
     for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
         if [[ -f "$candidate" && ! -L "$candidate" ]]; then ovmf_code=$candidate; break; fi
@@ -185,17 +185,17 @@ done
 
 wait_for_log 'Please enter passphrase for disk' "$boot_timeout" ||
     vm_die 'stock Fedora did not reach the real encrypted-root boot request'
-printf '%s\n' 'bootart-vm: stock Fedora reached encrypted-root request'
+printf '%s\n' 'sart-vm: stock Fedora reached encrypted-root request'
 sleep 10
 for key in 0 0 0 0 0 0 ret; do qmp_send_key "$key"; done
 sleep 10
-! grep -a -F -q 'bootart-vm login:' "$serial_log" ||
+! grep -a -F -q 'sart-vm login:' "$serial_log" ||
     vm_die 'the deliberately wrong Fedora passphrase unexpectedly reached login'
-printf '%s\n' 'bootart-vm: stock Fedora rejected the deliberately wrong passphrase'
+printf '%s\n' 'sart-vm: stock Fedora rejected the deliberately wrong passphrase'
 for key in 1 1 2 3 5 8 ret; do qmp_send_key "$key"; done
-wait_for_log 'bootart-vm login:' "$login_timeout" ||
+wait_for_log 'sart-vm login:' "$login_timeout" ||
     vm_die 'stock Fedora did not reach normal login after real root unlock'
-printf '%s\n' 'bootart-vm: stock Fedora reached normal login after encrypted-root unlock'
+printf '%s\n' 'sart-vm: stock Fedora reached normal login after encrypted-root unlock'
 
 guest_power='power''off'
 guest_remove='r''m'
@@ -204,19 +204,19 @@ guest_dev='/''dev'
 guest_check="$guest_sudo -S sh -c '"
 guest_check+='set -eu; test "$(cat /proc/1/comm)" = systemd; source=$(findmnt -n -o SOURCE /); case "$source" in '
 guest_check+="$guest_dev/mapper/"
-guest_check+='*) ;; *) exit 1;; esac; cryptsetup status "$source" | grep -Eq "type:[[:space:]]+LUKS2"; image=/boot/initramfs-$(uname -r).img; test -f "$image"; lsinitrd "$image" | grep -Fq usr/lib/systemd/systemd; test -x /usr/bin/grub2-mkconfig; test -x /usr/bin/grub2-probe; test -x /usr/bin/grub2-reboot; test -f /boot/grub2/grub.cfg; cache=/var/cache/bootart-kernel-update; test -d "$cache"; cd "$cache"; sha256sum -c SHA256SUMS; test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l)" = 5; cd /; test ! -e /root/anaconda-ks.cfg; test ! -e /root/original-ks.cfg; test ! -e /etc/systemd/system/bootart-vm-sanitize.service; ! find /usr /etc /boot -xdev -name "*bootart*" -print -quit | grep -q .; work=$(mktemp -d); (cd "$work" && lsinitrd --unpack "$image"); scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "BOOTART_VM_SECRET_PATH|%s\n" "$matches"; '
+guest_check+='*) ;; *) exit 1;; esac; cryptsetup status "$source" | grep -Eq "type:[[:space:]]+LUKS2"; image=/boot/initramfs-$(uname -r).img; test -f "$image"; lsinitrd "$image" | grep -Fq usr/lib/systemd/systemd; test -x /usr/bin/grub2-mkconfig; test -x /usr/bin/grub2-probe; test -x /usr/bin/grub2-reboot; test -f /boot/grub2/grub.cfg; cache=/var/cache/sart-kernel-update; test -d "$cache"; cd "$cache"; sha256sum -c SHA256SUMS; test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l)" = 5; cd /; test ! -e /root/anaconda-ks.cfg; test ! -e /root/original-ks.cfg; test ! -e /etc/systemd/system/sart-vm-sanitize.service; ! find /usr /etc /boot -xdev -name "*sart*" -print -quit | grep -q .; work=$(mktemp -d); (cd "$work" && lsinitrd --unpack "$image"); scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "SART_VM_SECRET_PATH|%s\n" "$matches"; '
 guest_check+="$guest_remove"' -r -f -- "$work"; exit 1; fi; unset scan boundary matches; '
-guest_check+="$guest_remove"' -r -f -- "$work"; printf "BOOTART_VM_FEDORA_44_FACT|kernel=%s|image=%s|grub=%s\n" "$(uname -r)" "$image" /boot/grub2/grub.cfg; marker=BOOTART_VM_FEDORA_44_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source; '
+guest_check+="$guest_remove"' -r -f -- "$work"; printf "SART_VM_FEDORA_44_FACT|kernel=%s|image=%s|grub=%s\n" "$(uname -r)" "$image" /boot/grub2/grub.cfg; marker=SART_VM_FEDORA_44_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source; '
 guest_check+="$guest_power'"
 login_password_count="$(count_log 'Password:')"
-shell_prompt_count="$(count_log '[bootart@bootart-vm ~]$')"
-privilege_prompt="[$guest_sudo] password for bootart:"
+shell_prompt_count="$(count_log '[sart@sart-vm ~]$')"
+privilege_prompt="[$guest_sudo] password for sart:"
 privilege_prompt_count="$(count_log "$privilege_prompt")"
-send_serial_line bootart
+send_serial_line sart
 wait_for_count 'Password:' "$((login_password_count + 1))" "$login_timeout" ||
     vm_die 'stock Fedora login did not request the user password'
 send_serial_line ubuntu
-wait_for_count '[bootart@bootart-vm ~]$' "$((shell_prompt_count + 1))" \
+wait_for_count '[sart@sart-vm ~]$' "$((shell_prompt_count + 1))" \
     "$login_timeout" || vm_die 'stock Fedora user login did not reach a shell'
 send_serial_line "$guest_check"
 wait_for_count "$privilege_prompt" "$((privilege_prompt_count + 1))" \
@@ -227,7 +227,7 @@ wait_for_count "$privilege_prompt" "$((privilege_prompt_count + 1))" \
 # and the emulated console has had time to attach the password reader.
 sleep 5
 send_serial_line ubuntu
-wait_for_log 'BOOTART_VM_FEDORA_44_BASE_PASS_V1' "$login_timeout" ||
+wait_for_log 'SART_VM_FEDORA_44_BASE_PASS_V1' "$login_timeout" ||
     vm_die 'stock Fedora guest verification did not emit its authenticated result'
 
 set +e
@@ -237,7 +237,7 @@ set -e
 qemu_pid=
 [[ $qemu_status -eq 0 ]] ||
     vm_die "stock Fedora QEMU did not power off cleanly: status $qemu_status"
-oracle_count="$(grep -a -Fc 'BOOTART_VM_FEDORA_44_BASE_PASS_V1' "$serial_log" || true)"
+oracle_count="$(grep -a -Fc 'SART_VM_FEDORA_44_BASE_PASS_V1' "$serial_log" || true)"
 [[ "$oracle_count" == 1 ]] || vm_die 'stock Fedora oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 67108864 'stock Fedora serial evidence'
 printf -v secret_pattern '%s%s' 112 358
@@ -252,15 +252,15 @@ unset secret_pattern
 verified_tmp="$run_dir/base.verified"
 serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 printf '%s\n' \
-    'schema=BOOTART_FEDORA_PROVISIONED_V1' \
+    'schema=SART_FEDORA_PROVISIONED_V1' \
     'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" \
     "ovmf_vars_sha256=$ovmf_sha" \
     "source_lineage_sha256=$source_lineage_sha" \
     "stock_serial_sha256=$serial_sha" \
-    'stock_oracle=BOOTART_VM_FEDORA_44_BASE_PASS_V1' > "$verified_tmp"
+    'stock_oracle=SART_VM_FEDORA_44_BASE_PASS_V1' > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" ||
     vm_die 'refusing to replace Fedora stock-verification lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_FEDORA_44_BASE_PASS_V1\n'
+printf 'SART_VM_FEDORA_44_BASE_PASS_V1\n'

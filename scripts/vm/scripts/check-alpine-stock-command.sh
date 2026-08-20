@@ -59,4 +59,4 @@ done
     vm_die 'host forwarding, share, or passthrough denied'
 sha256sum "$args_file" | awk '{ print $1 }' > "$run_dir/stock-qemu.policy.sha256"
 chmod 0600 -- "$run_dir/stock-qemu.policy.sha256"
-printf 'bootart-vm: Alpine stock QEMU command policy PASS\n'
+printf 'sart-vm: Alpine stock QEMU command policy PASS\n'

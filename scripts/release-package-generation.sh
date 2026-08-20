@@ -7,7 +7,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-release-package: ERROR: %s\n' "$*" >&2
+    printf 'sart-release-package: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -24,8 +24,8 @@ bash "$(dirname -- "${BASH_SOURCE[0]}")/artifact-lock-assert.sh" "$repo_root" >/
     die 'caller does not own the repository artifact lock'
 
 package_dir=$root/packages
-manifest=$package_dir/bootart-linux-$arch.manifest
-archive_name=bootart-linux-$arch.tar.gz
+manifest=$package_dir/sart-linux-$arch.manifest
+archive_name=sart-linux-$arch.tar.gz
 archive=$package_dir/$archive_name
 checksum=$archive.sha256
 for path in "$package_dir" "$manifest" "$archive" "$checksum"; do
@@ -43,7 +43,7 @@ line_number=0
 while IFS= read -r line || [[ -n "$line" ]]; do
     line_number=$((line_number + 1))
     case "$line_number:$line" in
-        1:BOOTART_RELEASE_PACKAGE_V1) schema=BOOTART_RELEASE_PACKAGE_V1 ;;
+        1:SART_RELEASE_PACKAGE_V1) schema=SART_RELEASE_PACKAGE_V1 ;;
         2:arch=*) manifest_arch=${line#arch=} ;;
         3:generation=*) generation_name=${line#generation=} ;;
         4:elf_sha256=*) elf_sha=${line#elf_sha256=} ;;
@@ -52,7 +52,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         *) die "malformed package manifest line $line_number" ;;
     esac
 done < "$manifest"
-[[ "$line_number" -eq 6 && "$schema" == BOOTART_RELEASE_PACKAGE_V1 ]] ||
+[[ "$line_number" -eq 6 && "$schema" == SART_RELEASE_PACKAGE_V1 ]] ||
     die 'package manifest schema or line count is invalid'
 [[ "$manifest_arch" == "$arch" ]] || die 'package manifest architecture mismatch'
 [[ "$generation_name" =~ ^generation\.[A-Za-z0-9]+$ ]] ||
@@ -65,10 +65,10 @@ done
 
 generation=$(bash "$(dirname -- "${BASH_SOURCE[0]}")/artifact-generation.sh" \
     "$root" "$generation_name") || die 'committed artifact generation is invalid'
-actual_elf_sha=$(sha256sum -- "$generation/release/bootart") ||
-    die 'could not hash committed bootart ELF'
+actual_elf_sha=$(sha256sum -- "$generation/release/sart") ||
+    die 'could not hash committed sart ELF'
 actual_elf_sha=${actual_elf_sha%%[[:space:]]*}
-[[ "$actual_elf_sha" == "$elf_sha" ]] || die 'committed bootart ELF digest mismatch'
+[[ "$actual_elf_sha" == "$elf_sha" ]] || die 'committed sart ELF digest mismatch'
 
 actual_archive_sha=$(sha256sum -- "$archive") || die 'could not hash release archive'
 actual_archive_sha=${actual_archive_sha%%[[:space:]]*}
@@ -76,21 +76,21 @@ actual_archive_sha=${actual_archive_sha%%[[:space:]]*}
 [[ "$(cat -- "$checksum")" == "$archive_sha  $archive_name" ]] ||
     die 'release checksum record does not match the committed manifest'
 archive_members=$(tar -tzf "$archive") || die 'could not list release archive'
-[[ "$archive_members" == bootart ]] ||
-    die 'release archive must contain exactly one bootart member'
+[[ "$archive_members" == sart ]] ||
+    die 'release archive must contain exactly one sart member'
 archive_listing=$(tar --numeric-owner -tvzf "$archive") ||
     die 'could not inspect release archive metadata'
 awk '
     NR == 1 {
-        valid = ($1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "bootart")
+        valid = ($1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "sart")
     }
     END { exit !(NR == 1 && valid) }
 ' <<< "$archive_listing" ||
     die 'release archive member must be regular mode 0755 and owned by uid/gid 0'
-archive_elf_sha=$(tar -xOzf "$archive" bootart | sha256sum) ||
-    die 'could not hash bootart from release archive'
+archive_elf_sha=$(tar -xOzf "$archive" sart | sha256sum) ||
+    die 'could not hash sart from release archive'
 archive_elf_sha=${archive_elf_sha%%[[:space:]]*}
 [[ "$archive_elf_sha" == "$elf_sha" ]] ||
-    die 'release archive and committed generation contain different bootart ELFs'
+    die 'release archive and committed generation contain different sart ELFs'
 
 printf '%s\n' "$generation"

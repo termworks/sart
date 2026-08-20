@@ -6,13 +6,16 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
-[[ $# -eq 2 ]] || vm_die \
-    'usage: reset-provisioned-postmarketos-qemu-aarch64.sh REPO VM'
-repo_root=$1; vm_root=$2
+[[ $# -eq 3 ]] || vm_die \
+    'usage: reset-provisioned-postmarketos-qemu-aarch64.sh REPO VM CACHE_PREFIX'
+repo_root=$1; vm_root=$2; prefix=$3
+case "$prefix" in
+    postmarketos-qemu-aarch64|postmarketos-qemu-aarch64-systemd) ;;
+    *) vm_die "unreviewed postmarketOS cache prefix: $prefix" ;;
+esac
 vm_validate_state "$repo_root" "$vm_root"
 provisioned="$vm_root/cache/provisioned"
 vm_assert_private_dir "$provisioned"
-prefix=postmarketos-qemu-aarch64
 base="$provisioned/$prefix.qcow2"
 lineage="$provisioned/$prefix.provisioned"
 verified="$provisioned/$prefix.verified"
@@ -22,6 +25,12 @@ for run_dir in "$vm_root"/runs/run.*; do
     vm_pid_matches_run "$run_dir" &&
         vm_die "refusing to reset postmarketOS while a validated QEMU run is active: $run_dir"
 done
+if [[ ! -e "$base" && ! -L "$base" &&
+      ! -e "$lineage" && ! -L "$lineage" &&
+      ! -e "$verified" && ! -L "$verified" ]]; then
+    printf 'sart-vm: disposable postmarketOS base is already absent; provisioning is required\n'
+    exit 0
+fi
 for required in "$base" "$lineage"; do
     [[ -f "$required" && ! -L "$required" && "$(vm_stat_mode "$required")" == 400 ]] ||
         vm_die "provisioned postmarketOS cache is partial or unsafe: $required"
@@ -32,7 +41,7 @@ if [[ -e "$verified" || -L "$verified" ]]; then
         vm_die 'postmarketOS stock-verification lineage is unsafe'
     vm_assert_owned "$verified"
 fi
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_POSTMARKETOS_PROVISIONED_V1 ]] ||
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_POSTMARKETOS_PROVISIONED_V1 ]] ||
     vm_die 'postmarketOS lineage schema is not owned by this harness'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
 [[ "$base_sha" =~ ^[0-9a-f]{64}$ ]] || vm_die 'postmarketOS lineage hash is invalid'
@@ -45,4 +54,4 @@ fi
 chmod 0600 -- "$base" "$lineage"
 [[ ! -f "$verified" ]] || chmod 0600 -- "$verified"
 rm -f -- "$verified" "$lineage" "$base"
-printf 'bootart-vm: removed authenticated disposable postmarketOS base; provisioning is required\n'
+printf 'sart-vm: removed authenticated disposable postmarketOS base; provisioning is required\n'

@@ -1,11 +1,11 @@
-# Bootart offline kernel-update inputs, schema v2
+# Sart offline kernel-update inputs, schema v2
 #
 # Fields (pipe-separated):
 # id|status|url|sha256|download_bytes|filename|package|version|arch|fixture
 #
 # These packages are copied into their encrypted base only while the normal
-# fixture is provisioned. Proof boots have no network and the Bootart transport
-# still contains exactly one file: /bootart.
+# fixture is provisioned. Proof boots have no network and the Sart transport
+# still contains exactly one file: /sart.
 ubuntu-7.1.0-5-image-amd64|verified|https://archive.ubuntu.com/ubuntu/pool/main/l/linux-signed/linux-image-7.1.0-5-generic_7.1.0-5.5+1_amd64.deb|214232d2f45cd9cb0ad4546043ee91fea69934ff0658dc51410400617865219e|17185544|linux-image-7.1.0-5-generic_7.1.0-5.5+1_amd64.deb|linux-image-7.1.0-5-generic|7.1.0-5.5+1|amd64|ubuntu-26.04-dracut-systemd
 ubuntu-7.1.0-5-modules-amd64|verified|https://archive.ubuntu.com/ubuntu/pool/main/l/linux/linux-modules-7.1.0-5-generic_7.1.0-5.5_amd64.deb|6c6734f184089c498c8a583921d1c382482050dfee309616c0c55ad3fcd60d1f|170229952|linux-modules-7.1.0-5-generic_7.1.0-5.5_amd64.deb|linux-modules-7.1.0-5-generic|7.1.0-5.5|amd64|ubuntu-26.04-dracut-systemd
 ubuntu-7.1.0-5-zfs-amd64|verified|https://archive.ubuntu.com/ubuntu/pool/main/l/linux-main-signed/linux-main-modules-zfs-7.1.0-5-generic_7.1.0-5.5_amd64.deb|102157f5c771354c635529b5c345474745a17651787ce9b870fd5ab8f97dc7fd|2438486|linux-main-modules-zfs-7.1.0-5-generic_7.1.0-5.5_amd64.deb|linux-main-modules-zfs-7.1.0-5-generic|7.1.0-5.5|amd64|ubuntu-26.04-dracut-systemd

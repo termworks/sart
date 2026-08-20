@@ -31,7 +31,7 @@ for sealed in "$base" "$lineage"; do
         vm_die "missing or unsealed Alpine provisioned input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_ALPINE_PROVISIONED_V1 &&
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_ALPINE_PROVISIONED_V1 &&
    "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
     vm_die 'Alpine provisioned lineage is not awaiting stock verification'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
@@ -46,14 +46,14 @@ QEMU_IMG="$qemu_img" vm_assert_qcow2_virtual_size "$base" 8589934592 8589934592 
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'Alpine stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_ALPINE_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_ALPINE_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^source_sha256=//p' "$verified")" == "$source_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_ALPINE_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == SART_VM_ALPINE_BASE_PASS_V1 ]] ||
         vm_die 'Alpine stock-verification lineage is stale or invalid'
-    printf 'BOOTART_VM_ALPINE_BASE_PASS_V1\n'
+    printf 'SART_VM_ALPINE_BASE_PASS_V1\n'
     exit 0
 fi
 
@@ -205,7 +205,7 @@ initial_screen_sha="$(sha256sum "$screen" | awk '{ print $1 }')"
 retry_screen_sha="$(sha256sum "$retry_screen" | awk '{ print $1 }')"
 [[ "$initial_screen_sha" != "$retry_screen_sha" ]] ||
     vm_die 'stock Alpine password screen did not react to the wrong passphrase'
-! grep -a -Fq 'bootart-vm login:' "$raw_serial" ||
+! grep -a -Fq 'sart-vm login:' "$raw_serial" ||
     vm_die 'the deliberately wrong Alpine passphrase unexpectedly reached login'
 printf -v luks_passphrase '%s%s' 112 358
 for ((index = 0; index < ${#luks_passphrase}; index += 1)); do
@@ -213,7 +213,7 @@ for ((index = 0; index < ${#luks_passphrase}; index += 1)); do
 done
 qmp_send_key ret
 unset luks_passphrase
-wait_for_count 'bootart-vm login:' 1 "$login_timeout" ||
+wait_for_count 'sart-vm login:' 1 "$login_timeout" ||
     vm_die 'stock Alpine did not reach normal login after real root unlock'
 
 guest_doas='do''as'
@@ -231,10 +231,10 @@ guest_check+='grep -Eq "^features=\\\"([^\\\"]* )?cryptsetup( [^\\\"]*)?\\\"$" /
 guest_check+="for config in /etc/update-extlinux.conf /boot/extlinux.conf; do grep -Eq \"cryptroot=UUID=[0-9a-f-]+\" \"\$config\"; grep -Fq cryptdm=root \"\$config\"; grep -Fq root=$guest_dev/mapper/root \"\$config\"; done; "
 guest_check+='image=/boot/initramfs-virt; test -f "$image"; work=$(mktemp -d); (cd "$work" && gzip -dc "$image" | cpio -idmu >/dev/null 2>&1); '
 guest_check+='find "$work" -type f | grep -Fq nlplug-findfs; find "$work" -type f | grep -Eq "/cryptsetup$|/cryptsetup-"; '
-guest_check+="hits=\$(mktemp); find \"\$work\" -type f | while IFS= read -r file; do if grep -F -q bootart \"\$file\" 2>/dev/null; then printf \"%s\\\\n\" \"\$file\"; fi; done > \"\$hits\"; test ! -s \"\$hits\"; $guest_remove -f -- \"\$hits\"; "
+guest_check+="hits=\$(mktemp); find \"\$work\" -type f | while IFS= read -r file; do if grep -F -q sart \"\$file\" 2>/dev/null; then printf \"%s\\\\n\" \"\$file\"; fi; done > \"\$hits\"; test ! -s \"\$hits\"; $guest_remove -f -- \"\$hits\"; "
 guest_check+='scan=112; scan=${scan}358; hits=$(mktemp); find /etc /var /boot /root /home "$work" -type f | while IFS= read -r file; do if printf "%s\\n" "$scan" | grep -F -q -f - "$file" 2>/dev/null; then printf "%s\\n" "$file"; fi; done > "$hits"; '
-guest_check+="matches=\$(cat \"\$hits\"); $guest_remove -f -- \"\$hits\"; if [ -n \"\$matches\" ]; then printf \"BOOTART_VM_SECRET_PATH|%s\\\\n\" \"\$matches\"; $guest_remove -rf -- \"\$work\"; exit 1; fi; unset scan matches; $guest_remove -rf -- \"\$work\"; "
-guest_check+="apk info -v $guest_crypt mkinitfs openrc syslinux; marker=BOOTART_VM_ALPINE_BASE_; marker=\${marker}PASS_V1; printf \"%s\\\\n\" \"\$marker\"; unset marker; $guest_power"
+guest_check+="matches=\$(cat \"\$hits\"); $guest_remove -f -- \"\$hits\"; if [ -n \"\$matches\" ]; then printf \"SART_VM_SECRET_PATH|%s\\\\n\" \"\$matches\"; $guest_remove -rf -- \"\$work\"; exit 1; fi; unset scan matches; $guest_remove -rf -- \"\$work\"; "
+guest_check+="apk info -v $guest_crypt mkinitfs openrc syslinux; marker=SART_VM_ALPINE_BASE_; marker=\${marker}PASS_V1; printf \"%s\\\\n\" \"\$marker\"; unset marker; $guest_power"
 guest_check+="'"
 {
     printf '\n'; sleep 1
@@ -243,7 +243,7 @@ guest_check+="'"
     printf '%s\n' "$guest_check"
 } | timeout --signal=TERM --kill-after=2s 30s socat - "UNIX-CONNECT:$serial_socket" \
     >/dev/null || true
-wait_for_count 'BOOTART_VM_ALPINE_BASE_PASS_V1' 1 "$login_timeout" ||
+wait_for_count 'SART_VM_ALPINE_BASE_PASS_V1' 1 "$login_timeout" ||
     vm_die 'stock Alpine guest verification did not emit its authenticated result'
 
 set +e
@@ -255,7 +255,7 @@ qemu_pid=
     vm_die "stock Alpine QEMU did not power off cleanly: status $qemu_status"
 scrub_serial
 
-oracle_count="$(grep -a -Fc 'BOOTART_VM_ALPINE_BASE_PASS_V1' "$serial_log" || true)"
+oracle_count="$(grep -a -Fc 'SART_VM_ALPINE_BASE_PASS_V1' "$serial_log" || true)"
 [[ "$oracle_count" == 1 ]] || vm_die 'stock Alpine oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 67108864 'stock Alpine serial evidence'
 printf -v secret_pattern '%s%s' 112 358
@@ -275,15 +275,15 @@ serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 screen_sha="$(sha256sum "$screen" | awk '{ print $1 }')"
 retry_screen_sha="$(sha256sum "$retry_screen" | awk '{ print $1 }')"
 printf '%s\n' \
-    'schema=BOOTART_ALPINE_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
+    'schema=SART_ALPINE_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" "source_sha256=$source_sha" \
     "source_lineage_sha256=$source_lineage_sha" \
     "stock_serial_sha256=$serial_sha" \
     "stock_password_screen_sha256=$screen_sha" \
     "stock_password_retry_screen_sha256=$retry_screen_sha" \
-    'stock_oracle=BOOTART_VM_ALPINE_BASE_PASS_V1' > "$verified_tmp"
+    'stock_oracle=SART_VM_ALPINE_BASE_PASS_V1' > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" ||
     vm_die 'refusing to replace Alpine stock-verification lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_ALPINE_BASE_PASS_V1\n'
+printf 'SART_VM_ALPINE_BASE_PASS_V1\n'

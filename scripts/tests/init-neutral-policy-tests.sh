@@ -9,24 +9,23 @@ policy=$repo_root/scripts/init-neutral-policy.sh
 
 /bin/bash "$policy" "$repo_root" >/dev/null
 
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/bootart-init-neutral.XXXXXXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/sart-init-neutral.XXXXXXXXXX")
 cleanup() { rm -rf -- "$fixture"; }
 trap cleanup EXIT
-mkdir -p "$fixture/cpp/src" "$fixture/cpp/include"
+mkdir -p "$fixture/src" "$fixture/include"
 printf 'all:\n\t@true\n' >"$fixture/Makefile"
-printf 'all:\n\t@true\n' >"$fixture/cpp/Makefile"
 printf '{}\n' >"$fixture/flake.nix"
-printf 'int main() { return 0; }\n' >"$fixture/cpp/src/main.cpp"
+printf 'int main() { return 0; }\n' >"$fixture/src/main.cpp"
 /bin/bash "$policy" "$fixture" >/dev/null
 
-printf 'int probe() { return sd_bus_open_system(nullptr); }\n' >"$fixture/cpp/src/binding.cpp"
+printf 'int probe() { return sd_bus_open_system(nullptr); }\n' >"$fixture/src/binding.cpp"
 if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
     echo 'init-neutral policy accepted an sd-bus API binding' >&2
     exit 1
 fi
-rm -f "$fixture/cpp/src/binding.cpp"
+rm -f "$fixture/src/binding.cpp"
 
-printf 'LDLIBS += -lsystemd\n' >>"$fixture/cpp/Makefile"
+printf 'LDLIBS += -lsystemd\n' >>"$fixture/Makefile"
 if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
     echo 'init-neutral policy accepted a systemd link flag' >&2
     exit 1

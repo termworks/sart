@@ -61,7 +61,7 @@ expected=(
     -nic user,model=virtio-net-pci
     -device virtio-serial-pci
     -chardev "pipe,id=fde,path=$run_dir/fde-secret"
-    -device virtserialport,chardev=fde,name=bootart.fde
+    -device virtserialport,chardev=fde,name=sart.fde
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny
     -no-reboot -boot c,strict=on
     -drive "file=$source_overlay,format=qcow2,if=virtio,cache=none,aio=threads"
@@ -81,4 +81,4 @@ done
     "$args_file" >/dev/null || vm_die 'postmarketOS builder share or passthrough denied'
 sha256sum "$args_file" | awk '{ print $1 }' > "$run_dir/provision-qemu.policy.sha256"
 chmod 0600 -- "$run_dir/provision-qemu.policy.sha256"
-printf 'bootart-vm: postmarketOS builder QEMU command policy PASS\n'
+printf 'sart-vm: postmarketOS builder QEMU command policy PASS\n'

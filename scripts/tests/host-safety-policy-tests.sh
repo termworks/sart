@@ -15,10 +15,10 @@ policy="$repo_root/scripts/host-safety-policy.sh"
 }
 
 tmp_parent=${TMPDIR:-/tmp}
-tmp="$(mktemp -d "$tmp_parent/bootart-host-policy-tests.XXXXXXXXXX")"
+tmp="$(mktemp -d "$tmp_parent/sart-host-policy-tests.XXXXXXXXXX")"
 cleanup() {
     case "$tmp" in
-        "$tmp_parent"/bootart-host-policy-tests.*) rm -rf -- "$tmp" ;;
+        "$tmp_parent"/sart-host-policy-tests.*) rm -rf -- "$tmp" ;;
         *) printf 'refusing unsafe fixture cleanup: %s\n' "$tmp" >&2 ;;
     esac
 }
@@ -83,8 +83,8 @@ done
 # Mutation destinations are allowlisted by validated variable roots. Literal
 # host paths and ambient home expansion must fail even when they are outside
 # the historical /boot, /etc, and /usr denylist.
-for destination in / /home/bootart-policy-fixture /var/lib/bootart-policy-fixture \
-    /opt/bootart-policy-fixture; do
+for destination in / /home/sart-policy-fixture /var/lib/sart-policy-fixture \
+    /opt/sart-policy-fixture; do
     fixture="$(new_fixture "absolute-destination-${destination//\//-}")"
     printf '#!/usr/bin/env bash\n%s -rf -- %s\n' 'r''m' "$destination" \
         > "$fixture/scripts/bad.sh"
@@ -92,17 +92,17 @@ for destination in / /home/bootart-policy-fixture /var/lib/bootart-policy-fixtur
 done
 
 fixture="$(new_fixture home-variable-destination)"
-printf '#!/usr/bin/env bash\n%s -f -- "$%s/bootart-policy-fixture"\n' \
+printf '#!/usr/bin/env bash\n%s -f -- "$%s/sart-policy-fixture"\n' \
     'r''m' 'HO''ME' > "$fixture/scripts/bad.sh"
 expect_rejected "$fixture"
 
 fixture="$(new_fixture braced-home-variable-destination)"
-printf '#!/usr/bin/env bash\n%s -f -- "${%s}/bootart-policy-fixture"\n' \
+printf '#!/usr/bin/env bash\n%s -f -- "${%s}/sart-policy-fixture"\n' \
     'r''m' 'HO''ME' > "$fixture/scripts/bad.sh"
 expect_rejected "$fixture"
 
 fixture="$(new_fixture literal-redirection-destination)"
-printf '#!/usr/bin/env bash\nprintf unsafe > /%s/bootart-policy-fixture\n' \
+printf '#!/usr/bin/env bash\nprintf unsafe > /%s/sart-policy-fixture\n' \
     'v''ar' > "$fixture/scripts/bad.sh"
 expect_rejected "$fixture"
 
@@ -175,14 +175,14 @@ bash "$policy" "$fixture" >/dev/null
 
 for destination in boot etc usr; do
     fixture="$(new_fixture "host-destination-$destination")"
-    printf '#!/usr/bin/env bash\ncp -- input /%s/bootart-policy-fixture\n' \
+    printf '#!/usr/bin/env bash\ncp -- input /%s/sart-policy-fixture\n' \
         "$destination" > "$fixture/scripts/bad.sh"
     expect_rejected "$fixture"
 done
 
 fixture="$(new_fixture host-redirection)"
-printf '#!/usr/bin/env bash\nprintf unsafe > /%s/bootart-policy-fixture\n' \
+printf '#!/usr/bin/env bash\nprintf unsafe > /%s/sart-policy-fixture\n' \
     e"tc" > "$fixture/scripts/bad.sh"
 expect_rejected "$fixture"
 
-printf 'bootart-safety: rejection fixtures PASS\n'
+printf 'sart-safety: rejection fixtures PASS\n'

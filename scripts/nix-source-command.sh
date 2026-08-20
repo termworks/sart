@@ -11,7 +11,7 @@ umask 077
 export LC_ALL=C
 
 die() {
-    printf 'bootart-nix-source: ERROR: %s\n' "$*" >&2
+    printf 'sart-nix-source: ERROR: %s\n' "$*" >&2
     exit 2
 }
 
@@ -35,9 +35,9 @@ case "$network_mode" in
 esac
 case "$operation:$package" in
     check:) ;;
-    build:bootart-static) ;;
-    build:bootart-static-aarch64) ;;
-    build:bootart-cpp-static) ;;
+    build:sart-static) ;;
+    build:sart-static-aarch64) ;;
+    build:sart-cpp-static) ;;
     *) die 'operation/package pair is not reviewed' ;;
 esac
 
@@ -71,18 +71,20 @@ copy_file() {
 }
 
 for relative in \
-    flake.nix flake.lock PROJECT LICENSE README.md Makefile scripts/artifact-inspect.sh
+    flake.nix flake.lock LICENSE README.md Makefile scripts/artifact-inspect.sh
 do
     copy_file "$relative"
 done
 
-[[ -d "$repo_root/cpp" && ! -L "$repo_root/cpp" ]] ||
-    die 'cpp must be a regular directory'
-if unsafe_link=$(find "$repo_root/cpp" -xdev -type l -print -quit) &&
-   [[ -n "$unsafe_link" ]]; then
-    die "C++ source snapshot refuses symlink: $unsafe_link"
-fi
-cp -R -- "$repo_root/cpp" "$stage/cpp"
+for directory in include src tests; do
+    [[ -d "$repo_root/$directory" && ! -L "$repo_root/$directory" ]] ||
+        die "$directory must be a regular directory"
+    if unsafe_link=$(find "$repo_root/$directory" -xdev -type l -print -quit) &&
+       [[ -n "$unsafe_link" ]]; then
+        die "C++ source snapshot refuses symlink: $unsafe_link"
+    fi
+    cp -R -- "$repo_root/$directory" "$stage/$directory"
+done
 
 if unsafe_link=$(find "$stage" -xdev -type l -print -quit) &&
    [[ -n "$unsafe_link" ]]; then

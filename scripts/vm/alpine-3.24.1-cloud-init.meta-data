@@ -1,2 +1,2 @@
-instance-id: bootart-alpine-3.24.1-provision
-local-hostname: bootart-alpine-provision
+instance-id: sart-alpine-3.24.1-provision
+local-hostname: sart-alpine-provision

@@ -5,13 +5,13 @@ set -Eeuo pipefail
 [[ $# -eq 1 ]] || { echo 'usage: adapter-pair-policy-tests.sh REPO_ROOT' >&2; exit 2; }
 repo_root=${1%/}
 policy=$repo_root/scripts/adapter-pair-policy.sh
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/bootart-adapter-pairs.XXXXXXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/sart-adapter-pairs.XXXXXXXXXX")
 cleanup() { rm -rf -- "$fixture"; }
 trap cleanup EXIT
 
 write_fixture() {
     rm -rf -- "$fixture/repo"
-    mkdir -p "$fixture/repo/scripts/vm" "$fixture/repo/cpp/src"
+    mkdir -p "$fixture/repo/scripts/vm" "$fixture/repo/src"
     printf 'override VM_ADAPTER_PAIRS := alpha-pair beta$()pair\n' >"$fixture/repo/Makefile"
     printf 'override ADAPTER_PAIRS := alpha-pair beta$()pair\n' >"$fixture/repo/scripts/vm/Makefile"
     : >"$fixture/repo/scripts/vm/adapter-matrix.lock"
@@ -34,7 +34,7 @@ const std::array pairs{
     AdapterPairMetadata{"betapair", A, B, Supported, beta_gates, "proof"},
 };
 EOF
-    } >"$fixture/repo/cpp/src/adapter.cpp"
+    } >"$fixture/repo/src/adapter.cpp"
 }
 
 expect_rejected() {
@@ -61,12 +61,12 @@ sed -i '/alpha-pair|.*password/d' "$fixture/repo/scripts/vm/adapter-matrix.lock"
 expect_rejected missing-matrix-lane
 
 write_fixture
-sed -i '/make vm-test-password-alpha-pair/d' "$fixture/repo/cpp/src/adapter.cpp"
+sed -i '/make vm-test-password-alpha-pair/d' "$fixture/repo/src/adapter.cpp"
 expect_rejected missing-cpp-proof-gate
 
 write_fixture
 sed -i 's/AdapterPairMetadata{"alpha-pair"/AdapterPairMetadata{"renamed-pair"/' \
-    "$fixture/repo/cpp/src/adapter.cpp"
+    "$fixture/repo/src/adapter.cpp"
 expect_rejected cpp-slug-drift
 
-printf 'bootart-adapter-pairs: C++ negative fixtures PASS\n'
+printf 'sart-adapter-pairs: C++ negative fixtures PASS\n'

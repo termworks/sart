@@ -36,7 +36,7 @@ for sealed in "$base" "$base_ovmf" "$lineage"; do
         vm_die "missing or unsealed Debian provisioned input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_DEBIAN_PROVISIONED_V1 &&
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_DEBIAN_PROVISIONED_V1 &&
    "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
     vm_die 'Debian provisioned lineage is not awaiting stock verification'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
@@ -51,18 +51,18 @@ printf '%s  %s\n' "$ovmf_sha" "$base_ovmf" | sha256sum --check --status - ||
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'Debian stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_DEBIAN_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_DEBIAN_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^ovmf_vars_sha256=//p' "$verified")" == "$ovmf_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == SART_VM_DEBIAN_13_6_BASE_PASS_V1 ]] ||
         vm_die 'Debian stock-verification lineage is stale or invalid'
-    printf 'BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1\n'
+    printf 'SART_VM_DEBIAN_13_6_BASE_PASS_V1\n'
     exit 0
 fi
 
-ovmf_code=${BOOTART_OVMF_CODE:-}
+ovmf_code=${SART_OVMF_CODE:-}
 if [[ -z "$ovmf_code" ]]; then
     for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
         if [[ -f "$candidate" && ! -L "$candidate" ]]; then
@@ -196,17 +196,17 @@ done
 # wrong value must not reach login, while the sealed test passphrase must.
 wait_for_log 'device-mapper: ioctl:' "$boot_timeout" ||
     vm_die 'stock Debian encrypted-root stage did not initialize device-mapper'
-printf '%s\n' 'bootart-vm: stock Debian reached encrypted-root request'
+printf '%s\n' 'sart-vm: stock Debian reached encrypted-root request'
 sleep 10
 for key in 0 0 0 0 0 0 ret; do qmp_send_key "$key"; done
 sleep 10
-! grep -a -F -q 'bootart-vm login:' "$serial_log" ||
+! grep -a -F -q 'sart-vm login:' "$serial_log" ||
     vm_die 'the deliberately wrong Debian passphrase unexpectedly reached login'
-printf '%s\n' 'bootart-vm: stock Debian rejected the deliberately wrong passphrase'
+printf '%s\n' 'sart-vm: stock Debian rejected the deliberately wrong passphrase'
 for key in 1 1 2 3 5 8 ret; do qmp_send_key "$key"; done
-wait_for_log 'bootart-vm login:' "$login_timeout" ||
+wait_for_log 'sart-vm login:' "$login_timeout" ||
     vm_die 'stock Debian did not reach normal login after real root unlock'
-printf '%s\n' 'bootart-vm: stock Debian reached normal login after encrypted-root unlock'
+printf '%s\n' 'sart-vm: stock Debian reached normal login after encrypted-root unlock'
 
 guest_crypt='crypt''setup'
 guest_power='power''off'
@@ -218,19 +218,19 @@ guest_check+='set -eu; test "$(cat /proc/1/comm)" = systemd; source=$(findmnt -n
 guest_check+="$guest_dev/mapper/"
 guest_check+='*) ;; *) exit 1;; esac; '
 guest_check+='crypt_source=$(lsblk -rno PATH,TYPE -s "$source" | while read -r path kind; do if [ "$kind" = crypt ]; then printf "%s\n" "$path"; break; fi; done); test -n "$crypt_source"; '
-guest_check+='cache=/var/cache/bootart-kernel-update; test -d "$cache"; (cd "$cache" && sha256sum -c SHA256SUMS); test -f "$cache/SHA256SUMS"; test -f "$cache/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb"; test "$(find "$cache" -mindepth 1 -maxdepth 1 -type f | wc -l)" = 2; unset cache; '
+guest_check+='cache=/var/cache/sart-kernel-update; test -d "$cache"; (cd "$cache" && sha256sum -c SHA256SUMS); test -f "$cache/SHA256SUMS"; test -f "$cache/linux-image-6.12.95+deb13-amd64_6.12.95-1_amd64.deb"; test "$(find "$cache" -mindepth 1 -maxdepth 1 -type f | wc -l)" = 2; unset cache; '
 guest_check+="$guest_crypt"
-guest_check+=' status "$crypt_source" | grep -Eq "type:[[:space:]]+LUKS2"; boot_source=$(findmnt -n -o SOURCE /boot); test -n "$boot_source"; test "$boot_source" != "$source"; test -w /boot; boot_free=$(df -B1 --output=avail /boot | tail -n 1); test "$boot_free" -ge 536870912; image=/boot/initrd.img-$(uname -r); test -f "$image"; test -x /usr/sbin/mkinitramfs; test -x /usr/bin/unmkinitramfs; test -x /usr/sbin/update-grub; test -x /usr/sbin/grub-probe; test -f /boot/grub/grub.cfg; test -f /usr/share/initramfs-tools/hook-functions; test -x /usr/share/initramfs-tools/hooks/cryptroot; test -x /usr/share/initramfs-tools/scripts/local-top/cryptroot; test -f /usr/lib/cryptsetup/functions; test -x /usr/lib/cryptsetup/askpass; test ! -e /usr/bin/bootart; test ! -e /etc/bootart; test ! -e /var/lib/bootart; test ! -e /var/log/installer; test ! -e /etc/systemd/system/bootart-vm-sanitize.service; work=$(mktemp -d); unmkinitramfs "$image" "$work"; test -x "$work/main/init"; test -x "$work/main/scripts/local-top/cryptroot"; test -f "$work/main/usr/lib/cryptsetup/functions"; test -x "$work/main/usr/lib/cryptsetup/askpass"; ! find "$work" -iname "*bootart*" -print -quit | grep -q .; scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "BOOTART_VM_SECRET_PATH|%s\n" "$matches"; '
+guest_check+=' status "$crypt_source" | grep -Eq "type:[[:space:]]+LUKS2"; boot_source=$(findmnt -n -o SOURCE /boot); test -n "$boot_source"; test "$boot_source" != "$source"; test -w /boot; boot_free=$(df -B1 --output=avail /boot | tail -n 1); test "$boot_free" -ge 536870912; image=/boot/initrd.img-$(uname -r); test -f "$image"; test -x /usr/sbin/mkinitramfs; test -x /usr/bin/unmkinitramfs; test -x /usr/sbin/update-grub; test -x /usr/sbin/grub-probe; test -f /boot/grub/grub.cfg; test -f /usr/share/initramfs-tools/hook-functions; test -x /usr/share/initramfs-tools/hooks/cryptroot; test -x /usr/share/initramfs-tools/scripts/local-top/cryptroot; test -f /usr/lib/cryptsetup/functions; test -x /usr/lib/cryptsetup/askpass; test ! -e /usr/bin/sart; test ! -e /etc/sart; test ! -e /var/lib/sart; test ! -e /var/log/installer; test ! -e /etc/systemd/system/sart-vm-sanitize.service; work=$(mktemp -d); unmkinitramfs "$image" "$work"; test -x "$work/main/init"; test -x "$work/main/scripts/local-top/cryptroot"; test -f "$work/main/usr/lib/cryptsetup/functions"; test -x "$work/main/usr/lib/cryptsetup/askpass"; ! find "$work" -iname "*sart*" -print -quit | grep -q .; scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "SART_VM_SECRET_PATH|%s\n" "$matches"; '
 guest_check+="$guest_remove"' -r -f -- "$work"; exit 1; fi; unset scan boundary matches; '
-guest_check+="$guest_remove"' -r -f -- "$work"; printf "BOOTART_VM_DEBIAN_13_6_FACT|kernel=%s|image=%s|grub=%s|root=%s|crypt=%s|boot=%s\n" "$(uname -r)" "$image" /boot/grub/grub.cfg "$source" "$crypt_source" "$boot_source"; marker=BOOTART_VM_DEBIAN_13_6_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source crypt_source boot_source boot_free; '
+guest_check+="$guest_remove"' -r -f -- "$work"; printf "SART_VM_DEBIAN_13_6_FACT|kernel=%s|image=%s|grub=%s|root=%s|crypt=%s|boot=%s\n" "$(uname -r)" "$image" /boot/grub/grub.cfg "$source" "$crypt_source" "$boot_source"; marker=SART_VM_DEBIAN_13_6_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source crypt_source boot_source boot_free; '
 guest_check+="$guest_power'"
 
 login_password_count="$(count_log 'Password:')"
-shell_prompt='bootart@bootart-vm:~$'
+shell_prompt='sart@sart-vm:~$'
 shell_prompt_count="$(count_log "$shell_prompt")"
-privilege_prompt="[$guest_sudo] password for bootart:"
+privilege_prompt="[$guest_sudo] password for sart:"
 privilege_prompt_count="$(count_log "$privilege_prompt")"
-send_serial_line bootart
+send_serial_line sart
 wait_for_count 'Password:' "$((login_password_count + 1))" "$login_timeout" ||
     vm_die 'stock Debian login did not request the user password'
 send_serial_line ubuntu
@@ -241,7 +241,7 @@ wait_for_count "$privilege_prompt" "$((privilege_prompt_count + 1))" "$login_tim
     vm_die 'stock Debian verification did not reach privilege authentication'
 sleep 5
 send_serial_line ubuntu
-wait_for_log 'BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1' "$login_timeout" ||
+wait_for_log 'SART_VM_DEBIAN_13_6_BASE_PASS_V1' "$login_timeout" ||
     vm_die 'stock Debian guest verification did not emit its authenticated result'
 
 set +e
@@ -251,7 +251,7 @@ set -e
 qemu_pid=
 [[ $qemu_status -eq 0 ]] ||
     vm_die "stock Debian QEMU did not power off cleanly: status $qemu_status"
-oracle_count="$(grep -a -Fc 'BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1' "$serial_log" || true)"
+oracle_count="$(grep -a -Fc 'SART_VM_DEBIAN_13_6_BASE_PASS_V1' "$serial_log" || true)"
 [[ "$oracle_count" == 1 ]] || vm_die 'stock Debian oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 67108864 'stock Debian serial evidence'
 printf -v secret_pattern '%s%s' 112 358
@@ -266,15 +266,15 @@ unset secret_pattern
 verified_tmp="$run_dir/base.verified"
 serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 printf '%s\n' \
-    'schema=BOOTART_DEBIAN_PROVISIONED_V1' \
+    'schema=SART_DEBIAN_PROVISIONED_V1' \
     'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" \
     "ovmf_vars_sha256=$ovmf_sha" \
     "source_lineage_sha256=$source_lineage_sha" \
     "stock_serial_sha256=$serial_sha" \
-    'stock_oracle=BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1' > "$verified_tmp"
+    'stock_oracle=SART_VM_DEBIAN_13_6_BASE_PASS_V1' > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" ||
     vm_die 'refusing to replace Debian stock-verification lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1\n'
+printf 'SART_VM_DEBIAN_13_6_BASE_PASS_V1\n'

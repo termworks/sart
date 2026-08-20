@@ -29,7 +29,7 @@ if [[ -e "$verified" || -L "$verified" ]]; then
         vm_die 'Arch stock-verification lineage is unsafe'
     vm_assert_owned "$verified"
 fi
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_ARCH_PROVISIONED_V1 ]] ||
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_ARCH_PROVISIONED_V1 ]] ||
     vm_die 'Arch lineage schema is not owned by this harness'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
 [[ "$base_sha" =~ ^[0-9a-f]{64}$ ]] || vm_die 'Arch lineage hash is invalid'
@@ -42,4 +42,4 @@ fi
 chmod 0600 -- "$base" "$lineage"
 [[ ! -f "$verified" ]] || chmod 0600 -- "$verified"
 rm -f -- "$verified" "$lineage" "$base"
-printf 'bootart-vm: removed authenticated disposable Arch base; provisioning is required\n'
+printf 'sart-vm: removed authenticated disposable Arch base; provisioning is required\n'

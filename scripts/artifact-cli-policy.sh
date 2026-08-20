@@ -5,14 +5,14 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact-cli: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact-cli: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
-[[ $# -eq 1 ]] || die 'usage: artifact-cli-policy.sh BOOTART_ELF'
+[[ $# -eq 1 ]] || die 'usage: artifact-cli-policy.sh SART_ELF'
 elf=$1
 [[ "$elf" == /* && -f "$elf" && ! -L "$elf" && -x "$elf" ]] ||
-    die 'Bootart ELF must be an absolute executable regular file'
+    die 'Sart ELF must be an absolute executable regular file'
 
 install_help="$("$elf" install --help)" || die 'installer help failed'
 for command in plan status apply recover uninstall; do
@@ -56,4 +56,4 @@ expect_parse_rejection --initramfs-adapter install plan
 expect_parse_rejection --real-root-adapter install plan
 expect_parse_rejection --interrupt-at-checkpoint install apply --confirm-host invalid
 
-printf '%s\n' 'bootart-artifact-cli: PASS: normal release exposes only the canonical live-root installer surface'
+printf '%s\n' 'sart-artifact-cli: PASS: normal release exposes only the canonical live-root installer surface'

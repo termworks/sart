@@ -39,7 +39,7 @@ if [[ -e "$destination" ]]; then
         vm_die "cached image must have mode 0400: $destination"
     vm_assert_file_size_exact "$destination" "$download_bytes" 'cached image'
     printf '%s  %s\n' "$sha" "$destination" | sha256sum --check --status - && {
-        printf 'bootart-vm: verified cached image: %s\n' "$destination"
+        printf 'sart-vm: verified cached image: %s\n' "$destination"
         exit 0
     }
     vm_die "cached image checksum mismatch; remove it only after review: $destination"
@@ -66,4 +66,4 @@ ln -- "$partial" "$destination" || vm_die 'refusing to replace or race a cached 
 rm -f -- "$partial"
 trap - EXIT HUP INT TERM
 vm_assert_file_size_exact "$destination" "$download_bytes" 'published cached image'
-printf 'bootart-vm: fetched and verified image: %s\n' "$destination"
+printf 'sart-vm: fetched and verified image: %s\n' "$destination"

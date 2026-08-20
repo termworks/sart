@@ -1,12 +1,12 @@
-# Bootart disposable Fedora 44 Server fixture. Test infrastructure only.
+# Sart disposable Fedora 44 Server fixture. Test infrastructure only.
 text
 cdrom
 lang en_US.UTF-8
 keyboard us
 timezone Europe/Amsterdam --utc
-network --bootproto=dhcp --device=enp0s1 --activate --hostname=bootart-vm
+network --bootproto=dhcp --device=enp0s1 --activate --hostname=sart-vm
 rootpw --lock
-user --name=bootart --groups=wheel --password=$6$exDY1mhS4KUYCE/2$zmn9ToZwTKLhCw.b4/b.ZRTIZM30JZ4QrOQ2aOXJ8yk96xpcCof0kxKwuX1kqLG/ygbJ1f8wxED22bTL4F46P0 --iscrypted
+user --name=sart --groups=wheel --password=$6$exDY1mhS4KUYCE/2$zmn9ToZwTKLhCw.b4/b.ZRTIZM30JZ4QrOQ2aOXJ8yk96xpcCof0kxKwuX1kqLG/ygbJ1f8wxED22bTL4F46P0 --iscrypted
 firstboot --disable
 selinux --enforcing
 firewall --enabled --service=ssh
@@ -17,7 +17,7 @@ zerombr
 clearpart --all --initlabel --drives=vda
 part /boot/efi --fstype=efi --ondisk=vda --size=1024 --fsoptions="umask=0077,shortname=winnt"
 part /boot --fstype=ext4 --ondisk=vda --size=4096
-part / --fstype=xfs --ondisk=vda --size=8192 --grow --encrypted --passphrase=__BOOTART_VM_LUKS_PASSPHRASE__ --luks-version=luks2
+part / --fstype=xfs --ondisk=vda --size=8192 --grow --encrypted --passphrase=__SART_VM_LUKS_PASSPHRASE__ --luks-version=luks2
 bootloader --location=boot --boot-drive=vda --append="console=ttyS0,115200n8 console=tty0"
 
 %packages
@@ -34,23 +34,23 @@ util-linux
 set -eu
 target=/mnt/sysroot
 if [ -d /mnt/sysimage/etc ]; then target=/mnt/sysimage; fi
-mkdir -p /run/bootart-kernel-seed "$target/var/cache/bootart-kernel-update"
+mkdir -p /run/sart-kernel-seed "$target/var/cache/sart-kernel-update"
 seed=$(blkid -L OEMDRV)
 seed_root=$(findmnt -nr -S "$seed" -o TARGET | sed -n '1p')
 mounted_here=0
 if [ -z "$seed_root" ]; then
-    mount -o ro "$seed" /run/bootart-kernel-seed
-    seed_root=/run/bootart-kernel-seed
+    mount -o ro "$seed" /run/sart-kernel-seed
+    seed_root=/run/sart-kernel-seed
     mounted_here=1
 fi
 cp "$seed_root/kernel-packages/SHA256SUMS" \
     "$seed_root"/kernel-packages/*.rpm \
-    "$target/var/cache/bootart-kernel-update/"
-chmod 0600 "$target/var/cache/bootart-kernel-update"/*
+    "$target/var/cache/sart-kernel-update/"
+chmod 0600 "$target/var/cache/sart-kernel-update"/*
 if [ "$mounted_here" = 1 ]; then
-    umount /run/bootart-kernel-seed
+    umount /run/sart-kernel-seed
 fi
-rmdir /run/bootart-kernel-seed
+rmdir /run/sart-kernel-seed
 unset mounted_here seed seed_root target
 %end
 
@@ -62,7 +62,7 @@ dracut --regenerate-all --force
 grubby --update-kernel=ALL \
     --args='console=ttyS0,115200n8 console=tty0'
 grub2-mkconfig -o /boot/grub2/grub.cfg
-cat > /etc/systemd/system/bootart-vm-sanitize.service <<'EOF'
+cat > /etc/systemd/system/sart-vm-sanitize.service <<'EOF'
 [Unit]
 Description=Remove disposable installer evidence before acceptance
 DefaultDependencies=no
@@ -72,17 +72,17 @@ Before=getty.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/rm -rf /root/anaconda-ks.cfg /root/original-ks.cfg /var/log/anaconda /tmp/ks-script-*
-ExecStart=/usr/bin/rm -f /etc/systemd/system/getty-pre.target.wants/bootart-vm-sanitize.service
-ExecStart=/usr/bin/rm -f /etc/systemd/system/bootart-vm-sanitize.service
+ExecStart=/usr/bin/rm -f /etc/systemd/system/getty-pre.target.wants/sart-vm-sanitize.service
+ExecStart=/usr/bin/rm -f /etc/systemd/system/sart-vm-sanitize.service
 
 [Install]
 WantedBy=getty.target
 EOF
 mkdir -p /etc/systemd/system/getty.target.wants
-ln -s ../bootart-vm-sanitize.service \
-    /etc/systemd/system/getty.target.wants/bootart-vm-sanitize.service
+ln -s ../sart-vm-sanitize.service \
+    /etc/systemd/system/getty.target.wants/sart-vm-sanitize.service
 # Start on a fresh serial line. Anaconda's text UI may still surround direct
 # tty writes with cursor-control bytes, so the host verifies one exact marker
 # occurrence rather than requiring the terminal-rendered line to be byte-pure.
-printf '\n%s\n' BOOTART_VM_FEDORA_44_INSTALL_COMPLETE_V1 > /dev/ttyS0
+printf '\n%s\n' SART_VM_FEDORA_44_INSTALL_COMPLETE_V1 > /dev/ttyS0
 %end

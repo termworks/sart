@@ -7,10 +7,10 @@ umask 077
 [[ $# -eq 1 ]] || { printf 'usage: artifact-operation-policy-tests.sh REPOSITORY_ROOT\n' >&2; exit 2; }
 repo_root=${1%/}
 policy=$repo_root/scripts/artifact-operation-policy.sh
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootart-artifact-operation.XXXXXXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sart-artifact-operation.XXXXXXXXXX")
 cleanup() {
     case "$tmp" in
-        "${TMPDIR:-/tmp}"/bootart-artifact-operation.*) rm -rf -- "$tmp" ;;
+        "${TMPDIR:-/tmp}"/sart-artifact-operation.*) rm -rf -- "$tmp" ;;
         *) printf 'refusing unsafe artifact-operation fixture cleanup: %s\n' "$tmp" >&2 ;;
     esac
 }
@@ -121,4 +121,4 @@ sed -i '/generation="[$][$](bash scripts\/release-package-generation.sh/ s|gener
     "$tmp/Makefile"
 expect_rejected release-generation-check-name-only-in-echo
 
-printf 'bootart-artifact-operations: rejection fixtures PASS\n'
+printf 'sart-artifact-operations: rejection fixtures PASS\n'

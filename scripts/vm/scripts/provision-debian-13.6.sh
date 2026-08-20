@@ -73,13 +73,13 @@ template="$repo_root/scripts/vm/debian-13.6-preseed.cfg.in"
     vm_die "unsafe Debian preseed source: $template"
 template_mode="$(vm_stat_mode "$template")"
 (( (8#$template_mode & 0022) == 0 )) || vm_die 'writable Debian preseed source'
-marker=__BOOTART_VM_LUKS_PASSPHRASE__
+marker=__SART_VM_LUKS_PASSPHRASE__
 [[ "$(grep -Foc -- "$marker" "$template")" == 2 ]] ||
     vm_die 'Debian preseed must contain exactly two LUKS markers'
 template_sha="$(sha256sum "$template" | awk '{ print $1 }')"
 
-ovmf_code=${BOOTART_OVMF_CODE:-}
-ovmf_vars_template=${BOOTART_OVMF_VARS:-}
+ovmf_code=${SART_OVMF_CODE:-}
+ovmf_vars_template=${SART_OVMF_VARS:-}
 if [[ -z "$ovmf_code" ]]; then
     for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
         if [[ -f "$candidate" && ! -L "$candidate" ]]; then ovmf_code=$candidate; break; fi
@@ -139,7 +139,7 @@ if [[ -e "$base" || -L "$base" || -e "$base_ovmf_vars" || -L "$base_ovmf_vars" |
     printf '%s  %s\n' "$recorded_ovmf_sha" "$base_ovmf_vars" |
         sha256sum --check --status - ||
         vm_die 'Debian provisioned OVMF variables differ from lineage'
-    printf 'bootart-vm: validated cached, stock-unverified Debian base: %s\n' "$base"
+    printf 'sart-vm: validated cached, stock-unverified Debian base: %s\n' "$base"
     exit 0
 fi
 
@@ -212,7 +212,7 @@ cp -- "$kernel_package_manifest" "$preseed_root/kernel-packages/SHA256SUMS"
 cp -- "$package_path" "$preseed_root/kernel-packages/$package_filename"
 chmod 0400 -- "$preseed_root/kernel-packages/SHA256SUMS" \
     "$preseed_root/kernel-packages/$package_filename"
-xorriso -as mkisofs -quiet -V BOOTARTPRESEED -o "$seed_iso" \
+xorriso -as mkisofs -quiet -V SARTPRESEED -o "$seed_iso" \
     -graft-points /preseed.cfg="$preseed" \
     /kernel-packages/SHA256SUMS="$kernel_package_manifest" \
     "/kernel-packages/$package_filename=$package_path" >/dev/null 2>&1
@@ -280,7 +280,7 @@ bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
 capture_pid=$!
 vm_assert_executable_identity "$qemu_executable" "$qemu_identity" \
     'configured QEMU executable'
-printf 'bootart-vm: installing Debian 13.6 with debian-installer (timeout %ss)\n' \
+printf 'sart-vm: installing Debian 13.6 with debian-installer (timeout %ss)\n' \
     "$provision_timeout"
 report_provision_progress() {
     local elapsed=0 disk_bytes serial_bytes
@@ -289,7 +289,7 @@ report_provision_progress() {
         kill -0 "$qemu_pid" 2>/dev/null || return 0
         disk_bytes="$(vm_stat_size "$target_disk" 2>/dev/null || printf unknown)"
         serial_bytes="$(vm_stat_size "$serial_log" 2>/dev/null || printf unknown)"
-        printf 'bootart-vm: Debian provision running: elapsed=%ss disk-bytes=%s serial-bytes=%s\n' \
+        printf 'sart-vm: Debian provision running: elapsed=%ss disk-bytes=%s serial-bytes=%s\n' \
             "$elapsed" "$disk_bytes" "$serial_bytes" >&2
     done
 }
@@ -313,7 +313,7 @@ rm -f -- "$serial_fifo"
     vm_die "Debian installer QEMU failed or timed out: status $qemu_status"
 [[ ! -e "$serial_overflow" ]] || vm_die 'Debian installer serial output exceeded its bound'
 install_oracle_count="$({
-    grep -a -F -o -- 'BOOTART_VM_DEBIAN_13_6_INSTALL_COMPLETE_V1' "$serial_log" || true
+    grep -a -F -o -- 'SART_VM_DEBIAN_13_6_INSTALL_COMPLETE_V1' "$serial_log" || true
 } | wc -l)"
 [[ "$install_oracle_count" == 1 ]] ||
     vm_die 'Debian installer exited without the exact completed-preseed oracle'
@@ -346,7 +346,7 @@ base_sha="$(sha256sum "$target_disk" | awk '{ print $1 }')"
 ovmf_vars_sha="$(sha256sum "$ovmf_vars" | awk '{ print $1 }')"
 lineage_tmp="$run_dir/base.provisioned"
 printf '%s\n' \
-    'schema=BOOTART_DEBIAN_PROVISIONED_V1' \
+    'schema=SART_DEBIAN_PROVISIONED_V1' \
     'status=PROVISIONED_UNVERIFIED' \
     "iso_id=$image_id" \
     "iso_url=$iso_url" \
@@ -373,4 +373,4 @@ ln -- "$lineage_tmp" "$lineage" || {
     vm_die 'refusing to replace provisioned Debian lineage'
 }
 rm -f -- "$target_disk" "$ovmf_vars" "$lineage_tmp"
-printf 'bootart-vm: Debian base provisioned but not yet stock-boot verified: %s\n' "$base"
+printf 'sart-vm: Debian base provisioned but not yet stock-boot verified: %s\n' "$base"

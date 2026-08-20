@@ -1,5 +1,5 @@
 #!/bin/busybox sh
 # TEST INFRASTRUCTURE ONLY. Become the real BusyBox init applet before any
-# product process is started. This file is never part of the bootart payload.
+# product process is started. This file is never part of the sart payload.
 
 exec /bin/busybox init

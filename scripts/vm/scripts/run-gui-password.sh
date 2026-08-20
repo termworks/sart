@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TEST INFRASTRUCTURE ONLY. Interactive Bootart prompt against a disposable
+# TEST INFRASTRUCTURE ONLY. Interactive Sart prompt against a disposable
 # LUKS volume stored inside one private qcow2 regular file.
 
 set -Eeuo pipefail
@@ -8,12 +8,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
 [[ $# -eq 7 ]] || vm_die \
-    'usage: run-gui-password.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID BOOTART_BIN QEMU QEMU_IMG'
+    'usage: run-gui-password.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID SART_BIN QEMU QEMU_IMG'
 repo_root=$1
 vm_root=$2
 lock_file=$3
 image_id=$4
-bootart_bin=$5
+sart_bin=$5
 configured_qemu=$6
 configured_qemu_img=$7
 
@@ -31,8 +31,8 @@ IFS='|' read -r id status _url sha format arch filename kernel initrd \
     vm_die 'password GUI requires the verified x86_64 lifecycle ISO'
 [[ "$kernel" == /* && "$initrd" == /* ]] ||
     vm_die 'password GUI lifecycle ISO has invalid kernel/initramfs members'
-[[ "$bootart_bin" == "$repo_root/target/"* ]] ||
-    vm_die 'password GUI Bootart input must remain below repository target/'
+[[ "$sart_bin" == "$repo_root/target/"* ]] ||
+    vm_die 'password GUI Sart input must remain below repository target/'
 
 image="$vm_root/cache/images/$filename"
 vm_assert_not_symlink "$image"
@@ -62,7 +62,7 @@ vm_assert_executable_identity "$qemu_img" "$qemu_img_identity" \
 
 # This is a public, fixed fixture credential for a disposable test volume, not
 # a user secret. It is kept out of QEMU argv/environment and is never retained
-# in the generated image or logs. The user still types it into Bootart so the
+# in the generated image or logs. The user still types it into Sart so the
 # interactive prompt path remains under visual test.
 test_passphrase=112358
 
@@ -100,7 +100,7 @@ vm_assert_qcow2_virtual_size "$drive" 67108864
 bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" \
     bash "$SCRIPT_DIR/prepare-smoke.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$image" \
-    "$kernel" "$initrd" "$bootart_bin" >/dev/null
+    "$kernel" "$initrd" "$sart_bin" >/dev/null
 bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" \
     bash "$SCRIPT_DIR/prepare-password-smoke.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$image" "$cryptsetup" >/dev/null
@@ -139,8 +139,8 @@ qemu_supports_display() {
 }
 configured_qemu_physical="$(vm_resolve_qemu "$configured_qemu")"
 declare -a qemu_candidates=("$configured_qemu_physical")
-if command -v -- bootart-qemu-gui >/dev/null 2>&1; then
-    qemu_candidates+=(bootart-qemu-gui)
+if command -v -- sart-qemu-gui >/dev/null 2>&1; then
+    qemu_candidates+=(sart-qemu-gui)
 fi
 if [[ -x /usr/bin/qemu-system-x86_64 ]]; then
     qemu_candidates+=(/usr/bin/qemu-system-x86_64)
@@ -166,12 +166,12 @@ vm_assert_executable_identity "$qemu" "$qemu_identity" 'password GUI QEMU execut
 
 : >"$serial"
 chmod 0600 -- "$serial"
-printf 'bootart-vm: encrypted qcow2 guest: %s\n' "$run_dir"
-printf '%s\n' 'bootart-vm: click the QEMU window and type 112358 when Bootart asks'
+printf 'sart-vm: encrypted qcow2 guest: %s\n' "$run_dir"
+printf '%s\n' 'sart-vm: click the QEMU window and type 112358 when Sart asks'
 
 set +e
 timeout --signal=TERM --kill-after=2s 180s "$qemu" \
-    -name bootart-gui-password \
+    -name sart-gui-password \
     -nodefaults \
     -no-user-config \
     -machine q35,accel=tcg \
@@ -188,21 +188,21 @@ timeout --signal=TERM --kill-after=2s 180s "$qemu" \
     -device virtio-blk-pci,drive=encrypted \
     -kernel "$run_dir/kernel" \
     -initrd "$run_dir/initramfs.cpio.gz" \
-    -append 'console=tty0 rdinit=/init panic=-1 quiet bootart.vm.gui-password=1' \
+    -append 'console=tty0 rdinit=/init panic=-1 quiet sart.vm.gui-password=1' \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=allow,resourcecontrol=deny
 qemu_status=$?
 set -e
 [[ "$qemu_status" -eq 0 ]] ||
     vm_die "password GUI QEMU failed or timed out with status $qemu_status"
-password_prompt_count="$(grep -Fxc 'BOOTART_VM_GUI_PASSWORD_PROMPT_V1' "$serial" || true)"
-if [[ "$(grep -Fxc 'BOOTART_VM_GUI_PASSWORD_PASS_V1' "$serial" || true)" -ne 1 ]]; then
-    if grep -Fxq 'BOOTART_VM_LIFECYCLE_FAIL_V1:encrypted-qemu-drive-unlock' "$serial"; then
+password_prompt_count="$(grep -Fxc 'SART_VM_GUI_PASSWORD_PROMPT_V1' "$serial" || true)"
+if [[ "$(grep -Fxc 'SART_VM_GUI_PASSWORD_PASS_V1' "$serial" || true)" -ne 1 ]]; then
+    if grep -Fxq 'SART_VM_LIFECYCLE_FAIL_V1:encrypted-qemu-drive-unlock' "$serial"; then
         vm_die "password GUI guest rejected $password_prompt_count submitted passphrase attempt(s); type exactly 112358 using the QEMU window; inspect $serial"
     fi
     vm_die "password GUI did not complete the disposable qcow2 unlock; inspect $serial"
 fi
-! grep -Fq 'BOOTART_VM_LIFECYCLE_FAIL_V1' "$serial" ||
+! grep -Fq 'SART_VM_LIFECYCLE_FAIL_V1' "$serial" ||
     vm_die "password GUI guest reported failure; inspect $serial"
 vm_assert_file_size_at_most "$serial" "$max_log_bytes" 'password GUI serial log'
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
-printf 'bootart-vm: encrypted qcow2 password preview PASS: %s\n' "$run_dir"
+printf 'sart-vm: encrypted qcow2 password preview PASS: %s\n' "$run_dir"

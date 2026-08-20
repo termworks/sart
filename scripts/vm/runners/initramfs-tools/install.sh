@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == debian-13.6-initramfs-tools-systemd ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -83,8 +83,8 @@ EOF
         guest_rm='r''m'
         guest_sh='s''h'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
-        privileged_prompt="[$guest_sudo] password for bootart:"
+        guest_transport="$guest_dev/disk/by-label/SART"
+        privileged_prompt="[$guest_sudo] password for sart:"
         # Debian's initramfs-tools askpass owns tty0 and does not mirror its
         # text prompt to ttyS0. This deterministic cryptroot boundary is the
         # same one authenticated by the sealed stock-base verifier.
@@ -154,7 +154,7 @@ EOF
             [[ "$(sed -n '2p' -- "$output")" == '1280 800' ]]
             [[ "$(sed -n '3p' -- "$output")" == 255 ]]
         }
-        require_bootart_password_screen() {
+        require_sart_password_screen() {
             tail -c 3072000 -- "$run_dir/install-password-ready.ppm" | od -An -v -tu1 | awk '
                 {
                     for (i = 1; i <= NF; i++) {
@@ -204,11 +204,11 @@ EOF
                 }
             '
         }
-        wait_bootart_password_screen() {
+        wait_sart_password_screen() {
             local elapsed=0
             while (( elapsed < 90 )); do
                 qmp_screendump
-                if require_bootart_password_screen; then return 0; fi
+                if require_sart_password_screen; then return 0; fi
                 sleep 1
                 ((elapsed += 1))
             done
@@ -241,25 +241,25 @@ EOF
             qmp_key ret
             printf 'driver-stage=stock-root-unlock-submitted-%s\n' "$before"
         }
-        unlock_bootart_root() {
+        unlock_sart_root() {
             local wanted=$1
             # initramfs-tools starts the daemon from a BusyBox hook with all
             # daemon output deliberately suppressed, so there is no honest
             # serial startup marker. Do not invent one: require the actual
-            # centered black Bootart password box before injecting input. The
+            # centered black Sart password box before injecting input. The
             # box is rendered before the password reader is guaranteed to be
             # attached, so preserve the proven settling interval.
-            wait_bootart_password_screen
+            wait_sart_password_screen
             sleep 7
             qmp_type_secret
             qmp_key ret
-            printf 'driver-stage=bootart-root-unlock-submitted-%s\n' "$wanted"
+            printf 'driver-stage=sart-root-unlock-submitted-%s\n' "$wanted"
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             sleep 2
@@ -268,9 +268,9 @@ EOF
             local request=$1 marker=$2 prompt_count marker_count marker_suffix
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                marker_suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                marker_suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -280,51 +280,51 @@ EOF
 
         unlock_stock_root 1
         login_guest 1
-        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_INSTALL_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_INSTALL_TRANSPORT_MOUNTED_V1
 
         # Planning mutates nothing and needs no hostname acknowledgement, but
         # its exact preflight hashes root-owned initramfs bytes. Run it through
         # the normal administrator path and require the production READY
         # contract rather than the retired alternate-root PREVIEW marker.
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install plan" \
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install plan" \
             'status: READY'
 
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed'
-        privileged_step "$guest_sudo -k /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_INSTALL_STATUS_VERIFIED_V1
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: already-current'
-        privileged_step "$guest_sudo -k cmp /mnt/bootart-transport/bootart /usr/bin/bootart" \
-            BOOTART_VM_INSTALL_REAL_ROOT_HASH_V1
-        privileged_step "$guest_sudo -k $guest_sh -c '$guest_rm -rf /var/tmp/bootart-initramfs-check; /usr/bin/unmkinitramfs $guest_initramfs /var/tmp/bootart-initramfs-check && /usr/bin/cmp /mnt/bootart-transport/bootart /var/tmp/bootart-initramfs-check/main/usr/bin/bootart && $guest_rm -rf /var/tmp/bootart-initramfs-check'" \
-            BOOTART_VM_INSTALL_INITRAMFS_HASH_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed'
+        privileged_step "$guest_sudo -k /usr/bin/sart $guest_install status" \
+            SART_VM_INSTALL_STATUS_VERIFIED_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: already-current'
+        privileged_step "$guest_sudo -k cmp /mnt/sart-transport/sart /usr/bin/sart" \
+            SART_VM_INSTALL_REAL_ROOT_HASH_V1
+        privileged_step "$guest_sudo -k $guest_sh -c '$guest_rm -rf /var/tmp/sart-initramfs-check; /usr/bin/unmkinitramfs $guest_initramfs /var/tmp/sart-initramfs-check && /usr/bin/cmp /mnt/sart-transport/sart /var/tmp/sart-initramfs-check/main/usr/bin/sart && $guest_rm -rf /var/tmp/sart-initramfs-check'" \
+            SART_VM_INSTALL_INITRAMFS_HASH_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -k $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_umount /mnt/sart-transport" \
+            SART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         printf 'driver-stage=transport-device-removed\n'
         sleep 3
 
         initrd_count=$(count_log 'Running in initrd.')
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         prompt_count=$(count_log "$privileged_prompt")
         send_serial "$guest_sudo -k $guest_reboot"
         wait_count "$privileged_prompt" "$((prompt_count + 1))"
         send_serial ubuntu
-        unlock_bootart_root "$((initrd_count + 1))"
+        unlock_sart_root "$((initrd_count + 1))"
         login_guest "$((login_count + 1))"
 
-        privileged_step "$guest_sudo -k $guest_sh -c 'test ! -e $guest_transport && test ! -e /mnt/bootart-transport/bootart && /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_INSTALL_DISK_ONLY_V1
-        privileged_step "$guest_sudo -k $guest_sh -c '$guest_rm -rf /var/tmp/bootart-initramfs-check; /usr/bin/unmkinitramfs $guest_initramfs /var/tmp/bootart-initramfs-check && /usr/bin/cmp /usr/bin/bootart /var/tmp/bootart-initramfs-check/main/usr/bin/bootart && $guest_rm -rf /var/tmp/bootart-initramfs-check'" \
-            BOOTART_VM_INSTALL_REBOOT_HASH_V1
+        privileged_step "$guest_sudo -k $guest_sh -c 'test ! -e $guest_transport && test ! -e /mnt/sart-transport/sart && /usr/bin/sart $guest_install status'" \
+            SART_VM_INSTALL_DISK_ONLY_V1
+        privileged_step "$guest_sudo -k $guest_sh -c '$guest_rm -rf /var/tmp/sart-initramfs-check; /usr/bin/unmkinitramfs $guest_initramfs /var/tmp/sart-initramfs-check && /usr/bin/cmp /usr/bin/sart /var/tmp/sart-initramfs-check/main/usr/bin/sart && $guest_rm -rf /var/tmp/sart-initramfs-check'" \
+            SART_VM_INSTALL_REBOOT_HASH_V1
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1
         wait_count "$oracle" 1

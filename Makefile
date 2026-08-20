@@ -4,12 +4,12 @@ override CURDIR := $(realpath .)
 ifneq ($(filter command line override,$(origin MAKEFLAGS)),)
     $(error assigning MAKEFLAGS is forbidden because it can conceal active safety-bypassing flags)
 endif
-override __BOOTART_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
+override __SART_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
 ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)
     $(error --ignore-errors/-i is forbidden because it can bypass safety gates)
 endif
-ifeq ($(filter --%,$(__BOOTART_MAKE_SHORT_FLAGS)),)
-ifneq ($(findstring i,$(__BOOTART_MAKE_SHORT_FLAGS)),)
+ifeq ($(filter --%,$(__SART_MAKE_SHORT_FLAGS)),)
+ifneq ($(findstring i,$(__SART_MAKE_SHORT_FLAGS)),)
     $(error --ignore-errors/-i is forbidden because it can bypass safety gates)
 endif
 endif
@@ -23,35 +23,35 @@ endif
 # Capture documented inputs without expanding embedded Make syntax. Distinct
 # internal variables are required: self-referential `$(value VAR)` assignments
 # would observe the assignment being defined rather than the caller's value.
-override __BOOTART_TEST_TIMEOUT_SECONDS_ORIGIN := $(origin TEST_TIMEOUT_SECONDS)
-override __BOOTART_TEST_TIMEOUT_SECONDS_RAW := $(value TEST_TIMEOUT_SECONDS)
-override __BOOTART_NIX_OFFLINE_ORIGIN := $(origin NIX_OFFLINE)
-override __BOOTART_NIX_OFFLINE_RAW := $(value NIX_OFFLINE)
-override __BOOTART_QEMU_ORIGIN := $(origin QEMU)
-override __BOOTART_QEMU_RAW := $(value QEMU)
-override __BOOTART_QEMU_IMG_ORIGIN := $(origin QEMU_IMG)
-override __BOOTART_QEMU_IMG_RAW := $(value QEMU_IMG)
-override __BOOTART_IMAGE_ID_ORIGIN := $(origin IMAGE_ID)
-override __BOOTART_IMAGE_ID_RAW := $(value IMAGE_ID)
-override __BOOTART_TIMEOUT_SECONDS_ORIGIN := $(origin TIMEOUT_SECONDS)
-override __BOOTART_TIMEOUT_SECONDS_RAW := $(value TIMEOUT_SECONDS)
-override __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin ADAPTER_HOST_TIMEOUT_SECONDS)
-override __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW := $(value ADAPTER_HOST_TIMEOUT_SECONDS)
-override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_HOST_TIMEOUT_SECONDS)
-override __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
-override __BOOTART_BOOTART_BIN_ORIGIN := $(origin BOOTART_BIN)
-override __BOOTART_BOOTART_BIN_RAW := $(value BOOTART_BIN)
-override __BOOTART_ARGS_FILE_RAW := $(value ARGS_FILE)
-override __BOOTART_RUN_DIR_RAW := $(value RUN_DIR)
-override __BOOTART_BASE_IMAGE_RAW := $(value BASE_IMAGE)
-override __BOOTART_OVERLAY_RAW := $(value OVERLAY)
+override __SART_TEST_TIMEOUT_SECONDS_ORIGIN := $(origin TEST_TIMEOUT_SECONDS)
+override __SART_TEST_TIMEOUT_SECONDS_RAW := $(value TEST_TIMEOUT_SECONDS)
+override __SART_NIX_OFFLINE_ORIGIN := $(origin NIX_OFFLINE)
+override __SART_NIX_OFFLINE_RAW := $(value NIX_OFFLINE)
+override __SART_QEMU_ORIGIN := $(origin QEMU)
+override __SART_QEMU_RAW := $(value QEMU)
+override __SART_QEMU_IMG_ORIGIN := $(origin QEMU_IMG)
+override __SART_QEMU_IMG_RAW := $(value QEMU_IMG)
+override __SART_IMAGE_ID_ORIGIN := $(origin IMAGE_ID)
+override __SART_IMAGE_ID_RAW := $(value IMAGE_ID)
+override __SART_TIMEOUT_SECONDS_ORIGIN := $(origin TIMEOUT_SECONDS)
+override __SART_TIMEOUT_SECONDS_RAW := $(value TIMEOUT_SECONDS)
+override __SART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin ADAPTER_HOST_TIMEOUT_SECONDS)
+override __SART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW := $(value ADAPTER_HOST_TIMEOUT_SECONDS)
+override __SART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __SART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __SART_SART_BIN_ORIGIN := $(origin SART_BIN)
+override __SART_SART_BIN_RAW := $(value SART_BIN)
+override __SART_ARGS_FILE_RAW := $(value ARGS_FILE)
+override __SART_RUN_DIR_RAW := $(value RUN_DIR)
+override __SART_BASE_IMAGE_RAW := $(value BASE_IMAGE)
+override __SART_OVERLAY_RAW := $(value OVERLAY)
 
 # Known caller inputs are temporarily removed from Make's automatic
 # command-line/environment export before any parse-time shell runs. They are
 # normalized to simple literal values below and then explicitly exported.
 unexport TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
 unexport ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
-unexport BOOTART_BIN ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
+unexport SART_BIN ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 unexport PROJECT_NAME PROJECT_VERSION NIX MAKE VM_MAKE
 unexport NIX_OFFLINE_FLAG NIX_NETWORK_MODE HOST_MACHINE STATIC_ARCH PACKAGE_ARCH
 unexport STATIC_ROOT STATIC_GENERATIONS_DIR STATIC_CURRENT_POINTER STATIC_PACKAGE_DIR
@@ -60,25 +60,23 @@ unexport VM_ADAPTER_PAIRS VM_ADAPTER_LIFECYCLE_TARGETS VM_ADAPTER_INSTALL_TARGET
 unexport VM_ADAPTER_PASSWORD_TARGETS VM_ADAPTER_RECOVERY_TARGETS
 unexport VM_ADAPTER_UNINSTALL_TARGETS VM_ADAPTER_KERNEL_UPDATE_TARGETS
 unexport VM_ADAPTER_TEST_TARGETS VM_ADAPTER_RUNNABLE_TARGETS
-unexport UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN PREFIX
+unexport UPDATE_GOLDEN SART_GOLDEN_WRITE_TOKEN PREFIX
 
-override PROJECT_NAME := $(shell sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT 2>/dev/null | head -1 | tr -d '[:space:]')
-override PROJECT_VERSION := $(shell sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT 2>/dev/null | sed -n '2p' | tr -d '[:space:]')
-ifeq ($(PROJECT_NAME),)
-    $(error Error: PROJECT file not found or invalid)
-endif
+override HOST_MACHINE := $(shell uname -m)
+override PROJECT_NAME := sart
+override PROJECT_VERSION := 0.1.0
 
 override NIX := nix
 override MAKE := make
-ifeq ($(__BOOTART_TEST_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_TEST_TIMEOUT_SECONDS_ORIGIN),undefined)
     override TEST_TIMEOUT_SECONDS := 120
 else
-    override TEST_TIMEOUT_SECONDS := $(value __BOOTART_TEST_TIMEOUT_SECONDS_RAW)
+    override TEST_TIMEOUT_SECONDS := $(value __SART_TEST_TIMEOUT_SECONDS_RAW)
 endif
-ifeq ($(__BOOTART_NIX_OFFLINE_ORIGIN),undefined)
+ifeq ($(__SART_NIX_OFFLINE_ORIGIN),undefined)
     override NIX_OFFLINE := 1
 else
-    override NIX_OFFLINE := $(value __BOOTART_NIX_OFFLINE_RAW)
+    override NIX_OFFLINE := $(value __SART_NIX_OFFLINE_RAW)
 endif
 ifeq ($(filter $(NIX_OFFLINE),0 1),)
     $(error NIX_OFFLINE must be 0 or 1)
@@ -87,41 +85,41 @@ override NIX_OFFLINE_FLAG := $(if $(filter 1,$(NIX_OFFLINE)),--offline,)
 override NIX_NETWORK_MODE := $(if $(filter 1,$(NIX_OFFLINE)),offline,online)
 # Ordinary Make lanes keep golden output read-only.
 override UPDATE_GOLDEN := 0
-override BOOTART_GOLDEN_WRITE_TOKEN :=
-export UPDATE_GOLDEN BOOTART_GOLDEN_WRITE_TOKEN
+override SART_GOLDEN_WRITE_TOKEN :=
+export UPDATE_GOLDEN SART_GOLDEN_WRITE_TOKEN
 PREFIX ?= $(HOME)/.local
 override VM_MAKE := $(MAKE) -C scripts/vm
-ifeq ($(__BOOTART_QEMU_ORIGIN),undefined)
+ifeq ($(__SART_QEMU_ORIGIN),undefined)
     override QEMU := qemu-system-x86_64
 else
-    override QEMU := $(value __BOOTART_QEMU_RAW)
+    override QEMU := $(value __SART_QEMU_RAW)
 endif
-ifeq ($(__BOOTART_QEMU_IMG_ORIGIN),undefined)
+ifeq ($(__SART_QEMU_IMG_ORIGIN),undefined)
     override QEMU_IMG := qemu-img
 else
-    override QEMU_IMG := $(value __BOOTART_QEMU_IMG_RAW)
+    override QEMU_IMG := $(value __SART_QEMU_IMG_RAW)
 endif
-ifeq ($(__BOOTART_IMAGE_ID_ORIGIN),undefined)
+ifeq ($(__SART_IMAGE_ID_ORIGIN),undefined)
     override IMAGE_ID := alpine-virt-3.20.0-x86_64
 else
-    override IMAGE_ID := $(value __BOOTART_IMAGE_ID_RAW)
+    override IMAGE_ID := $(value __SART_IMAGE_ID_RAW)
 endif
-ifeq ($(__BOOTART_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_TIMEOUT_SECONDS_ORIGIN),undefined)
     override TIMEOUT_SECONDS := 90
 else
-    override TIMEOUT_SECONDS := $(value __BOOTART_TIMEOUT_SECONDS_RAW)
+    override TIMEOUT_SECONDS := $(value __SART_TIMEOUT_SECONDS_RAW)
 endif
-ifeq ($(__BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
     # The matrix deadline belongs to the launched guest driver. The outer
     # bound additionally covers immutable multi-gigabyte image verification.
     override ADAPTER_HOST_TIMEOUT_SECONDS := 5100
 else
-    override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
+    override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __SART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
 endif
-ifeq ($(__BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
     override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180
 else
-    override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
+    override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __SART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
 endif
 override VM_ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc mkinitfs-boot-deploy-systemd
 override VM_ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(VM_ADAPTER_PAIRS))
@@ -139,28 +137,27 @@ override STATIC_ROOT := $(CURDIR)/target/artifacts
 override STATIC_GENERATIONS_DIR := $(STATIC_ROOT)/generations
 override STATIC_CURRENT_POINTER := $(STATIC_ROOT)/current
 override STATIC_PACKAGE_DIR := $(STATIC_ROOT)/packages
-ifeq ($(__BOOTART_BOOTART_BIN_ORIGIN),undefined)
-    override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+ifeq ($(__SART_SART_BIN_ORIGIN),undefined)
+    override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 else
-    override BOOTART_BIN := $(value __BOOTART_BOOTART_BIN_RAW)
+    override SART_BIN := $(value __SART_SART_BIN_RAW)
 endif
-override HOST_MACHINE := $(shell uname -m)
 override STATIC_ARCH := $(if $(filter x86_64,$(HOST_MACHINE)),x86_64,$(if $(filter aarch64,$(HOST_MACHINE)),aarch64,unsupported))
 override PACKAGE_ARCH := $(STATIC_ARCH)
 override STATIC_ARCH_SAFE := $(if $(filter 1,$(words $(STATIC_ARCH))),$(filter x86_64 aarch64,$(STATIC_ARCH)))
 override PACKAGE_ARCH_SAFE := $(if $(filter 1,$(words $(PACKAGE_ARCH))),$(filter x86_64 aarch64,$(PACKAGE_ARCH)))
 override STATIC_ARCH_VALID := $(if $(STATIC_ARCH_SAFE),1,0)
 override PACKAGE_ARCH_VALID := $(if $(PACKAGE_ARCH_SAFE),1,0)
-override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)
-override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)
-override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)
-override OVERLAY := $(value __BOOTART_OVERLAY_RAW)
+override ARGS_FILE := $(value __SART_ARGS_FILE_RAW)
+override RUN_DIR := $(value __SART_RUN_DIR_RAW)
+override BASE_IMAGE := $(value __SART_BASE_IMAGE_RAW)
+override OVERLAY := $(value __SART_OVERLAY_RAW)
 
 # Documented caller values cross recipe boundaries only through the
 # environment. Never splice them into shell source with Make expansion.
 export TEST_TIMEOUT_SECONDS QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
 export ADAPTER_HOST_TIMEOUT_SECONDS
-export LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN ARGS_FILE RUN_DIR
+export LIFECYCLE_HOST_TIMEOUT_SECONDS SART_BIN ARGS_FILE RUN_DIR
 export BASE_IMAGE OVERLAY
 
 $(info ------------------------------------------)
@@ -172,41 +169,104 @@ $(info ------------------------------------------)
 # not serialize two independent Make invocations.
 .NOTPARALLEL:
 
-.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all clippy rustdoc fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked artifact-cli-check _artifact-cli-check-locked clean _clean-locked assert-one-binary phase0-safety verify cpp-build cpp-test cpp-release-build cpp-musl-build cpp-cli-check cpp-nix-build cpp-clean vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-artifact-aarch64 vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd vm-test-release-ubuntu-26.04-dracut-systemd _vm-test-release-ubuntu-26.04-dracut-systemd-locked vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-clean release help h
+.PHONY: build release-build release-package _release-package-locked release-readiness _release-readiness-locked validate-static-arch validate-package-arch b compile c validate-test-timeout test test-unit test-protocol test-daemon test-display test-pty test-installer-root test-artifact-guards test-artifact-operation-policy assert-artifact-operation test-make-boundary-policy assert-make-boundary _assert-artifact-lock test-host-safety-policy test-init-neutral-policy assert-init-neutral test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy assert-adapter-pairs test-golden-guards _assert-golden-readonly update-golden t check check-all test-all fmt fmt-check nix-check static-build _static-build-locked artifact-check _artifact-check-locked artifact-cli-check _artifact-cli-check-locked clean _clean-locked assert-one-binary phase0-safety verify cpp-build cpp-test cpp-release-build cpp-musl-toolchain-check cpp-musl-build cpp-cli-check cpp-nix-build cpp-clean vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-artifact-aarch64 vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd vm-test-lifecycle-alpine vm-test-adapters $(VM_ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd vm-test-release-ubuntu-26.04-dracut-systemd _vm-test-release-ubuntu-26.04-dracut-systemd-locked vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-clean release help h
 .PHONY: vm-run-gui-fedora-44-dracut-systemd vm-run-gui-debian-13.6-initramfs-tools-systemd vm-run-gui-arch-mkinitc$()pio-systemd vm-run-gui-alpine-3.24.1-mkinitfs-openrc vm-run-gui-postmarketos-qemu-aarch64-systemd
 .PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
 
 build: phase0-safety cpp-build
 
-cpp-build:
-	@$(MAKE) -C cpp build MODE=debug
+CPP_COMMON_FLAGS := -std=c++23 -Wall -Wextra -Wpedantic -Werror -pthread
+CPP_DEBUG_FLAGS := $(CPP_COMMON_FLAGS) -Og -g3
+CPP_RELEASE_FLAGS := $(CPP_COMMON_FLAGS) -Os -DNDEBUG -ffunction-sections -fdata-sections -fno-ident
+CPP_CPPFLAGS := -Iinclude -DSART_VERSION='"$(PROJECT_VERSION)"'
+CPP_LIBRARY_SOURCES := $(filter-out src/main.cpp,$(wildcard src/*.cpp) $(wildcard src/splash/*.cpp))
+CPP_MAIN_SOURCE := src/main.cpp
+CPP_TEST_SOURCES := $(wildcard tests/*.cpp)
+CPP_DEBUG_LIBRARY_OBJECTS := $(patsubst %.cpp,target/cpp/debug/%.o,$(CPP_LIBRARY_SOURCES))
+CPP_DEBUG_MAIN_OBJECT := target/cpp/debug/$(CPP_MAIN_SOURCE:.cpp=.o)
+CPP_DEBUG_TEST_OBJECTS := $(patsubst %.cpp,target/cpp/debug/%.o,$(CPP_TEST_SOURCES))
+CPP_DEBUG_DEPENDENCIES := $(CPP_DEBUG_LIBRARY_OBJECTS:.o=.d) $(CPP_DEBUG_MAIN_OBJECT:.o=.d) $(CPP_DEBUG_TEST_OBJECTS:.o=.d)
+CPP_RELEASE_LIBRARY_OBJECTS := $(patsubst %.cpp,target/cpp/release/%.o,$(CPP_LIBRARY_SOURCES))
+CPP_RELEASE_MAIN_OBJECT := target/cpp/release/$(CPP_MAIN_SOURCE:.cpp=.o)
+CPP_RELEASE_DEPENDENCIES := $(CPP_RELEASE_LIBRARY_OBJECTS:.o=.d) $(CPP_RELEASE_MAIN_OBJECT:.o=.d)
+CPP_MUSL_LIBRARY_OBJECTS := $(patsubst %.cpp,target/cpp/musl/%.o,$(CPP_LIBRARY_SOURCES))
+CPP_MUSL_MAIN_OBJECT := target/cpp/musl/$(CPP_MAIN_SOURCE:.cpp=.o)
+CPP_MUSL_DEPENDENCIES := $(CPP_MUSL_LIBRARY_OBJECTS:.o=.d) $(CPP_MUSL_MAIN_OBJECT:.o=.d)
 
-cpp-test:
-	@$(MAKE) -C cpp test MODE=debug
+target/cpp/debug/sart: $(CPP_DEBUG_MAIN_OBJECT) target/cpp/debug/libsart.a
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_DEBUG_FLAGS) $^ -pthread -lz -lzstd -o '$@'
 
-cpp-release-build:
-	@$(MAKE) -C cpp build MODE=release
+target/cpp/debug/sart-tests: $(CPP_DEBUG_TEST_OBJECTS) target/cpp/debug/libsart.a
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_DEBUG_FLAGS) $^ -pthread -lz -lzstd -o '$@'
 
-cpp-musl-build:
-	@test -x "$${BOOTART_MUSL_CXX}" || { echo 'ERROR: enter the flake shell for the musl C++ compiler' >&2; exit 1; }
-	@test -x "$${BOOTART_MUSL_AR}" || { echo 'ERROR: enter the flake shell for musl binutils' >&2; exit 1; }
-	@$(MAKE) -C cpp build MODE=release BUILD_DIR=../target/cpp/musl \
-		CXX="$${BOOTART_MUSL_CXX}" AR="$${BOOTART_MUSL_AR}" \
-		CODEC_LIBS="$${BOOTART_MUSL_ZLIB}/lib/libz.a $${BOOTART_MUSL_ZSTD}/lib/libzstd.a"
-	@READELF="$${BOOTART_MUSL_READELF}" bash scripts/artifact-inspect.sh \
-		'$(STATIC_ARCH_SAFE)' target/cpp/musl/bootart
+target/cpp/debug/libsart.a: $(CPP_DEBUG_LIBRARY_OBJECTS)
+	@mkdir -p '$(@D)'
+	$(AR) rcs '$@' $^
+
+target/cpp/debug/tests/%.o: tests/%.cpp
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_CPPFLAGS) $(CPP_DEBUG_FLAGS) -DSART_SOURCE_ROOT='"$(CURDIR)"' -MMD -MP -c '$<' -o '$@'
+
+target/cpp/debug/%.o: %.cpp
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_CPPFLAGS) $(CPP_DEBUG_FLAGS) -MMD -MP -c '$<' -o '$@'
+
+target/cpp/release/sart: $(CPP_RELEASE_MAIN_OBJECT) target/cpp/release/libsart.a
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_RELEASE_FLAGS) $^ -pthread -static -Wl,--gc-sections -Wl,--build-id=none -s -lz -lzstd -o '$@'
+
+target/cpp/release/libsart.a: $(CPP_RELEASE_LIBRARY_OBJECTS)
+	@mkdir -p '$(@D)'
+	$(AR) rcs '$@' $^
+
+target/cpp/release/%.o: %.cpp
+	@mkdir -p '$(@D)'
+	$(CXX) $(CPP_CPPFLAGS) $(CPP_RELEASE_FLAGS) -MMD -MP -c '$<' -o '$@'
+
+target/cpp/musl/sart: $(CPP_MUSL_MAIN_OBJECT) target/cpp/musl/libsart.a
+	@mkdir -p '$(@D)'
+	"$${SART_MUSL_CXX}" $(CPP_RELEASE_FLAGS) $^ -pthread -static \
+		-Wl,--gc-sections -Wl,--build-id=none -s \
+		"$${SART_MUSL_ZLIB}/lib/libz.a" "$${SART_MUSL_ZSTD}/lib/libzstd.a" -o '$@'
+
+target/cpp/musl/libsart.a: $(CPP_MUSL_LIBRARY_OBJECTS)
+	@mkdir -p '$(@D)'
+	"$${SART_MUSL_AR}" rcs '$@' $^
+
+target/cpp/musl/%.o: %.cpp
+	@mkdir -p '$(@D)'
+	"$${SART_MUSL_CXX}" $(CPP_CPPFLAGS) $(CPP_RELEASE_FLAGS) -MMD -MP -c '$<' -o '$@'
+
+-include $(CPP_DEBUG_DEPENDENCIES) $(CPP_RELEASE_DEPENDENCIES) $(CPP_MUSL_DEPENDENCIES)
+
+cpp-build: target/cpp/debug/sart
+
+cpp-test: target/cpp/debug/sart-tests target/cpp/debug/sart
+	@SART_BINARY='$(CURDIR)/target/cpp/debug/sart' '$(CURDIR)/target/cpp/debug/sart-tests'
+
+cpp-release-build: target/cpp/release/sart
+
+cpp-musl-toolchain-check:
+	@test -x "$${SART_MUSL_CXX}" || { echo 'ERROR: enter the flake shell for the musl C++ compiler' >&2; exit 1; }
+	@test -x "$${SART_MUSL_AR}" || { echo 'ERROR: enter the flake shell for musl binutils' >&2; exit 1; }
+	@test -d "$${SART_MUSL_ZLIB}" || { echo 'ERROR: enter the flake shell for static zlib' >&2; exit 1; }
+	@test -d "$${SART_MUSL_ZSTD}" || { echo 'ERROR: enter the flake shell for static zstd' >&2; exit 1; }
+
+cpp-musl-build: cpp-musl-toolchain-check target/cpp/musl/sart
+	@READELF="$${SART_MUSL_READELF}" bash scripts/artifact-inspect.sh \
+		'$(STATIC_ARCH_SAFE)' target/cpp/musl/sart
 
 cpp-cli-check: cpp-musl-build
-	@bash scripts/artifact-cli-policy.sh '$(CURDIR)/target/cpp/musl/bootart'
+	@bash scripts/artifact-cli-policy.sh '$(CURDIR)/target/cpp/musl/sart'
 
 cpp-nix-build:
 	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' build \
-		'$(NIX)' bootart-cpp-static
+		'$(NIX)' sart-cpp-static
 
 cpp-clean:
-	@$(MAKE) -C cpp clean MODE=debug
-	@$(MAKE) -C cpp clean MODE=release
-	@$(MAKE) -C cpp clean MODE=release BUILD_DIR=../target/cpp/musl
+	@rm -rf target/cpp/debug target/cpp/release target/cpp/musl
 
 release-build: static-build
 
@@ -298,12 +358,12 @@ assert-adapter-pairs:
 # Prove that an ambient mutation request cannot cross the ordinary Make
 # boundary. This target runs no product executable and touches no fixture.
 test-golden-guards:
-	@env UPDATE_GOLDEN=1 BOOTART_GOLDEN_WRITE_TOKEN=forged \
+	@env UPDATE_GOLDEN=1 SART_GOLDEN_WRITE_TOKEN=forged \
 		$(MAKE) --no-print-directory _assert-golden-readonly
 
 _assert-golden-readonly:
 	@test "$$UPDATE_GOLDEN" = 0
-	@test -z "$$BOOTART_GOLDEN_WRITE_TOKEN"
+	@test -z "$$SART_GOLDEN_WRITE_TOKEN"
 	@printf '%s\n' 'PASS: ordinary Make lanes force golden verification read-only'
 
 update-golden: phase0-safety validate-test-timeout
@@ -317,10 +377,10 @@ check: cpp-build
 check-all: cpp-test
 
 fmt:
-	@clang-format -i $$(find cpp/include cpp/src cpp/tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
+	@clang-format -i $$(find include src tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
 
 fmt-check:
-	@clang-format --dry-run --Werror $$(find cpp/include cpp/src cpp/tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
+	@clang-format --dry-run --Werror $$(find include src tests -type f \( -name '*.hpp' -o -name '*.cpp' \) | sort)
 
 nix-check: phase0-safety
 	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' check '$(NIX)'
@@ -371,23 +431,23 @@ _static-build-locked:
 		outputs="$$(mktemp "$$root/.nix-outputs.XXXXXX")"; \
 		mkdir -p "$$stage/release" "$$stage/real-root/usr/bin" "$$stage/initramfs/usr/bin"; \
 		bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' build \
-			'$(NIX)' bootart-static >"$$outputs"; \
+			'$(NIX)' sart-static >"$$outputs"; \
 		mapfile -t nix_outputs <"$$outputs"; \
 		test "$${#nix_outputs[@]}" -eq 1 || { \
 			echo "ERROR: expected one Nix output, found $${#nix_outputs[@]}" >&2; \
 			exit 1; \
 		}; \
-		source_elf="$${nix_outputs[0]}/bin/bootart"; \
+		source_elf="$${nix_outputs[0]}/bin/sart"; \
 		test -f "$$source_elf" && test -x "$$source_elf" || { \
-			echo "ERROR: Nix output has no executable bin/bootart: $${nix_outputs[0]}" >&2; \
+			echo "ERROR: Nix output has no executable bin/sart: $${nix_outputs[0]}" >&2; \
 			exit 1; \
 		}; \
-		install -m 0755 -- "$$source_elf" "$$stage/release/bootart"; \
-		install -m 0755 -- "$$source_elf" "$$stage/real-root/usr/bin/bootart"; \
-		install -m 0755 -- "$$source_elf" "$$stage/initramfs/usr/bin/bootart"; \
+		install -m 0755 -- "$$source_elf" "$$stage/release/sart"; \
+		install -m 0755 -- "$$source_elf" "$$stage/real-root/usr/bin/sart"; \
+		install -m 0755 -- "$$source_elf" "$$stage/initramfs/usr/bin/sart"; \
 		READELF="$$(command -v readelf)" bash scripts/artifact-gate.sh '$(STATIC_ARCH_SAFE)' \
-			"$$stage/release" "$$stage/real-root/usr/bin/bootart" \
-			"$$stage/initramfs/usr/bin/bootart"; \
+			"$$stage/release" "$$stage/real-root/usr/bin/sart" \
+			"$$stage/initramfs/usr/bin/sart"; \
 		printf '%s\n' "$${nix_outputs[0]}" >"$$stage/nix-output-path"; \
 		chmod -R a-w -- "$$stage"; \
 		# rename(2) must update the moved directory's '..' entry, so Linux \
@@ -433,25 +493,25 @@ _artifact-check-locked:
 		}; \
 		generation="$$(bash scripts/artifact-generation.sh "$$root")"; \
 		READELF="$$(command -v readelf)" bash scripts/artifact-gate.sh '$(STATIC_ARCH_SAFE)' \
-			"$$generation/release" "$$generation/real-root/usr/bin/bootart" \
-			"$$generation/initramfs/usr/bin/bootart"
+			"$$generation/release" "$$generation/real-root/usr/bin/sart" \
+			"$$generation/initramfs/usr/bin/sart"
 
 artifact-cli-check: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(MAKE) --no-print-directory _artifact-cli-check-locked \
-		BOOTART_BIN='$(STATIC_CURRENT_POINTER)/release/bootart'
+		SART_BIN='$(STATIC_CURRENT_POINTER)/release/sart'
 
 _artifact-cli-check-locked:
 	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
 	@set -euo pipefail; \
 		generation="$$(bash scripts/artifact-generation.sh '$(STATIC_ROOT)')"; \
-		elf="$$(readlink -f -- "$${BOOTART_BIN}")"; \
-		test "$$elf" = "$$generation/release/bootart" || { \
+		elf="$$(readlink -f -- "$${SART_BIN}")"; \
+		test "$$elf" = "$$generation/release/sart" || { \
 			echo 'ERROR: CLI proof did not resolve the pinned static generation' >&2; exit 1; \
 		}; \
 		bash scripts/artifact-cli-policy.sh "$$elf"
 
-# The archive has exactly one member: the verified static ELF named bootart.
+# The archive has exactly one member: the verified static ELF named sart.
 # Its checksum is release metadata beside the archive, not another payload.
 validate-static-arch:
 	@test '$(STATIC_ARCH_VALID)' = 1 || { \
@@ -493,40 +553,40 @@ _release-package-locked:
 		trap 'exit 143' TERM; \
 		generation="$$(bash scripts/artifact-generation.sh "$$root")"; \
 		READELF="$$(command -v readelf)" bash scripts/artifact-gate.sh '$(STATIC_ARCH_SAFE)' \
-			"$$generation/release" "$$generation/real-root/usr/bin/bootart" \
-			"$$generation/initramfs/usr/bin/bootart"; \
+			"$$generation/release" "$$generation/real-root/usr/bin/sart" \
+			"$$generation/initramfs/usr/bin/sart"; \
 		package_dir='$(STATIC_PACKAGE_DIR)'; \
 		case "$$package_dir" in '$(CURDIR)'/target/artifacts/*) ;; \
 			*) echo "ERROR: refusing package output outside target/artifacts: $$package_dir" >&2; exit 1 ;; \
 		esac; \
 		test ! -L "$$package_dir" || { echo 'ERROR: package directory must not be a symlink' >&2; exit 1; }; \
 		mkdir -p "$$package_dir"; \
-		archive="$$package_dir/bootart-linux-$(PACKAGE_ARCH_SAFE).tar.gz"; \
+		archive="$$package_dir/sart-linux-$(PACKAGE_ARCH_SAFE).tar.gz"; \
 		checksum="$${archive}.sha256"; \
-		manifest="$$package_dir/bootart-linux-$(PACKAGE_ARCH_SAFE).manifest"; \
+		manifest="$$package_dir/sart-linux-$(PACKAGE_ARCH_SAFE).manifest"; \
 		for output in "$$archive" "$$checksum" "$$manifest"; do \
 			test ! -L "$$output" || { echo "ERROR: refusing symlinked package output: $$output" >&2; exit 1; }; \
 		done; \
-		temporary="$$(mktemp "$$package_dir/.bootart.XXXXXX.tar.gz")"; \
-		checksum_temporary="$$(mktemp "$$package_dir/.bootart.XXXXXX.sha256")"; \
-		manifest_temporary="$$(mktemp "$$package_dir/.bootart.XXXXXX.manifest")"; \
+		temporary="$$(mktemp "$$package_dir/.sart.XXXXXX.tar.gz")"; \
+		checksum_temporary="$$(mktemp "$$package_dir/.sart.XXXXXX.sha256")"; \
+		manifest_temporary="$$(mktemp "$$package_dir/.sart.XXXXXX.manifest")"; \
 		tar --format=ustar --owner=0 --group=0 --numeric-owner --mode=0755 \
 			--mtime='UTC 1970-01-01' -czf "$$temporary" \
-			-C "$$generation/release" bootart; \
+			-C "$$generation/release" sart; \
 		archive_members="$$(tar -tzf "$$temporary")" || { \
 			echo 'ERROR: could not list release archive' >&2; exit 1; \
 		}; \
-		test "$$archive_members" = bootart || { \
-			echo 'ERROR: release archive must contain only bootart' >&2; exit 1; \
+		test "$$archive_members" = sart || { \
+			echo 'ERROR: release archive must contain only sart' >&2; exit 1; \
 		}; \
-		elf_sha="$$(sha256sum -- "$$generation/release/bootart")"; \
+		elf_sha="$$(sha256sum -- "$$generation/release/sart")"; \
 		elf_sha="$${elf_sha%%[[:space:]]*}"; \
 		archive_sha="$$(sha256sum -- "$$temporary")"; \
 		archive_sha="$${archive_sha%%[[:space:]]*}"; \
 		generation_name="$${generation##*/}"; \
 		printf '%s  %s\n' "$$archive_sha" "$${archive##*/}" >"$$checksum_temporary"; \
 		printf '%s\n' \
-			'BOOTART_RELEASE_PACKAGE_V1' \
+			'SART_RELEASE_PACKAGE_V1' \
 			'arch=$(PACKAGE_ARCH_SAFE)' \
 			"generation=$$generation_name" \
 			"elf_sha256=$$elf_sha" \
@@ -541,11 +601,7 @@ _release-package-locked:
 		test "$$committed_generation" = "$$generation" || { \
 			echo 'ERROR: package manifest did not commit the generation just built' >&2; exit 1; \
 		}; \
-		echo "PASS: packaged one static bootart as $${archive##*/}"
-
-clippy: cpp-test
-
-rustdoc: cpp-test
+		echo "PASS: packaged one static sart as $${archive##*/}"
 
 test-all: test
 
@@ -564,9 +620,7 @@ _clean-locked:
 			}; \
 			chmod -R u+w -- "$$generations"; \
 		fi; \
-		$(MAKE) -C cpp clean MODE=debug; \
-		$(MAKE) -C cpp clean MODE=release; \
-		$(MAKE) -C cpp clean MODE=release BUILD_DIR=../target/cpp/musl
+		$(MAKE) --no-print-directory cpp-clean
 
 assert-one-binary:
 	@bash scripts/source-layout-policy.sh '$(CURDIR)'
@@ -575,11 +629,11 @@ assert-one-binary:
 phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert-artifact-operation assert-make-boundary
 	@bash scripts/pid1-entry-policy.sh '$(CURDIR)'
 	@set -eu; \
-		if find cpp -type l -print -quit | grep -q .; then \
-			echo "ERROR: symlinks are forbidden below cpp/" >&2; exit 1; \
+		if find include src tests -type l -print -quit | grep -q .; then \
+			echo "ERROR: symlinks are forbidden below C++ source roots" >&2; exit 1; \
 		fi; \
-		forbidden='BOOTART''_INIT_STUB|RB_''POWER_OFF|RB_''HALT_SYSTEM|RB_''AUTOBOOT|LINUX_''REBOOT_CMD_|libc::re''boot|std::process::''Command|Command::''new'; \
-		if find cpp -type f \( -name '*.cpp' -o -name '*.hpp' \) -exec grep -H -n -E "$$forbidden" {} + 2>/dev/null; then \
+		forbidden='SART''_INIT_STUB|RB_''POWER_OFF|RB_''HALT_SYSTEM|RB_''AUTOBOOT|LINUX_''REBOOT_CMD_|libc::re''boot|std::process::''Command|Command::''new'; \
+		if find include src tests -type f \( -name '*.cpp' -o -name '*.hpp' \) -exec grep -H -n -E "$$forbidden" {} + 2>/dev/null; then \
 			echo "ERROR: forbidden PID-1/helper implementation remains" >&2; \
 			exit 1; \
 		fi; \
@@ -723,7 +777,7 @@ vm-test-lifecycle-alpine:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-test-lifecycle-alpine
 
-$(VM_ADAPTER_TEST_TARGETS): override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+$(VM_ADAPTER_TEST_TARGETS): override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 $(VM_ADAPTER_TEST_TARGETS):
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) '$@'
@@ -755,31 +809,31 @@ vm-test-alpine-3.24.1-mkinitfs-openrc: \
 
 # The postmarketOS fixture runs the same source/CLI as an architecture-correct
 # static aarch64 ELF. A machine-code-identical x86_64 artifact cannot execute
-# on the ARM virtual machine, but each guest still receives only one Bootart
+# on the ARM virtual machine, but each guest still receives only one Sart
 # binary and no helper payload.
-vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-lifecycle-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-install-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-install-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-install-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-password-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-password-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-password-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-recovery-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-recovery-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-recovery-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-uninstall-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-uninstall-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-kernel-update-mkinitfs-boot-deploy-openrc: vm-artifact-aarch64
-vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-lifecycle-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
-vm-test-install-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-install-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-install-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
-vm-test-password-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-password-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-password-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
-vm-test-recovery-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-recovery-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-recovery-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
-vm-test-uninstall-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-uninstall-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-uninstall-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
-vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-test-kernel-update-mkinitfs-boot-deploy-systemd: vm-artifact-aarch64
 
 vm-test-install-fedora-44-dracut-systemd \
@@ -787,7 +841,7 @@ vm-test-lifecycle-fedora-44-dracut-systemd \
 vm-test-password-fedora-44-dracut-systemd \
 vm-test-recovery-fedora-44-dracut-systemd \
 vm-test-uninstall-fedora-44-dracut-systemd \
-vm-test-kernel-update-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-kernel-update-fedora-44-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-test-install-fedora-44-dracut-systemd \
 vm-test-lifecycle-fedora-44-dracut-systemd \
 vm-test-password-fedora-44-dracut-systemd \
@@ -797,12 +851,12 @@ vm-test-kernel-update-fedora-44-dracut-systemd: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) '$@'
 
-vm-test-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-ubuntu-26.04-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-test-ubuntu-26.04-dracut-systemd: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-test-ubuntu-26.04-dracut-systemd
 
-vm-test-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-test-fedora-44-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-test-fedora-44-dracut-systemd: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-test-fedora-44-dracut-systemd
@@ -813,27 +867,27 @@ vm-test-fedora-44-dracut-systemd: static-build
 vm-test-release-ubuntu-26.04-dracut-systemd: static-build
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \
-		BOOTART_BIN='$(STATIC_CURRENT_POINTER)/release/bootart'
+		SART_BIN='$(STATIC_CURRENT_POINTER)/release/sart'
 
 _vm-test-release-ubuntu-26.04-dracut-systemd-locked:
 	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
 	@set -euo pipefail; \
 		generation="$$(bash scripts/artifact-generation.sh '$(STATIC_ROOT)')"; \
-		elf="$$(readlink -f -- "$${BOOTART_BIN}")"; \
-		test "$$elf" = "$$generation/release/bootart" || { \
+		elf="$$(readlink -f -- "$${SART_BIN}")"; \
+		test "$$elf" = "$$generation/release/sart" || { \
 			echo 'ERROR: release VM proof did not resolve the pinned static generation' >&2; exit 1; \
 		}; \
 		digest="$$(sha256sum -- "$$elf" | awk '{ print $$1 }')"; \
 		test "$${#digest}" -eq 64 || { echo 'ERROR: cannot hash release VM ELF' >&2; exit 1; }; \
 		bash scripts/artifact-cli-policy.sh "$$elf"; \
-		printf 'bootart: Phase 7 normal release ELF %s\n' "$$digest"; \
-		$(VM_MAKE) vm-test-install-dracut-systemd BOOTART_BIN="$$elf"; \
-		$(VM_MAKE) vm-test-password-dracut-systemd BOOTART_BIN="$$elf"; \
-		$(VM_MAKE) vm-test-lifecycle-dracut-systemd BOOTART_BIN="$$elf"; \
-		$(VM_MAKE) vm-test-recovery-dracut-systemd BOOTART_BIN="$$elf"; \
-		$(VM_MAKE) vm-test-uninstall-dracut-systemd BOOTART_BIN="$$elf"; \
-		$(VM_MAKE) vm-test-kernel-update-dracut-systemd BOOTART_BIN="$$elf"; \
-		printf 'BOOTART_VM_UBUNTU_26_04_RELEASE_ELF_PASS_V1|sha256=%s\n' "$$digest"
+		printf 'sart: Phase 7 normal release ELF %s\n' "$$digest"; \
+		$(VM_MAKE) vm-test-install-dracut-systemd SART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-password-dracut-systemd SART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-lifecycle-dracut-systemd SART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-recovery-dracut-systemd SART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-uninstall-dracut-systemd SART_BIN="$$elf"; \
+		$(VM_MAKE) vm-test-kernel-update-dracut-systemd SART_BIN="$$elf"; \
+		printf 'SART_VM_UBUNTU_26_04_RELEASE_ELF_PASS_V1|sha256=%s\n' "$$digest"
 
 vm-test-adapters:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
@@ -860,37 +914,37 @@ vm-run-gui-password: static-build
 # Visual inspection boots the currently published immutable ELF. Rebuilding
 # here changes the proof identity and can turn a quick second boot into another
 # full headless install. Run `make static-build` explicitly to refresh it.
-vm-run-gui-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-ubuntu-26.04-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-run-gui-ubuntu-26.04-dracut-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-ubuntu-26.04-dracut-systemd
 
-vm-run-gui-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-fedora-44-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-run-gui-fedora-44-dracut-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-fedora-44-dracut-systemd
 
-vm-run-gui-debian-13.6-initramfs-tools-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-debian-13.6-initramfs-tools-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-run-gui-debian-13.6-initramfs-tools-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-debian-13.6-initramfs-tools-systemd
 
-vm-run-gui-arch-mkinitc$()pio-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-arch-mkinitc$()pio-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-run-gui-arch-mkinitc$()pio-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-arch-mkinitc$()pio-systemd
 
-vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart
+vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart
 vm-run-gui-alpine-3.24.1-mkinitfs-openrc:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-alpine-3.24.1-mkinitfs-openrc
 
-vm-run-gui-postmarketos-qemu-aarch64: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-run-gui-postmarketos-qemu-aarch64: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-run-gui-postmarketos-qemu-aarch64:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-postmarketos-qemu-aarch64
 
-vm-run-gui-postmarketos-qemu-aarch64-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
+vm-run-gui-postmarketos-qemu-aarch64-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current
 vm-run-gui-postmarketos-qemu-aarch64-systemd:
 	@bash scripts/artifact-lock.sh '$(CURDIR)' \
 		$(VM_MAKE) vm-run-gui-postmarketos-qemu-aarch64-systemd
@@ -914,7 +968,7 @@ _release-readiness-locked:
 		generation="$$(bash scripts/release-package-generation.sh \
 			'$(CURDIR)' "$$root" '$(PACKAGE_ARCH_SAFE)')"; \
 		$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \
-			BOOTART_BIN="$$generation/release/bootart"; \
+			SART_BIN="$$generation/release/sart"; \
 		printf '%s\n' 'PASS: source, exact packaged ELF, and Ubuntu production VM gates passed'
 
 release: release-readiness
@@ -928,7 +982,7 @@ help:
 	@echo "Available targets:"
 	@echo "  build        Build the binary and library"
 	@echo "  release-build Alias for the guarded static-build lane"
-	@echo "  release-package Build/check/package one Linux bootart ELF plus checksum metadata"
+	@echo "  release-package Build/check/package one Linux sart ELF plus checksum metadata"
 	@echo "  release-readiness Require verify plus the exact Ubuntu production-ELF VM gate"
 	@echo "  compile      Clean and rebuild"
 	@echo "  test         Run all tests"
@@ -958,7 +1012,7 @@ help:
 	@echo "  artifact-cli-check Prove the normal static ELF hides every installer test-seam option"
 	@echo "  clean        Remove C++ build artifacts"
 	@echo "  verify       Run the full local gate"
-	@echo "  assert-one-binary Prove bootart is the only C++ product binary"
+	@echo "  assert-one-binary Prove sart is the only C++ product binary"
 	@echo "  assert-adapter-pairs Cross-check C++, root/VM Make, and the exact VM matrix"
 	@echo "  phase0-safety Check PID-1/helper/host-mutation safety invariants"
 	@echo "  vm-script-check Syntax-check VM host/guest shell data without state or QEMU"
@@ -984,10 +1038,10 @@ help:
 	@echo "  vm-kernel-packages-ubuntu-26.04 Fetch the exact offline Ubuntu kernel-update packages"
 	@echo "  vm-reset-ubuntu-26.04-dracut-systemd Remove only the authenticated disposable Ubuntu base"
 	@echo "  vm-provision-ubuntu-26.04-dracut-systemd Run normal Subiquity into a private encrypted-root qcow2"
-	@echo "  vm-verify-ubuntu-26.04-dracut-systemd Prove disk-only stock unlock/login before Bootart"
+	@echo "  vm-verify-ubuntu-26.04-dracut-systemd Prove disk-only stock unlock/login before Sart"
 	@echo "  vm-reset-fedora-44-dracut-systemd Remove only the authenticated disposable Fedora base"
 	@echo "  vm-provision-fedora-44-dracut-systemd Run normal Anaconda into a private encrypted-root qcow2"
-	@echo "  vm-verify-fedora-44-dracut-systemd Prove Fedora disk-only stock unlock/login before Bootart"
+	@echo "  vm-verify-fedora-44-dracut-systemd Prove Fedora disk-only stock unlock/login before Sart"
 	@echo "  vm-reset-alpine-3.24.1-mkinitfs-openrc Remove only the authenticated disposable Alpine base"
 	@echo "  vm-provision-alpine-3.24.1-mkinitfs-openrc Run Alpine setup-disk into an encrypted qcow2"
 	@echo "  vm-verify-alpine-3.24.1-mkinitfs-openrc Prove Alpine stock LUKS rejection/unlock/login"
@@ -1007,7 +1061,7 @@ help:
 	@echo "  vm-run-gui-debian-13.6-initramfs-tools-systemd Show cached/patched Debian boot"
 	@echo "  vm-run-gui-arch-mkinitcpio-systemd Show cached/patched Arch boot"
 	@echo "  vm-run-gui-alpine-3.24.1-mkinitfs-openrc Show cached/patched Alpine boot"
-	@echo "  vm-run-gui-postmarketos-qemu-aarch64 Show real ARM64 postmarketOS Bootart boot"
+	@echo "  vm-run-gui-postmarketos-qemu-aarch64 Show real ARM64 postmarketOS Sart boot"
 	@echo "  vm-run-gui-postmarketos-qemu-aarch64-systemd Show the postmarketOS systemd ARM64 software-stack VM"
 	@echo "  vm-test-{lane}-fedora-44-dracut-systemd Prove one Fedora fixture lane"
 	@echo "  vm-test-fedora-44-dracut-systemd Prove all six Fedora fixture lanes"

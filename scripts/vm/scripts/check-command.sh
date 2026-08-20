@@ -81,7 +81,7 @@ for ((i = 1; i < ${#argv[@]}; )); do
                 -initrd) expect_value "$option" "$value" "$run_dir/initramfs.cpio.gz" ;;
                 -append)
                     expect_value "$option" "$value" 'console=ttyS0 rdinit=/init panic=-1 quiet'
-                    [[ "$value" != *bootart* ]] || vm_die 'kernel command line must never make bootart init'
+                    [[ "$value" != *sart* ]] || vm_die 'kernel command line must never make sart init'
                     ;;
             esac
             ((i += 2))
@@ -106,4 +106,4 @@ for option in "${required[@]}"; do
     [[ ${seen["$option"]:-0} -eq 1 ]] || vm_die "$option must occur exactly once"
 done
 
-printf 'bootart-vm: QEMU command policy PASS\n'
+printf 'sart-vm: QEMU command policy PASS\n'

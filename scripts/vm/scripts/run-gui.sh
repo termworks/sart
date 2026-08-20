@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# TEST INFRASTRUCTURE ONLY. Launches the test-only Bootart initramfs visually.
+# TEST INFRASTRUCTURE ONLY. Launches the test-only Sart initramfs visually.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
 [[ $# -eq 6 ]] || vm_die \
-    'usage: run-gui.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID BOOTART_BIN QEMU'
+    'usage: run-gui.sh REPO_ROOT VM_ROOT LOCK_FILE IMAGE_ID SART_BIN QEMU'
 repo_root=$1
 vm_root=$2
 lock_file=$3
 image_id=$4
-bootart_bin=$5
+sart_bin=$5
 configured_qemu=$6
 
 vm_refuse_root
@@ -28,8 +28,8 @@ IFS='|' read -r id status _url sha format arch filename kernel initrd \
     vm_die "GUI requires the verified x86_64 lifecycle ISO: $id"
 [[ "$kernel" == /* && "$initrd" == /* ]] || \
     vm_die "GUI lifecycle ISO has invalid kernel/initramfs members: $id"
-[[ "$bootart_bin" == "$repo_root/target/"* ]] || \
-    vm_die 'GUI Bootart input must remain below repository target/'
+[[ "$sart_bin" == "$repo_root/target/"* ]] || \
+    vm_die 'GUI Sart input must remain below repository target/'
 bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
     vm_die 'GUI lifecycle requires the repository artifact lock'
 
@@ -49,7 +49,7 @@ run_dir="$(vm_create_run "$vm_root")"
 bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" \
     bash "$SCRIPT_DIR/prepare-smoke.sh" \
     "$repo_root" "$vm_root" "$run_dir" "$image" \
-    "$kernel" "$initrd" "$bootart_bin" >/dev/null
+    "$kernel" "$initrd" "$sart_bin" >/dev/null
 vm_validate_run "$vm_root" "$run_dir"
 for prepared in kernel base-initramfs initramfs.cpio.gz; do
     vm_assert_file_size_at_most "$run_dir/$prepared" "$max_file_bytes" \
@@ -79,7 +79,7 @@ elif [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && \
         ! -L "$XDG_RUNTIME_DIR/wayland-0" && \
         -S "$XDG_RUNTIME_DIR/wayland-0" && \
         "$(vm_stat_uid "$XDG_RUNTIME_DIR/wayland-0")" == "$(id -u)" ]]; then
-    printf 'bootart-vm: stale/missing Wayland hint; using %s\n' \
+    printf 'sart-vm: stale/missing Wayland hint; using %s\n' \
         "$XDG_RUNTIME_DIR/wayland-0"
     export WAYLAND_DISPLAY=wayland-0
 elif [[ -n "${DISPLAY:-}" ]]; then
@@ -100,8 +100,8 @@ qemu_supports_display() {
 # a separate display client and was the reason a hard-coded GTK request failed.
 configured_qemu_physical="$(vm_resolve_qemu "$configured_qemu")"
 declare -a qemu_candidates=("$configured_qemu_physical")
-if command -v -- bootart-qemu-gui >/dev/null 2>&1; then
-    qemu_candidates+=(bootart-qemu-gui)
+if command -v -- sart-qemu-gui >/dev/null 2>&1; then
+    qemu_candidates+=(sart-qemu-gui)
 fi
 if [[ -x /usr/bin/qemu-system-x86_64 ]]; then
     qemu_candidates+=(/usr/bin/qemu-system-x86_64)
@@ -127,12 +127,12 @@ done
 qemu_identity="$(vm_executable_identity "$qemu")"
 vm_assert_executable_identity "$qemu" "$qemu_identity" 'GUI QEMU executable'
 
-printf 'bootart-vm: launching test-only Bootart windowed lifecycle: %s\n' "$run_dir"
-printf 'bootart-vm: GUI QEMU: %s (%s)\n' "$qemu" "$display_backend"
-printf '%s\n' 'bootart-vm: preview exits after the animation; close the window or press Ctrl-C to stop early'
+printf 'sart-vm: launching test-only Sart windowed lifecycle: %s\n' "$run_dir"
+printf 'sart-vm: GUI QEMU: %s (%s)\n' "$qemu" "$display_backend"
+printf '%s\n' 'sart-vm: preview exits after the animation; close the window or press Ctrl-C to stop early'
 
 # This visual path has no guest disk at all: it boots the same immutable ISO
-# kernel plus a private initramfs containing the exact static Bootart ELF.
+# kernel plus a private initramfs containing the exact static Sart ELF.
 # Networking and host filesystem sharing are explicitly absent. This target is
 # a visual lifecycle preview only and never counts as adapter-pair evidence.
 # GTK may invoke its system pixbuf loader while creating the window, so this
@@ -140,7 +140,7 @@ printf '%s\n' 'bootart-vm: preview exits after the animation; close the window o
 # their stricter launch policy.
 set +e
 timeout --signal=TERM --kill-after=2s 20s "$qemu" \
-    -name bootart-gui \
+    -name sart-gui \
     -nodefaults \
     -no-user-config \
     -machine q35,accel=tcg \
@@ -155,7 +155,7 @@ timeout --signal=TERM --kill-after=2s 20s "$qemu" \
     -no-reboot \
     -kernel "$run_dir/kernel" \
     -initrd "$run_dir/initramfs.cpio.gz" \
-    -append 'console=tty0 rdinit=/init panic=-1 quiet bootart.vm.gui=1' \
+    -append 'console=tty0 rdinit=/init panic=-1 quiet sart.vm.gui=1' \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=allow,resourcecontrol=deny
 qemu_status=$?
 set -e
@@ -164,7 +164,7 @@ case "$qemu_status" in
         exit 0
         ;;
     124|137)
-        printf '%s\n' 'bootart-vm: preview deadline reached; QEMU was terminated'
+        printf '%s\n' 'sart-vm: preview deadline reached; QEMU was terminated'
         exit 0
         ;;
     *)

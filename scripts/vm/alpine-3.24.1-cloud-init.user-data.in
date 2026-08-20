@@ -1,11 +1,11 @@
 #cloud-config
-hostname: bootart-alpine-provision
+hostname: sart-alpine-provision
 manage_etc_hosts: true
 ssh_pwauth: false
 users:
   - default
 write_files:
-  - path: /usr/local/sbin/bootart-provision-alpine
+  - path: /usr/local/sbin/sart-provision-alpine
     owner: root:root
     permissions: '0700'
     content: |
@@ -15,13 +15,13 @@ write_files:
 
       fail() {
           status=$?
-          printf 'BOOTART_VM_ALPINE_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
+          printf 'SART_VM_ALPINE_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
           poweroff -f || :
           exit "$status"
       }
       trap fail 0
 
-      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'
+      sart_luks='__SART_VM_LUKS_PASSPHRASE__'
       target=/dev/vdb
       boot=${target}1
       encrypted=${target}2
@@ -38,10 +38,10 @@ write_files:
       test -b "$boot"
       test -b "$encrypted"
       mkfs.ext4 -F -q -O '^64bit' "$boot"
-      printf '%s' "$bootart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
+      printf '%s' "$sart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
           --pbkdf pbkdf2 --iter-time 100 --key-file - "$encrypted"
-      printf '%s' "$bootart_luks" | cryptsetup open --key-file - "$encrypted" root
-      unset bootart_luks
+      printf '%s' "$sart_luks" | cryptsetup open --key-file - "$encrypted" root
+      unset sart_luks
       cryptsetup status root >/dev/null
       mkfs.ext4 -F -q /dev/mapper/root
 
@@ -50,7 +50,7 @@ write_files:
       mkdir -p /mnt/boot
       mount "$boot" /mnt/boot
       # Keep serial boot evidence, but leave tty0 as the final kernel console.
-      # The stock nlplug-findfs request and Bootart's replacement then receive
+      # The stock nlplug-findfs request and Sart's replacement then receive
       # the same emulated keyboard path used by a real local machine.
       BOOTLOADER=syslinux SWAP_SIZE=0 \
           KERNELOPTS='quiet console=ttyS0,115200n8 console=tty0' \
@@ -96,10 +96,10 @@ write_files:
       cryptsetup luksDump "$encrypted" | grep -Eq '^Version:[[:space:]]+2$'
 
       # Cache the exact signed alternate kernel inside the encrypted guest so
-      # the later proof boot remains networkless and the Bootart transport
+      # the later proof boot remains networkless and the Sart transport
       # still contains only the one product ELF.
-      seed_mount=/media/bootart-kernel-seed
-      package_cache=/mnt/var/cache/bootart-kernel-update
+      seed_mount=/media/sart-kernel-seed
+      package_cache=/mnt/var/cache/sart-kernel-update
       mkdir -p "$seed_mount" "$package_cache"
       mount -o ro /dev/sr0 "$seed_mount"
       (cd "$seed_mount/kernel-packages" && sha256sum -c SHA256SUMS)
@@ -114,7 +114,7 @@ write_files:
       if ! grep -Fq 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' /mnt/etc/inittab; then
           printf '%s\n' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /mnt/etc/inittab
       fi
-      printf '%s\n' bootart-vm > /mnt/etc/hostname
+      printf '%s\n' sart-vm > /mnt/etc/hostname
       printf '%s\n' 'root:alpine' | chroot /mnt chpasswd
       grep -Fq 'alpine:' /mnt/etc/passwd
       printf '%s\n' 'alpine:alpine' | chroot /mnt chpasswd
@@ -126,27 +126,27 @@ write_files:
       rm -f /mnt/etc/runlevels/*/cloud-*
       ! find /mnt/etc/runlevels -type l -name 'cloud-*' | grep -q .
       mkdir -p /mnt/etc/doas.d
-      printf '%s\n' 'permit nopass alpine as root' > /mnt/etc/doas.d/50-bootart-vm.conf
+      printf '%s\n' 'permit nopass alpine as root' > /mnt/etc/doas.d/50-sart-vm.conf
 
       rm -rf /mnt/var/lib/cloud /mnt/var/log/cloud-init.log \
           /mnt/var/log/cloud-init-output.log
       scan=112
       scan=${scan}358
       if printf '%s\n' "$scan" | grep -r -a -F -l --devices=skip -f - \
-          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/bootart-secret-paths; then
-          sed 's|^/mnt||' /tmp/bootart-secret-paths >/dev/ttyS0 || :
+          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/sart-secret-paths; then
+          sed 's|^/mnt||' /tmp/sart-secret-paths >/dev/ttyS0 || :
           exit 1
       fi
-      rm -f /tmp/bootart-secret-paths
+      rm -f /tmp/sart-secret-paths
       unset scan
 
       sync
       umount /mnt/boot
       umount /mnt
       cryptsetup close root
-      printf '%s\n' BOOTART_VM_ALPINE_PROVISION_PASS_V1 >/dev/ttyS0
+      printf '%s\n' SART_VM_ALPINE_PROVISION_PASS_V1 >/dev/ttyS0
       trap - 0
       poweroff
 runcmd:
-  - [ /usr/local/sbin/bootart-provision-alpine ]
-final_message: bootart Alpine provisioning cloud-init completed
+  - [ /usr/local/sbin/sart-provision-alpine ]
+final_message: sart Alpine provisioning cloud-init completed

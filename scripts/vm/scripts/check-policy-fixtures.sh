@@ -9,13 +9,13 @@ source "$SCRIPT_DIR/lib.sh"
 repo_root=$1
 vm_check_layout "$repo_root" "$repo_root/target/vm"
 
-fixture="$(mktemp -d "${TMPDIR:-/tmp}/bootart-vm-policy.XXXXXXXXXX")" ||
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/sart-vm-policy.XXXXXXXXXX")" ||
     vm_die 'cannot allocate VM policy fixture root'
-marker="$fixture/.bootart-policy-fixture"
+marker="$fixture/.sart-policy-fixture"
 : > "$marker"
 cleanup() {
     trap - EXIT
-    if [[ "$fixture" == "${TMPDIR:-/tmp}"/bootart-vm-policy.* && -d "$fixture" && ! -L "$fixture" && \
+    if [[ "$fixture" == "${TMPDIR:-/tmp}"/sart-vm-policy.* && -d "$fixture" && ! -L "$fixture" && \
           -f "$marker" && ! -L "$marker" ]]; then
         chmod -R u+w -- "$fixture" 2>/dev/null || true
         rm -rf -- "$fixture"
@@ -34,9 +34,9 @@ mock_bin="$fixture/bin"
 mkdir -p -- "$image_dir" "$run_dir" "$mock_bin"
 chmod 0700 -- "$fake_repo" "$fake_repo/target" "$vm_root" \
     "$vm_root/cache" "$vm_root/runs" "$image_dir" "$run_dir" "$mock_bin"
-vm_state_sentinel_text "$fake_repo" "$vm_root" > "$vm_root/.bootart-vm-state"
-vm_run_sentinel_text "$vm_root" "$run_dir" > "$run_dir/.bootart-vm-run"
-chmod 0600 -- "$vm_root/.bootart-vm-state" "$run_dir/.bootart-vm-run"
+vm_state_sentinel_text "$fake_repo" "$vm_root" > "$vm_root/.sart-vm-state"
+vm_run_sentinel_text "$vm_root" "$run_dir" > "$run_dir/.sart-vm-run"
+chmod 0600 -- "$vm_root/.sart-vm-state" "$run_dir/.sart-vm-run"
 
 cat > "$mock_bin/findmnt" <<'EOF'
 #!/bin/sh
@@ -56,14 +56,14 @@ cat > "$mock_bin/qemu-img" <<'EOF'
 #!/bin/sh
 last=
 for argument in "$@"; do last=$argument; done
-if [ "${1:-}" = info ] && [ -n "${BOOTART_FIXTURE_TARGET:-}" ] &&
-   [ "$last" = "$BOOTART_FIXTURE_TARGET" ]; then
+if [ "${1:-}" = info ] && [ -n "${SART_FIXTURE_TARGET:-}" ] &&
+   [ "$last" = "$SART_FIXTURE_TARGET" ]; then
     printf '%s\n' '{"format":"qcow2","virtual-size":8589934592}'
     exit 0
 fi
-if [ "${1:-}" = info ] && [ -n "${BOOTART_FIXTURE_BASE:-}" ]; then
+if [ "${1:-}" = info ] && [ -n "${SART_FIXTURE_BASE:-}" ]; then
     printf '{"format":"qcow2","backing-filename":"%s","backing-filename-format":"qcow2"}\n' \
-        "$BOOTART_FIXTURE_BASE"
+        "$SART_FIXTURE_BASE"
     exit 0
 fi
 exit 2
@@ -81,7 +81,7 @@ chmod 0400 -- "$base_image" "$seed"
 chmod 0600 -- "$overlay"
 
 export PATH="$mock_bin:$PATH"
-export BOOTART_FIXTURE_BASE="$base_image"
+export SART_FIXTURE_BASE="$base_image"
 export QEMU_IMG="$mock_bin/qemu-img"
 qemu="$(readlink -f -- "$mock_bin/qemu-system-x86_64")"
 other_qemu="$(readlink -f -- "$mock_bin/not-the-configured-qemu")"
@@ -260,7 +260,7 @@ chmod 0700 -- "$provisioned_dir"
 chmod 0400 -- "$stock_base"
 chmod 0444 -- "$stock_code"
 chmod 0600 -- "$stock_overlay" "$stock_vars"
-export BOOTART_FIXTURE_BASE="$stock_base"
+export SART_FIXTURE_BASE="$stock_base"
 
 write_stock_args() {
     local nic=${1:-none}
@@ -320,8 +320,8 @@ secret_out="$run_dir/fde-secret.out"
 : > "$builder_seed"
 chmod 0600 -- "$builder_overlay" "$builder_target"
 chmod 0400 -- "$builder_seed"
-export BOOTART_FIXTURE_BASE="$base_image"
-export BOOTART_FIXTURE_TARGET="$builder_target"
+export SART_FIXTURE_BASE="$base_image"
+export SART_FIXTURE_TARGET="$builder_target"
 
 write_builder_args() {
     local secret_path=${1:-$run_dir/fde-secret}
@@ -340,7 +340,7 @@ write_builder_args() {
         -nic user,model=virtio-net-pci \
         -device virtio-serial-pci \
         -chardev "pipe,id=fde,path=$secret_path" \
-        -device virtserialport,chardev=fde,name=bootart.fde \
+        -device virtserialport,chardev=fde,name=sart.fde \
         -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
         -no-reboot -boot c,strict=on \
         -drive "file=$builder_overlay,format=qcow2,if=virtio,cache=none,aio=threads" \
@@ -379,7 +379,7 @@ expect_builder_rejected symlinked-secret-input
 rm -f -- "$run_dir/provision-qemu.args" "$builder_serial_fifo" \
     "$builder_serial_log" "$secret_in" "$secret_out" "$builder_overlay" \
     "$builder_target" "$builder_seed"
-unset BOOTART_FIXTURE_TARGET
+unset SART_FIXTURE_TARGET
 
 wrapper="$repo_root/scripts/vm/scripts/run-adapter-lane.sh"
 runner_policy_line="$(grep -nF 'bash "$SCRIPT_DIR/check-runner-policy.sh"' "$wrapper" | head -n 1 | cut -d: -f1)"
@@ -399,10 +399,11 @@ grep -F 'unset QEMU QEMU_IMG' "$wrapper" >/dev/null ||
     vm_die 'common adapter wrapper must clear inherited QEMU variables'
 [[ "$(grep -Fxc '        "${runner_env[@]}" "$runner_bin/bash" "$runner" drive \' "$wrapper")" -eq 1 ]] ||
     vm_die 'unencrypted driver must cross the clean runner environment'
-[[ "$(grep -Fxc '        "${runner_env[@]}" BOOTART_VM_SECRET_FD=9 "$runner_bin/bash" "$runner" drive \' "$wrapper")" -eq 1 ]] ||
+[[ "$(grep -Fxc '        "${runner_env[@]}" SART_VM_SECRET_FD=9 "$runner_bin/bash" "$runner" drive \' "$wrapper")" -eq 1 ]] ||
     vm_die 'encrypted driver must expose only its fd number through the clean runner environment'
 [[ "$(grep -Fxc 'if [[ "$pair" == dracut-systemd || "$pair" == initramfs-tools ||' "$wrapper")" -eq 2 &&
-   "$(grep -Fxc '      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ]]; then' "$wrapper")" -eq 2 ]] ||
+   "$(grep -Fxc '      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ||' "$wrapper")" -eq 2 &&
+   "$(grep -Fxc '      "$pair" == mkinitfs-boot-deploy-systemd ]]; then' "$wrapper")" -eq 2 ]] ||
     vm_die 'every exact encrypted lane must use and scan the anonymous secret fd'
 grep -F '"${runner_env[@]}" "$runner_bin/bash" "$runner" prepare \' "$wrapper" >/dev/null ||
     vm_die 'prepare must cross the clean runner environment'
@@ -432,7 +433,7 @@ pass_publish_line="$(grep -nF 'mv -T -- "$temporary" "$result_file"' <<< "$pass_
     vm_die 'PASS publication must be the adapter wrapper final operation'
 for required in \
     'purge_secret_artifacts_and_emit_failure()' \
-    '! -path "$run_dir/.bootart-vm-run" -delete' \
+    '! -path "$run_dir/.sart-vm-run" -delete' \
     'emit_result FAIL synthetic-secret-retained' \
     'purge_secret_artifacts_and_emit_failure'
 do
@@ -451,7 +452,7 @@ done
 
 adapter_oracle_checker="$repo_root/scripts/vm/scripts/check-adapter-oracle.sh"
 adapter_serial="$fixture/adapter-serial.log"
-adapter_pass='BOOTART_VM_MKINITFS_OPENRC_LIFECYCLE_PASS_V1'
+adapter_pass='SART_VM_MKINITFS_OPENRC_LIFECYCLE_PASS_V1'
 adapter_prefix=${adapter_pass%_PASS_V1}
 adapter_provisioned=${adapter_prefix}_PROVISIONED_V1
 adapter_early=${adapter_prefix}_EARLY_V1
@@ -493,8 +494,8 @@ adapter_oracle_call='if ! bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$run_dir/s
 lifecycle_oracle_checker="$repo_root/scripts/vm/scripts/check-lifecycle-oracle.sh"
 lifecycle_runner="$repo_root/scripts/vm/scripts/run-lifecycle.sh"
 lifecycle_serial="$fixture/lifecycle-serial.log"
-lifecycle_pass='BOOTART_VM_LIFECYCLE_PASS_V1'
-lifecycle_fail='BOOTART_VM_LIFECYCLE_FAIL_V1'
+lifecycle_pass='SART_VM_LIFECYCLE_PASS_V1'
+lifecycle_fail='SART_VM_LIFECYCLE_FAIL_V1'
 
 expect_lifecycle_oracle_rejected() {
     local label=$1
@@ -524,7 +525,7 @@ final_oracle_call='bash "$SCRIPT_DIR/check-lifecycle-oracle.sh" "$serial" "$pass
     vm_die 'lifecycle runner must perform exactly one final serial-oracle check'
 final_wait_line="$(grep -nF 'wait "$qemu_pid" 2>/dev/null || true' "$lifecycle_runner" | tail -n 1 | cut -d: -f1)"
 final_oracle_line="$(grep -nF -- "$final_oracle_call" "$lifecycle_runner" | cut -d: -f1)"
-host_pass_line="$(grep -nF "printf 'bootart-vm: lifecycle smoke PASS; artifacts retained: %s\\n' \"\$run_dir\"" "$lifecycle_runner" | cut -d: -f1)"
+host_pass_line="$(grep -nF "printf 'sart-vm: lifecycle smoke PASS; artifacts retained: %s\\n' \"\$run_dir\"" "$lifecycle_runner" | cut -d: -f1)"
 for line in "$final_wait_line" "$final_oracle_line" "$host_pass_line"; do
     [[ "$line" =~ ^[1-9][0-9]*$ ]] || vm_die 'lifecycle final-oracle ordering guard is missing'
 done
@@ -532,4 +533,4 @@ done
     vm_die 'lifecycle final oracle must run after QEMU flush and immediately before host PASS'
 
 bash "$SCRIPT_DIR/check-resource-policy-fixtures.sh" "$repo_root"
-printf 'bootart-vm: semantic QEMU policy fixtures PASS (QEMU not executed)\n'
+printf 'sart-vm: semantic QEMU policy fixtures PASS (QEMU not executed)\n'

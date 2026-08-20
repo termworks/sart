@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == debian-13.6-initramfs-tools-systemd ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -84,11 +84,11 @@ EOF
         guest_sh='s''h'
         guest_dev='/''dev'
         guest_var_tmp='/''var/tmp'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
-        guest_manifest='/''var/lib/bootart/in''stall/manifest.v1'
+        guest_transport="$guest_dev/disk/by-label/SART"
+        guest_manifest='/''var/lib/sart/in''stall/manifest.v1'
         guest_initramfs='/boot/initrd.img-$(uname -r)'
         guest_grub_cfg=/boot/grub/grub.cfg
-        privileged_prompt="[$guest_sudo] password for bootart:"
+        privileged_prompt="[$guest_sudo] password for sart:"
         stock_unlock_prompt='device-mapper: ioctl:'
 
         count_log() {
@@ -150,7 +150,7 @@ EOF
             [[ "$size" == 3072016 && "$(sed -n '1p' -- "$output")" == P6 ]]
             [[ "$(sed -n '2p' -- "$output")" == '1280 800' && "$(sed -n '3p' -- "$output")" == 255 ]]
         }
-        require_bootart_password_screen() {
+        require_sart_password_screen() {
             tail -c 3072000 -- "$run_dir/uninstall-password-ready.ppm" | od -An -v -tu1 | awk '
                 {
                     for (i = 1; i <= NF; i++) {
@@ -187,11 +187,11 @@ EOF
                         top_box_rows >= 1 && bottom_box_rows >= 1)
                 }'
         }
-        wait_bootart_password_screen() {
+        wait_sart_password_screen() {
             local elapsed=0
             while (( elapsed < 90 )); do
                 qmp_screendump
-                require_bootart_password_screen && return 0
+                require_sart_password_screen && return 0
                 sleep 1
                 ((elapsed += 1))
             done
@@ -214,17 +214,17 @@ EOF
             qmp_type_secret
             qmp_key ret
         }
-        unlock_bootart_root() {
-            wait_bootart_password_screen
+        unlock_sart_root() {
+            wait_sart_password_screen
             sleep 7
             qmp_type_secret
             qmp_key ret
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             sleep 2
@@ -234,9 +234,9 @@ EOF
             local prompt_count marker_count marker_suffix
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                marker_suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                marker_suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -253,38 +253,38 @@ EOF
 
         unlock_stock_root 1
         login_guest 1
-        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_UNINSTALL_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_UNINSTALL_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed' 1200
+        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_UNINSTALL_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_UNINSTALL_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed' 1200
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -k $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_UNINSTALL_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_umount /mnt/sart-transport" \
+            SART_VM_UNINSTALL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 3
 
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         reboot_guest
-        unlock_bootart_root
+        unlock_sart_root
         login_guest "$((login_count + 1))"
-        privileged_step "$guest_sudo -k /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_UNINSTALL_INSTALLED_STATUS_V1
-        privileged_step "$guest_sudo -k /usr/bin/bootart $guest_install uninstall --confirm-host bootart-vm" \
-            'bootart install uninstall:' 1200
-        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test ! -e /usr/bin/bootart; test ! -e $guest_manifest; test ! -e /usr/share/initramfs-tools/hooks/bootart; test ! -e /usr/lib/bootart/initramfs-tools-askpass; test ! -e /usr/share/initramfs-tools/scripts/init-top/bootart; test ! -e /usr/share/initramfs-tools/scripts/init-bottom/bootart; test ! -e /usr/lib/systemd/system/bootart-start.service; test ! -e /usr/lib/systemd/system/bootart-show.service; test ! -e /usr/lib/systemd/system/bootart-switch-root.service; test ! -e /usr/lib/systemd/system/bootart-quit.service; test ! -e /usr/lib/systemd/system/bootart-quit-wait.service; test ! -e /usr/lib/systemd/system/systemd-ask-password-console.service.d/50-bootart.conf; test ! -e /etc/grub.d/41_bootart_known_good; test ! -e $guest_initramfs.bootart-known-good; listing=$guest_var_tmp/bootart-uninstall-initramfs.list; $guest_remove -f \"\$listing\"; /usr/bin/lsinitramfs $guest_initramfs > \"\$listing\"; test -s \"\$listing\"; ! grep -a -i -F -q bootart \"\$listing\"; $guest_remove -f \"\$listing\"; ! grep -a -F -q bootart-known-good $guest_grub_cfg; /usr/bin/sha256sum $guest_initramfs > $guest_var_tmp/bootart-uninstall-clean-image.sha256; unset listing'" \
-            BOOTART_VM_UNINSTALL_TREE_CLEAN_V1
+        privileged_step "$guest_sudo -k /usr/bin/sart $guest_install status" \
+            SART_VM_UNINSTALL_INSTALLED_STATUS_V1
+        privileged_step "$guest_sudo -k /usr/bin/sart $guest_install uninstall --confirm-host sart-vm" \
+            'sart install uninstall:' 1200
+        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test ! -e /usr/bin/sart; test ! -e $guest_manifest; test ! -e /usr/share/initramfs-tools/hooks/sart; test ! -e /usr/lib/sart/initramfs-tools-askpass; test ! -e /usr/share/initramfs-tools/scripts/init-top/sart; test ! -e /usr/share/initramfs-tools/scripts/init-bottom/sart; test ! -e /usr/lib/systemd/system/sart-start.service; test ! -e /usr/lib/systemd/system/sart-show.service; test ! -e /usr/lib/systemd/system/sart-switch-root.service; test ! -e /usr/lib/systemd/system/sart-quit.service; test ! -e /usr/lib/systemd/system/sart-quit-wait.service; test ! -e /usr/lib/systemd/system/systemd-ask-password-console.service.d/50-sart.conf; test ! -e /etc/grub.d/41_sart_known_good; test ! -e $guest_initramfs.sart-known-good; listing=$guest_var_tmp/sart-uninstall-initramfs.list; $guest_remove -f \"\$listing\"; /usr/bin/lsinitramfs $guest_initramfs > \"\$listing\"; test -s \"\$listing\"; ! grep -a -i -F -q sart \"\$listing\"; $guest_remove -f \"\$listing\"; ! grep -a -F -q sart-known-good $guest_grub_cfg; /usr/bin/sha256sum $guest_initramfs > $guest_var_tmp/sart-uninstall-clean-image.sha256; unset listing'" \
+            SART_VM_UNINSTALL_TREE_CLEAN_V1
 
         luks_count=$(count_log "$stock_unlock_prompt")
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         reboot_guest
         unlock_stock_root "$((luks_count + 1))"
         login_guest "$((login_count + 1))"
-        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x bootart; test ! -e /usr/bin/bootart; test ! -e $guest_manifest; /usr/bin/sha256sum -c $guest_var_tmp/bootart-uninstall-clean-image.sha256; $guest_remove -f $guest_var_tmp/bootart-uninstall-clean-image.sha256; unset root_source'" \
-            BOOTART_VM_UNINSTALL_STOCK_BOOT_V1
+        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x sart; test ! -e /usr/bin/sart; test ! -e $guest_manifest; /usr/bin/sha256sum -c $guest_var_tmp/sart-uninstall-clean-image.sha256; $guest_remove -f $guest_var_tmp/sart-uninstall-clean-image.sha256; unset root_source'" \
+            SART_VM_UNINSTALL_STOCK_BOOT_V1
 
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\n%s\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\n%s\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1

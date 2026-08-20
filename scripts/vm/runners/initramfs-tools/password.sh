@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == debian-13.6-initramfs-tools-systemd ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -84,8 +84,8 @@ EOF
         guest_sh='s''h'
         guest_crypt='crypt''setup'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
-        privileged_prompt="[$guest_sudo] password for bootart:"
+        guest_transport="$guest_dev/disk/by-label/SART"
+        privileged_prompt="[$guest_sudo] password for sart:"
         stock_unlock_prompt='device-mapper: ioctl:'
         guest_initramfs='/boot/initrd.img-$(uname -r)'
 
@@ -304,9 +304,9 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             sleep 2
@@ -315,9 +315,9 @@ EOF
             local request=$1 marker=$2 prompt_count marker_count marker_suffix
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                marker_suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                marker_suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -330,9 +330,9 @@ EOF
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
             failure_count=$(count_log "$failure_marker")
-            marker_suffix=${marker#BOOTART_}
-            failure_suffix=${failure_marker#BOOTART_}
-            send_serial "if $request; then m=BOOTART_; m=\${m}$marker_suffix; printf '%s\\n' \"\$m\"; else f=BOOTART_; f=\${f}$failure_suffix; printf '%s\\n' \"\$f\"; fi"
+            marker_suffix=${marker#SART_}
+            failure_suffix=${failure_marker#SART_}
+            send_serial "if $request; then m=SART_; m=\${m}$marker_suffix; printf '%s\\n' \"\$m\"; else f=SART_; f=\${f}$failure_suffix; printf '%s\\n' \"\$f\"; fi"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
             send_serial ubuntu
             while (( elapsed < 180 )); do
@@ -353,30 +353,30 @@ EOF
         qmp_key ret
         login_guest 1
 
-        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed'
+        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_PASSWORD_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_PASSWORD_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed'
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -k $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_umount /mnt/sart-transport" \
+            SART_VM_PASSWORD_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 3
 
         initrd_count=$(count_log 'Running in initrd.')
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         prompt_count=$(count_log "$privileged_prompt")
         send_serial "$guest_sudo -k $guest_reboot"
         wait_count "$privileged_prompt" "$((prompt_count + 1))"
         send_serial ubuntu
 
         # initramfs-tools suppresses daemon output by design. Require the real
-        # centered Bootart prompt instead of manufacturing a serial marker.
+        # centered Sart prompt instead of manufacturing a serial marker.
         wait_password_box_screendump password-empty.ppm 60
 
         for wrong_key in 0 0 0 0 0 0; do qmp_key "$wrong_key"; done
@@ -399,13 +399,13 @@ EOF
         unset secret
         login_guest "$((login_count + 1))"
 
-        # Scan process state and every Bootart-owned persistent/runtime tree.
+        # Scan process state and every Sart-owned persistent/runtime tree.
         # Searching unrelated package indexes for a six-digit numeric test
         # password produces inevitable coincidences (for example package byte
-        # sizes) and says nothing about Bootart retaining the credential.
-        privileged_step_or_report "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; crypt_source=\$(lsblk -rno PATH,TYPE -s \"\$root_source\" | while read -r path kind; do if test \"\$kind\" = crypt; then printf \"%s\\n\" \"\$path\"; break; fi; done); test -n \"\$crypt_source\"; /sbin/$guest_crypt status \"\$crypt_source\" | grep -Eq \"type:[[:space:]]+LUKS2\"; test \"\$(cat /sys/class/tty/tty0/active)\" = tty1; ! pgrep -x bootart; work=/var/tmp/bootart-password-initramfs; $guest_remove -rf \"\$work\"; /usr/bin/unmkinitramfs $guest_initramfs \"\$work\"; /usr/bin/cmp /usr/bin/bootart \"\$work/main/usr/bin/bootart\"; grep -Fq bootart:initramfs-tools-native-v1 \"\$work/main/usr/lib/cryptsetup/askpass\"; scan=112; scan=\${scan}358; matches=\$({ printf \"%s\" \"\$scan\" | grep -r -a -F -l --devices=skip -f - /proc/[0-9]*/cmdline /proc/[0-9]*/environ /etc/bootart /usr/lib/bootart /var/lib/bootart /run/bootart \"\$work\" 2>/dev/null || true; /usr/bin/journalctl --no-pager -o cat _COMM=bootart 2>/dev/null | grep -Fq -- \"\$scan\" && printf \"journal:_COMM=bootart\\n\" || true; printf \"(?<![[:alnum:]])%s(?![[:alnum:]])\" \"\$scan\" | grep -r -a -P -l --devices=skip -f - /boot 2>/dev/null || true; }); unset scan; if test -n \"\$matches\"; then printf \"BOOTART_VM_SECRET_SCAN_MATCH_PATHS_BEGIN\\n%s\\nBOOTART_VM_SECRET_SCAN_MATCH_PATHS_END\\n\" \"\$matches\"; exit 1; fi; unset matches root_source crypt_source; $guest_remove -rf \"\$work\"; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_PASSWORD_ROOT_AND_SECRET_VERIFIED_V1 \
-            BOOTART_VM_PASSWORD_ROOT_AND_SECRET_FAILED_V1
+        # sizes) and says nothing about Sart retaining the credential.
+        privileged_step_or_report "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; crypt_source=\$(lsblk -rno PATH,TYPE -s \"\$root_source\" | while read -r path kind; do if test \"\$kind\" = crypt; then printf \"%s\\n\" \"\$path\"; break; fi; done); test -n \"\$crypt_source\"; /sbin/$guest_crypt status \"\$crypt_source\" | grep -Eq \"type:[[:space:]]+LUKS2\"; test \"\$(cat /sys/class/tty/tty0/active)\" = tty1; ! pgrep -x sart; work=/var/tmp/sart-password-initramfs; $guest_remove -rf \"\$work\"; /usr/bin/unmkinitramfs $guest_initramfs \"\$work\"; /usr/bin/cmp /usr/bin/sart \"\$work/main/usr/bin/sart\"; grep -Fq sart:initramfs-tools-native-v1 \"\$work/main/usr/lib/cryptsetup/askpass\"; scan=112; scan=\${scan}358; matches=\$({ printf \"%s\" \"\$scan\" | grep -r -a -F -l --devices=skip -f - /proc/[0-9]*/cmdline /proc/[0-9]*/environ /etc/sart /usr/lib/sart /var/lib/sart /run/sart \"\$work\" 2>/dev/null || true; /usr/bin/journalctl --no-pager -o cat _COMM=sart 2>/dev/null | grep -Fq -- \"\$scan\" && printf \"journal:_COMM=sart\\n\" || true; printf \"(?<![[:alnum:]])%s(?![[:alnum:]])\" \"\$scan\" | grep -r -a -P -l --devices=skip -f - /boot 2>/dev/null || true; }); unset scan; if test -n \"\$matches\"; then printf \"SART_VM_SECRET_SCAN_MATCH_PATHS_BEGIN\\n%s\\nSART_VM_SECRET_SCAN_MATCH_PATHS_END\\n\" \"\$matches\"; exit 1; fi; unset matches root_source crypt_source; $guest_remove -rf \"\$work\"; /usr/bin/sart $guest_install status'" \
+            SART_VM_PASSWORD_ROOT_AND_SECRET_VERIFIED_V1 \
+            SART_VM_PASSWORD_ROOT_AND_SECRET_FAILED_V1
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1
         wait_count "$oracle" 1

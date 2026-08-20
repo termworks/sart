@@ -1,6 +1,6 @@
-# bootart
+# sart
 
-`bootart` is a persistent Linux text-VT boot splash. It runs alongside the
+`sart` (START ART) is a persistent Linux text-VT boot splash. It runs alongside the
 normal init system, handles the initramfs password-agent presentation, stays
 visible while real-root startup continues, and then restores/releases the VT.
 It is never PID 1.
@@ -29,11 +29,11 @@ refused before mutation.
 ## One-file product
 
 The implementation is C++23 and the shipped product is one musl-static ELF
-named `bootart`. The daemon, control
+named `sart`. The daemon, control
 client, installer, recovery, uninstaller, default art, systemd units, dracut
 module, and configuration templates are all compiled into it. Installation
 materializes embedded strings and the exact running ELF; no helper executable,
-source checkout, VM script, or external Bootart resource must accompany it.
+source checkout, VM script, or external Sart resource must accompany it.
 
 The installed Linux system still supplies the kernel, systemd, dracut,
 cryptsetup, and GRUB. The installer validates their exact approved paths and
@@ -49,25 +49,25 @@ make static-build
 The copyable file is:
 
 ```text
-target/artifacts/current/release/bootart
+target/artifacts/current/release/sart
 ```
 
 ## Installation commands
 
-First copy only the static `bootart` ELF to a machine matching a proven
+First copy only the static `sart` ELF to a machine matching a proven
 capability contract. Then, from an interactive terminal:
 
 ```sh
-sudo ./bootart install plan
-sudo ./bootart install apply --confirm-host "$(hostname)"
-sudo /usr/bin/bootart install status
+sudo ./sart install plan
+sudo ./sart install apply --confirm-host "$(hostname)"
+sudo /usr/bin/sart install status
 ```
 
 Recovery and uninstall use the installed ELF:
 
 ```sh
-sudo /usr/bin/bootart install recover --confirm-host "$(hostname)"
-sudo /usr/bin/bootart install uninstall --confirm-host "$(hostname)"
+sudo /usr/bin/sart install recover --confirm-host "$(hostname)"
+sudo /usr/bin/sart install uninstall --confirm-host "$(hostname)"
 ```
 
 Mutating commands require UID 0, an interactive stdin/stdout TTY, and the exact
@@ -84,32 +84,32 @@ Installation is transactional:
 5. create/update the known-good GRUB entry;
 6. atomically activate the candidate and commit the manifest.
 
-On a supported Android-style mkinitfs + boot-deploy machine, Bootart also
+On a supported Android-style mkinitfs + boot-deploy machine, Sart also
 disables boot-deploy's unjournaled automatic flash, validates the complete
 Android v2 image, snapshots the exact active raw partition, durably activates
 and read-back verifies it, and records the partition identity in the manifest.
 Kernel-package refresh, crash recovery, rollback, and uninstall use that same
 transaction. Rollback and explicit recovery restore and verify the journaled
 full-partition preimage. Uninstall instead generates, inspects, durably
-activates, and reboots a Bootart-free image for the current kernel; restoring
+activates, and reboots a Sart-free image for the current kernel; restoring
 an install-time image after a kernel update could mismatch the kernel and its
 root-filesystem modules.
 
 An incomplete transaction is handled by explicit `install recover`. Uninstall
-builds and inspects a Bootart-free candidate before removing owned integration.
+builds and inspects a Sart-free candidate before removing owned integration.
 Locally modified managed files are reported rather than silently overwritten.
 
 ## Encrypted-root prompt
 
-Bootart does not decrypt or mount the root disk. Systemd-cryptsetup owns the
-request and cryptsetup operation; Bootart is the systemd password agent that
+Sart does not decrypt or mount the root disk. Systemd-cryptsetup owns the
+request and cryptsetup operation; Sart is the systemd password agent that
 draws the centered, masked prompt and sends the response to the request socket.
 The splash uses a cleared black background and rounded Unicode box drawing.
 
 The public passphrase `112358` exists only in the disposable VM harness. It is
 not compiled into the product and must never be used on a real disk.
 
-Exact kernel tokens `bootart=0` or `rd.bootart=0` bypass VT acquisition and
+Exact kernel tokens `sart=0` or `rd.sart=0` bypass VT acquisition and
 leave the stock console unlock path available.
 
 ## Validation

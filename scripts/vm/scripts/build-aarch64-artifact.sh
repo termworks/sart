@@ -29,7 +29,7 @@ done
 
 outputs="$(mktemp "$arch_cache/.nix-outputs.XXXXXXXXXX")"
 stage="$(mktemp -d "$arch_cache/.artifact.XXXXXXXXXX")"
-staged="$stage/bootart"
+staged="$stage/sart"
 pointer_stage="$(mktemp -d "$arch_cache/.pointer.XXXXXXXXXX")"
 cleanup() {
     status=$?
@@ -54,13 +54,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 bash "$repo_root/scripts/nix-source-command.sh" \
-    "$repo_root" "$network_mode" build "$nix_program" bootart-static-aarch64 \
+    "$repo_root" "$network_mode" build "$nix_program" sart-static-aarch64 \
     > "$outputs"
 mapfile -t nix_outputs < "$outputs"
 [[ ${#nix_outputs[@]} -eq 1 ]] || vm_die 'aarch64 Nix build returned other than one output'
-source_elf="${nix_outputs[0]}/bin/bootart"
+source_elf="${nix_outputs[0]}/bin/sart"
 [[ -f "$source_elf" && ! -L "$source_elf" && -x "$source_elf" ]] ||
-    vm_die 'aarch64 Nix output lacks an executable bin/bootart'
+    vm_die 'aarch64 Nix output lacks an executable bin/sart'
 
 install -m 0700 -- "$source_elf" "$staged"
 READELF="$(command -v readelf)" \
@@ -68,7 +68,7 @@ READELF="$(command -v readelf)" \
 sha="$(sha256sum "$staged" | awk '{ print $1 }')"
 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || vm_die 'aarch64 VM artifact digest is invalid'
 destination_dir="$generation_root/$sha"
-destination="$destination_dir/bootart"
+destination="$destination_dir/sart"
 if [[ -e "$destination_dir" || -L "$destination_dir" ]]; then
     vm_assert_private_dir "$destination_dir"
     [[ -f "$destination" && ! -L "$destination" && "$(vm_stat_mode "$destination")" == 500 ]] ||
@@ -89,11 +89,11 @@ if [[ -n "$stage" ]]; then
     stage=
 fi
 
-ln -s -- "generations/$sha/bootart" "$pointer_stage/current"
+ln -s -- "generations/$sha/sart" "$pointer_stage/current"
 if [[ -e "$arch_cache/current" || -L "$arch_cache/current" ]]; then
     [[ -L "$arch_cache/current" ]] || vm_die 'aarch64 artifact current pointer is not a symlink'
 fi
 mv -T -- "$pointer_stage/current" "$arch_cache/current"
 rmdir -- "$pointer_stage"
 pointer_stage=
-printf 'bootart-vm: aarch64 static ELF: %s\n' "$destination"
+printf 'sart-vm: aarch64 static ELF: %s\n' "$destination"

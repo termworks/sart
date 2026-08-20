@@ -9,12 +9,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
 [[ $# -eq 7 ]] || vm_die \
-    'usage: run-ubuntu-gui.sh REPO_ROOT VM_ROOT LOCK_FILE MATRIX_FILE BOOTART_BIN QEMU QEMU_IMG'
+    'usage: run-ubuntu-gui.sh REPO_ROOT VM_ROOT LOCK_FILE MATRIX_FILE SART_BIN QEMU QEMU_IMG'
 repo_root=$1
 vm_root=$2
 lock_file=$3
 matrix_file=$4
-bootart_bin=$5
+sart_bin=$5
 configured_qemu=$6
 configured_qemu_img=$7
 
@@ -25,15 +25,15 @@ vm_validate_lock "$lock_file"
 bash "$repo_root/scripts/artifact-lock-assert.sh" "$repo_root" >/dev/null ||
     vm_die 'Ubuntu GUI requires the repository artifact lock'
 
-bootart_physical="$(readlink -f -- "$bootart_bin")" || vm_die 'cannot resolve Bootart ELF'
-case "$bootart_physical" in
-    "$repo_root/target/artifacts/generations/"*/release/bootart) ;;
+sart_physical="$(readlink -f -- "$sart_bin")" || vm_die 'cannot resolve Sart ELF'
+case "$sart_physical" in
+    "$repo_root/target/artifacts/generations/"*/release/sart) ;;
     *) vm_die 'Ubuntu GUI accepts only the ordinary immutable release ELF' ;;
 esac
-[[ -f "$bootart_physical" && ! -L "$bootart_physical" ]] || vm_die 'release ELF is unsafe'
-vm_assert_owned "$bootart_physical"
+[[ -f "$sart_physical" && ! -L "$sart_physical" ]] || vm_die 'release ELF is unsafe'
+vm_assert_owned "$sart_physical"
 READELF="$(command -v readelf)" bash "$repo_root/scripts/artifact-inspect.sh" \
-    x86_64 "$bootart_physical"
+    x86_64 "$sart_physical"
 
 lock_record="$(vm_lock_record "$lock_file" ubuntu-26.04-dracut-systemd-amd64-derived)"
 IFS='|' read -r _ lock_status _ _ _ _ _ _ _ _ _ max_run_bytes max_file_bytes \
@@ -66,15 +66,15 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-expected_result='BOOTART_VM_LANE_STATUS_V3|fixture=ubuntu-26.04-dracut-systemd|pair=dracut-systemd|lane=install|status=PASS|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=exact-serial-oracle'
-legacy_expected_result='BOOTART_VM_LANE_STATUS_V2|pair=dracut-systemd|lane=install|status=PASS|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=exact-serial-oracle'
-recoverable_failure='BOOTART_VM_LANE_STATUS_V3|fixture=ubuntu-26.04-dracut-systemd|pair=dracut-systemd|lane=install|status=FAIL|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=infrastructure-error'
-legacy_recoverable_failure='BOOTART_VM_LANE_STATUS_V2|pair=dracut-systemd|lane=install|status=FAIL|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=infrastructure-error'
-bootart_digest="$(sha256sum -- "$bootart_physical" | awk '{ print $1 }')"
-[[ "$bootart_digest" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cannot hash release ELF'
+expected_result='SART_VM_LANE_STATUS_V3|fixture=ubuntu-26.04-dracut-systemd|pair=dracut-systemd|lane=install|status=PASS|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=exact-serial-oracle'
+legacy_expected_result='SART_VM_LANE_STATUS_V2|pair=dracut-systemd|lane=install|status=PASS|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=exact-serial-oracle'
+recoverable_failure='SART_VM_LANE_STATUS_V3|fixture=ubuntu-26.04-dracut-systemd|pair=dracut-systemd|lane=install|status=FAIL|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=infrastructure-error'
+legacy_recoverable_failure='SART_VM_LANE_STATUS_V2|pair=dracut-systemd|lane=install|status=FAIL|image=ubuntu-26.04-dracut-systemd-amd64-derived|oracle=SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1|reason=infrastructure-error'
+sart_digest="$(sha256sum -- "$sart_physical" | awk '{ print $1 }')"
+[[ "$sart_digest" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cannot hash release ELF'
 
 # A full install lane is intentionally thorough: it installs, checks an
-# idempotent second apply, reboots, unlocks through Bootart, verifies the
+# idempotent second apply, reboots, unlocks through Sart, verifies the
 # initramfs copy, and powers off. Repeating all of that before every visual
 # boot made this target appear broken for many minutes under TCG. Reuse a
 # retained PASS run only when it proves this exact ELF and is no longer live.
@@ -88,9 +88,9 @@ for candidate in "$vm_root"/runs/run.*; do
     [[ "$candidate_result" == "$expected_result" ||
        "$candidate_result" == "$legacy_expected_result" ]] || continue
     [[ -f "$candidate/serial.log" && ! -L "$candidate/serial.log" ]] || continue
-    grep -a -F -q -- "bootart-sha256=$bootart_digest" "$candidate/serial.log" || continue
-    grep -a -F -q -- 'BOOTART_VM_INSTALL_REBOOT_HASH_V1' "$candidate/serial.log" || continue
-    grep -a -F -q -- 'BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1' "$candidate/serial.log" || continue
+    grep -a -F -q -- "sart-sha256=$sart_digest" "$candidate/serial.log" || continue
+    grep -a -F -q -- 'SART_VM_INSTALL_REBOOT_HASH_V1' "$candidate/serial.log" || continue
+    grep -a -F -q -- 'SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1' "$candidate/serial.log" || continue
     vm_pid_matches_run "$candidate" && continue
     install_run=$candidate
     break
@@ -140,25 +140,25 @@ if [[ -z "$install_run" ]]; then
            "$(sed -n 's/^image=//p' "$candidate/lane.meta")" == \
                ubuntu-26.04-dracut-systemd-amd64-derived &&
            "$(sed -n 's/^oracle=//p' "$candidate/lane.meta")" == \
-               BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1 ]] || continue
+               SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1 ]] || continue
         candidate_policy_hash="$(cat -- "$candidate/qemu.policy.sha256")"
         [[ "$candidate_policy_hash" =~ ^[0-9a-f]{64}$ &&
            "$(sha256sum -- "$candidate/qemu.args" | awk '{ print $1 }')" == \
                "$candidate_policy_hash" ]] || continue
         [[ ! -s "$candidate/qemu.stderr" ]] || continue
-        grep -a -F -q -- "bootart-sha256=$bootart_digest" "$candidate/serial.log" || continue
+        grep -a -F -q -- "sart-sha256=$sart_digest" "$candidate/serial.log" || continue
         [[ "$(awk '{ line = $0; sub(/\r$/, "", line); if (line == \
-            "BOOTART_VM_INSTALL_REBOOT_HASH_V1") count++ } END { print count + 0 }' \
+            "SART_VM_INSTALL_REBOOT_HASH_V1") count++ } END { print count + 0 }' \
             "$candidate/serial.log")" == 1 ]] || continue
         # An infrastructure-error can be the QMP socket disappearing during
         # the guest's final poweroff. In that case the temporary driver log is
         # intentionally incomplete. Do not require optional progress lines
         # from it: the ordered serial oracle below already proves transport
-        # removal, the Bootart reboot/unlock, the disk-only status/hash, and
+        # removal, the Sart reboot/unlock, the disk-only status/hash, and
         # final shutdown. The QMP artifact is still required to be a private,
         # owned regular file so recovery cannot ignore forged filesystem state.
         bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$candidate/serial.log" \
-            BOOTART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1 >/dev/null 2>&1 || continue
+            SART_VM_DRACUT_SYSTEMD_INSTALL_PASS_V1 >/dev/null 2>&1 || continue
 
         if [[ -e "$candidate/secret-scan.matches" ||
               -L "$candidate/secret-scan.matches" ]]; then
@@ -186,7 +186,7 @@ if [[ -z "$install_run" ]]; then
         fi
         install_run=$candidate
         install_run_recovered=1
-        printf 'bootart-vm: recovering completed stopped install for GUI only: %s\n' \
+        printf 'sart-vm: recovering completed stopped install for GUI only: %s\n' \
             "$install_run"
         break
     done
@@ -194,16 +194,16 @@ fi
 
 if [[ -n "$install_run" ]]; then
     if [[ $install_run_recovered -eq 0 ]]; then
-        printf 'bootart-vm: reusing authenticated install evidence for this exact ELF: %s\n' \
+        printf 'sart-vm: reusing authenticated install evidence for this exact ELF: %s\n' \
             "$install_run"
     fi
 else
-    printf '%s\n' 'bootart-vm: no matching installed evidence exists; running the one-time headless install proof'
-    printf '%s\n' 'bootart-vm: this can take several minutes under TCG; the GUI opens immediately on later runs of the same ELF'
+    printf '%s\n' 'sart-vm: no matching installed evidence exists; running the one-time headless install proof'
+    printf '%s\n' 'sart-vm: this can take several minutes under TCG; the GUI opens immediately on later runs of the same ELF'
     install_log="$(mktemp "$vm_root/.ubuntu-gui-install.XXXXXXXXXX")" ||
         vm_die 'cannot allocate private install transcript'
     set +e
-    BOOTART_BIN="$bootart_physical" QEMU="$configured_qemu" QEMU_IMG="$configured_qemu_img" \
+    SART_BIN="$sart_physical" QEMU="$configured_qemu" QEMU_IMG="$configured_qemu_img" \
         make --no-print-directory -C "$repo_root/scripts/vm" \
         vm-test-install-dracut-systemd 2>&1 | tee "$install_log"
     install_status=${PIPESTATUS[0]}
@@ -211,7 +211,7 @@ else
     [[ $install_status -eq 0 ]] || vm_die 'normal release ELF install lane failed before GUI boot'
 
     mapfile -t install_runs < <(
-        sed -n 's/^bootart-vm: unpromoted adapter evidence retained: //p' "$install_log"
+        sed -n 's/^sart-vm: unpromoted adapter evidence retained: //p' "$install_log"
     )
     [[ ${#install_runs[@]} -eq 1 ]] || vm_die 'install lane did not identify exactly one evidence run'
     install_run=${install_runs[0]}
@@ -268,8 +268,8 @@ qemu_supports_display() {
 }
 
 declare -a qemu_candidates=("$(vm_resolve_qemu "$configured_qemu")")
-if command -v -- bootart-qemu-gui >/dev/null 2>&1; then
-    qemu_candidates+=(bootart-qemu-gui)
+if command -v -- sart-qemu-gui >/dev/null 2>&1; then
+    qemu_candidates+=(sart-qemu-gui)
 fi
 if [[ -x /usr/bin/qemu-system-x86_64 ]]; then
     qemu_candidates+=(/usr/bin/qemu-system-x86_64)
@@ -313,14 +313,14 @@ else
     vm_die 'no live graphical session found; set WAYLAND_DISPLAY or DISPLAY'
 fi
 
-printf 'bootart-vm: launching installed Ubuntu GUI from private run %s\n' "$gui_run"
-printf '%s\n' 'bootart-vm: click the window and type 112358 in the centered Bootart prompt'
-printf '%s\n' 'bootart-vm: close the window after login is visible; the hard deadline is 15 minutes'
+printf 'sart-vm: launching installed Ubuntu GUI from private run %s\n' "$gui_run"
+printf '%s\n' 'sart-vm: click the window and type 112358 in the centered Sart prompt'
+printf '%s\n' 'sart-vm: close the window after login is visible; the hard deadline is 15 minutes'
 
 set +e
 timeout --signal=TERM --kill-after=5s 900s \
     bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_file_bytes" "$qemu" \
-    -name bootart-ubuntu-26.04-gui \
+    -name sart-ubuntu-26.04-gui \
     -nodefaults \
     -no-user-config \
     -machine q35,accel=tcg \
@@ -354,6 +354,6 @@ vm_assert_run_bytes_at_most "$vm_root" "$gui_run" "$max_run_bytes"
 
 case "$qemu_status" in
     0) ;;
-    124|137) printf '%s\n' 'bootart-vm: Ubuntu GUI deadline reached; QEMU was terminated' ;;
+    124|137) printf '%s\n' 'sart-vm: Ubuntu GUI deadline reached; QEMU was terminated' ;;
     *) exit "$qemu_status" ;;
 esac

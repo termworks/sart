@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == alpine-mkinitfs-openrc ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -83,7 +83,7 @@ EOF
         guest_remove='r''m'
         guest_sh='s''h'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         guest_initramfs=/boot/initramfs-virt
 
         count_log() {
@@ -261,7 +261,7 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
             send_serial alpine
             wait_count 'Password:' "$((password_count + 1))"
@@ -271,8 +271,8 @@ EOF
         privileged_step() {
             local request=$1 marker=$2 marker_count marker_suffix
             marker_count=$(count_log "$marker")
-            marker_suffix=${marker#BOOTART_}
-            send_serial "$request && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            marker_suffix=${marker#SART_}
+            send_serial "$request && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             wait_count "$marker" "$((marker_count + 1))"
         }
         unlock_stock() {
@@ -297,39 +297,39 @@ EOF
 
         unlock_stock
         login_guest 1
-        privileged_step "$guest_doas $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_MOUNT_DIR_V1
-        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install plan" \
-            BOOTART_VM_INSTALL_PLAN_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            BOOTART_VM_INSTALL_APPLIED_V1
-        privileged_step "$guest_doas /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_INSTALL_STATUS_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            BOOTART_VM_INSTALL_IDEMPOTENT_V1
-        privileged_step "$guest_doas cmp /mnt/bootart-transport/bootart /usr/bin/bootart" \
-            BOOTART_VM_INSTALL_ROOT_ELF_V1
-        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/bootart-initramfs-check; $guest_mkdir -p /var/tmp/bootart-initramfs-check; cd /var/tmp/bootart-initramfs-check; cpio -idmu < $guest_initramfs >/dev/null 2>&1; cmp /mnt/bootart-transport/bootart usr/bin/bootart; grep -Fq bootart:mkinitfs-findfs-native-v1 usr/libexec/bootart/mkinitfs-findfs; grep -Fq bootart:begin\ mkinitfs-early-v1 init; cd /; $guest_remove -rf /var/tmp/bootart-initramfs-check'" \
-            BOOTART_VM_INSTALL_INITRAMFS_V1
+        privileged_step "$guest_doas $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_INSTALL_MOUNT_DIR_V1
+        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_INSTALL_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install plan" \
+            SART_VM_INSTALL_PLAN_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            SART_VM_INSTALL_APPLIED_V1
+        privileged_step "$guest_doas /usr/bin/sart $guest_install status" \
+            SART_VM_INSTALL_STATUS_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            SART_VM_INSTALL_IDEMPOTENT_V1
+        privileged_step "$guest_doas cmp /mnt/sart-transport/sart /usr/bin/sart" \
+            SART_VM_INSTALL_ROOT_ELF_V1
+        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/sart-initramfs-check; $guest_mkdir -p /var/tmp/sart-initramfs-check; cd /var/tmp/sart-initramfs-check; cpio -idmu < $guest_initramfs >/dev/null 2>&1; cmp /mnt/sart-transport/sart usr/bin/sart; grep -Fq sart:mkinitfs-findfs-native-v1 usr/libexec/sart/mkinitfs-findfs; grep -Fq sart:begin\ mkinitfs-early-v1 init; cd /; $guest_remove -rf /var/tmp/sart-initramfs-check'" \
+            SART_VM_INSTALL_INITRAMFS_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_doas $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_doas $guest_umount /mnt/sart-transport" \
+            SART_VM_INSTALL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
 
-        login_before=$(count_log 'bootart-vm login:')
+        login_before=$(count_log 'sart-vm login:')
         syslinux_before=$(count_log SYSLINUX)
         send_serial "$guest_doas $guest_reboot"
         unlock_installed "$((syslinux_before + 1))"
         login_guest "$((login_before + 1))"
-        privileged_step "$guest_doas $guest_sh -c 'test ! -e $guest_transport; test ! -e /mnt/bootart-transport/bootart; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_INSTALL_DETACHED_STATUS_V1
-        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/bootart-initramfs-check; $guest_mkdir -p /var/tmp/bootart-initramfs-check; cd /var/tmp/bootart-initramfs-check; cpio -idmu < $guest_initramfs >/dev/null 2>&1; cmp /usr/bin/bootart usr/bin/bootart; grep -Fq bootart:mkinitfs-findfs-native-v1 usr/libexec/bootart/mkinitfs-findfs; grep -Fq bootart:begin\ mkinitfs-handoff-v1 init; cd /; $guest_remove -rf /var/tmp/bootart-initramfs-check'" \
-            BOOTART_VM_INSTALL_DETACHED_INITRAMFS_V1
+        privileged_step "$guest_doas $guest_sh -c 'test ! -e $guest_transport; test ! -e /mnt/sart-transport/sart; /usr/bin/sart $guest_install status'" \
+            SART_VM_INSTALL_DETACHED_STATUS_V1
+        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/sart-initramfs-check; $guest_mkdir -p /var/tmp/sart-initramfs-check; cd /var/tmp/sart-initramfs-check; cpio -idmu < $guest_initramfs >/dev/null 2>&1; cmp /usr/bin/sart usr/bin/sart; grep -Fq sart:mkinitfs-findfs-native-v1 usr/libexec/sart/mkinitfs-findfs; grep -Fq sart:begin\ mkinitfs-handoff-v1 init; cd /; $guest_remove -rf /var/tmp/sart-initramfs-check'" \
+            SART_VM_INSTALL_DETACHED_INITRAMFS_V1
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1
         wait_count "$oracle" 1

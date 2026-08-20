@@ -5,7 +5,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-adapter-pairs: ERROR: %s\n' "$*" >&2
+    printf 'sart-adapter-pairs: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -19,7 +19,7 @@ repo_root=${1%/}
 root_make=$repo_root/Makefile
 vm_make=$repo_root/scripts/vm/Makefile
 matrix=$repo_root/scripts/vm/adapter-matrix.lock
-cpp_registry=$repo_root/cpp/src/adapter.cpp
+cpp_registry=$repo_root/src/adapter.cpp
 for source in "$root_make" "$vm_make" "$matrix" "$cpp_registry"; do
     [[ -f "$source" && ! -L "$source" ]] || die "required source is missing or symlinked: $source"
 done
@@ -115,5 +115,5 @@ proof_gate_count=$(grep -Ec '"make vm-test-(lifecycle|install|password|recovery|
 [[ "$proof_gate_count" -eq $((row_count * 6)) ]] ||
     die 'C++ registry contains an unowned or malformed proof gate'
 
-printf 'bootart-adapter-pairs: PASS: %s exact pairs share one 6-lane proof surface\n' \
+printf 'sart-adapter-pairs: PASS: %s exact pairs share one 6-lane proof surface\n' \
     "$row_count"

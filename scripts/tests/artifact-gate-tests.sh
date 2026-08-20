@@ -6,11 +6,11 @@ export LC_ALL=C
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 tmp_parent=${TMPDIR:-/tmp}
-tmp=$(mktemp -d "$tmp_parent/bootart-artifact-tests.XXXXXX")
+tmp=$(mktemp -d "$tmp_parent/sart-artifact-tests.XXXXXX")
 
 cleanup() {
     case "$tmp" in
-        "$tmp_parent"/bootart-artifact-tests.*)
+        "$tmp_parent"/sart-artifact-tests.*)
             chmod -R u+w -- "$tmp" 2>/dev/null || true
             rm -rf -- "$tmp"
             ;;
@@ -64,16 +64,16 @@ EOF
 chmod 0700 "$mock_readelf"
 
 release_dir=$tmp/release
-real_root=$tmp/real-root/usr/bin/bootart
-initramfs=$tmp/initramfs/usr/bin/bootart
+real_root=$tmp/real-root/usr/bin/sart
+initramfs=$tmp/initramfs/usr/bin/sart
 
 reset_fixtures() {
     rm -rf -- "$release_dir" "$tmp/real-root" "$tmp/initramfs"
     mkdir -p "$release_dir" "${real_root%/*}" "${initramfs%/*}"
-    printf 'ELF\nARCH=x86_64\n' >"$release_dir/bootart"
-    cp -- "$release_dir/bootart" "$real_root"
-    cp -- "$release_dir/bootart" "$initramfs"
-    chmod 0755 "$release_dir/bootart" "$real_root" "$initramfs"
+    printf 'ELF\nARCH=x86_64\n' >"$release_dir/sart"
+    cp -- "$release_dir/sart" "$real_root"
+    cp -- "$release_dir/sart" "$initramfs"
+    chmod 0755 "$release_dir/sart" "$real_root" "$initramfs"
 }
 
 run_gate() {
@@ -112,36 +112,36 @@ reset_fixtures
 run_gate >/dev/null
 
 reset_fixtures
-printf 'INTERP=yes\n' >>"$release_dir/bootart"
+printf 'INTERP=yes\n' >>"$release_dir/sart"
 expect_failure pt_interp 'PT_INTERP is present' run_gate
 
 reset_fixtures
-printf 'NEEDED=yes\n' >>"$release_dir/bootart"
+printf 'NEEDED=yes\n' >>"$release_dir/sart"
 expect_failure dt_needed 'DT_NEEDED is present' run_gate
 
 reset_fixtures
-printf 'READELF_FAIL=program\n' >>"$release_dir/bootart"
+printf 'READELF_FAIL=program\n' >>"$release_dir/sart"
 expect_failure readelf_failure 'could not inspect ELF program headers' run_gate
 
 reset_fixtures
-printf 'ARCH=aarch64\n' >>"$release_dir/bootart"
+printf 'ARCH=aarch64\n' >>"$release_dir/sart"
 expect_failure wrong_arch 'wrong ELF architecture' run_gate
 
 reset_fixtures
-printf 'TYPE=rel\n' >>"$release_dir/bootart"
+printf 'TYPE=rel\n' >>"$release_dir/sart"
 expect_failure relocatable 'ELF type must be EXEC or static PIE DYN' run_gate
 
 reset_fixtures
-printf 'LOAD_EXEC=no\n' >>"$release_dir/bootart"
+printf 'LOAD_EXEC=no\n' >>"$release_dir/sart"
 expect_failure no_exec_load 'ELF has no executable PT_LOAD segment' run_gate
 
 reset_fixtures
-printf 'ENTRY=outside\n' >>"$release_dir/bootart"
+printf 'ENTRY=outside\n' >>"$release_dir/sart"
 expect_failure entry_outside 'ELF entry point is not inside an executable PT_LOAD segment' run_gate
 
 reset_fixtures
 printf 'changed\n' >>"$real_root"
-expect_failure hash_mismatch 'real-root bootart SHA-256 differs' run_gate
+expect_failure hash_mismatch 'real-root sart SHA-256 differs' run_gate
 
 reset_fixtures
 printf '#!/bin/sh\n' >"$release_dir/helper"
@@ -153,13 +153,13 @@ printf 'ELF\nARCH=x86_64\n' >"$release_dir/embedded-helper"
 expect_failure extra_elf 'embedded or sibling ELF payload is forbidden' run_gate
 
 reset_fixtures
-ln -s bootart "$release_dir/alias"
+ln -s sart "$release_dir/alias"
 expect_failure symlink_payload 'symlink payload is forbidden' run_gate
 
 reset_fixtures
 expect_failure same_file 'must be distinct paths' env READELF="$mock_readelf" bash \
     "$repo_root/scripts/artifact-gate.sh" x86_64 "$release_dir" \
-    "$release_dir/bootart" "$initramfs"
+    "$release_dir/sart" "$initramfs"
 
 reset_fixtures
 expect_failure unsupported_arch 'unsupported expected architecture' env READELF="$mock_readelf" bash \
@@ -175,14 +175,14 @@ make_generation() {
         "$generation/release" \
         "$generation/real-root/usr/bin" \
         "$generation/initramfs/usr/bin"
-    printf 'ELF\nARCH=x86_64\nGENERATION=%s\n' "$name" >"$generation/release/bootart"
-    cp -- "$generation/release/bootart" "$generation/real-root/usr/bin/bootart"
-    cp -- "$generation/release/bootart" "$generation/initramfs/usr/bin/bootart"
+    printf 'ELF\nARCH=x86_64\nGENERATION=%s\n' "$name" >"$generation/release/sart"
+    cp -- "$generation/release/sart" "$generation/real-root/usr/bin/sart"
+    cp -- "$generation/release/sart" "$generation/initramfs/usr/bin/sart"
     chmod 0755 \
-        "$generation/release/bootart" \
-        "$generation/real-root/usr/bin/bootart" \
-        "$generation/initramfs/usr/bin/bootart"
-    printf '/nix/store/test-bootart\n' >"$generation/nix-output-path"
+        "$generation/release/sart" \
+        "$generation/real-root/usr/bin/sart" \
+        "$generation/initramfs/usr/bin/sart"
+    printf '/nix/store/test-sart\n' >"$generation/nix-output-path"
     chmod -R a-w -- "$generation"
 }
 
@@ -201,8 +201,8 @@ run_published_gate() {
     generation=$(resolve_generation)
     READELF=$mock_readelf bash "$repo_root/scripts/artifact-gate.sh" \
         x86_64 "$generation/release" \
-        "$generation/real-root/usr/bin/bootart" \
-        "$generation/initramfs/usr/bin/bootart"
+        "$generation/real-root/usr/bin/sart" \
+        "$generation/initramfs/usr/bin/sart"
 }
 
 mkdir -p "$generation_root/generations"
@@ -233,21 +233,21 @@ expect_failure noncanonical_generation_root 'static artifact root must be canoni
 # even if the convenience `current` pointer advances in the meantime.
 package_dir=$generation_root/packages
 package_arch=x86_64
-archive_name=bootart-linux-$package_arch.tar.gz
+archive_name=sart-linux-$package_arch.tar.gz
 archive=$package_dir/$archive_name
 checksum=$archive.sha256
-manifest=$package_dir/bootart-linux-$package_arch.manifest
+manifest=$package_dir/sart-linux-$package_arch.manifest
 mkdir -m 0700 -- "$package_dir"
 tar --format=ustar --owner=0 --group=0 --numeric-owner --mode=0755 \
     --mtime='UTC 1970-01-01' -czf "$archive" \
-    -C "$generation_root/generations/generation.First1/release" bootart
-elf_sha=$(sha256sum -- "$generation_root/generations/generation.First1/release/bootart")
+    -C "$generation_root/generations/generation.First1/release" sart
+elf_sha=$(sha256sum -- "$generation_root/generations/generation.First1/release/sart")
 elf_sha=${elf_sha%%[[:space:]]*}
 archive_sha=$(sha256sum -- "$archive")
 archive_sha=${archive_sha%%[[:space:]]*}
 printf '%s  %s\n' "$archive_sha" "$archive_name" > "$checksum"
 printf '%s\n' \
-    BOOTART_RELEASE_PACKAGE_V1 \
+    SART_RELEASE_PACKAGE_V1 \
     "arch=$package_arch" \
     'generation=generation.First1' \
     "elf_sha256=$elf_sha" \
@@ -281,7 +281,7 @@ chmod 0400 -- "$manifest"
 chmod 0600 -- "$manifest"
 sed -i 's/generation=generation.First1/generation=generation.Second2/' "$manifest"
 chmod 0400 -- "$manifest"
-expect_failure generation_archive_mismatch 'committed bootart ELF digest mismatch' \
+expect_failure generation_archive_mismatch 'committed sart ELF digest mismatch' \
     resolve_package_generation
 chmod 0600 -- "$manifest"
 sed -i 's/generation=generation.Second2/generation=generation.First1/' "$manifest"
@@ -290,7 +290,7 @@ chmod 0400 -- "$manifest"
 chmod 0600 -- "$archive" "$checksum" "$manifest"
 tar --format=ustar --owner=0 --group=0 --numeric-owner --mode=0644 \
     --mtime='UTC 1970-01-01' -czf "$archive" \
-    -C "$generation_root/generations/generation.First1/release" bootart
+    -C "$generation_root/generations/generation.First1/release" sart
 archive_sha=$(sha256sum -- "$archive")
 archive_sha=${archive_sha%%[[:space:]]*}
 printf '%s  %s\n' "$archive_sha" "$archive_name" > "$checksum"
@@ -327,9 +327,9 @@ printf 'generations/generation.Second2\n' >"$generation_root/current"
 expect_failure pointer_regular 'current artifact pointer must be a symlink' resolve_generation
 
 set_current generations/generation.Second2
-chmod u+w "$generation_root/generations/generation.Second2/release/bootart"
+chmod u+w "$generation_root/generations/generation.Second2/release/sart"
 expect_failure writable_generation 'published artifact generation is writable' resolve_generation
-chmod a-w "$generation_root/generations/generation.Second2/release/bootart"
+chmod a-w "$generation_root/generations/generation.Second2/release/sart"
 
 ln -s -- generation.Second2 "$generation_root/generations/generation.Alias3"
 set_current generations/generation.Alias3
@@ -341,7 +341,7 @@ printf 'ELF\nARCH=x86_64\n' > \
     "$generation_root/generations/generation.Second2/real-root/usr/bin/helper"
 chmod a-w "$generation_root/generations/generation.Second2/real-root/usr/bin/helper" \
     "$generation_root/generations/generation.Second2/real-root/usr/bin"
-expect_failure extra_generation_elf 'must contain exactly three bootart copies' resolve_generation
+expect_failure extra_generation_elf 'must contain exactly three sart copies' resolve_generation
 chmod u+w "$generation_root/generations/generation.Second2/real-root/usr/bin"
 rm -f -- "$generation_root/generations/generation.Second2/real-root/usr/bin/helper"
 chmod a-w "$generation_root/generations/generation.Second2/real-root/usr/bin"
@@ -350,6 +350,6 @@ set_current generations/generation.Second2
 chmod u+w "$generation_root/generations/generation.Second2"
 mkfifo "$generation_root/generations/generation.Second2/unexpected-fifo"
 chmod a-w "$generation_root/generations/generation.Second2"
-expect_failure special_member 'must contain exactly three bootart copies' resolve_generation
+expect_failure special_member 'must contain exactly three sart copies' resolve_generation
 
 printf 'PASS: artifact guard and atomic-generation suite\n'

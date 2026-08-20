@@ -4,8 +4,8 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
 
-PASS_MARKER='BOOTART_VM_LIFECYCLE_PASS_V1'
-FAIL_MARKER='BOOTART_VM_LIFECYCLE_FAIL_V1'
+PASS_MARKER='SART_VM_LIFECYCLE_PASS_V1'
+FAIL_MARKER='SART_VM_LIFECYCLE_FAIL_V1'
 
 serial_write() {
     # Start on a fresh line even if the renderer's last frame had no newline.
@@ -29,7 +29,7 @@ fail() {
 pid1_exe="$(/bin/busybox readlink /proc/1/exe 2>/dev/null || true)"
 case "$pid1_exe" in
     */busybox) ;;
-    *bootart*) fail bootart-is-pid1 ;;
+    *sart*) fail sart-is-pid1 ;;
     *) fail pid1-is-not-busybox-init ;;
 esac
 pid1_cmdline="$(/bin/busybox tr '\000' ' ' < /proc/1/cmdline 2>/dev/null || true)"
@@ -38,19 +38,19 @@ case "$pid1_cmdline" in
     *) fail pid1-is-not-init-applet ;;
 esac
 
-[ -x /opt/bootart/bootart ] || fail product-missing
+[ -x /opt/sart/sart ] || fail product-missing
 
 render_tty=/dev/ttyS0
 duration_ms=1500
 gui_preview=0
 password_preview=0
 case " $(/bin/busybox cat /proc/cmdline 2>/dev/null || true) " in
-    *' bootart.vm.gui-password=1 '*)
+    *' sart.vm.gui-password=1 '*)
         render_tty=/dev/tty0
         gui_preview=1
         password_preview=1
         ;;
-    *' bootart.vm.gui=1 '*)
+    *' sart.vm.gui=1 '*)
         render_tty=/dev/tty0
         duration_ms=4000
         gui_preview=1
@@ -74,29 +74,29 @@ if [ "$password_preview" -eq 1 ]; then
     done
     [ "$drive_ready" -eq 1 ] || fail encrypted-qemu-drive-missing
     for module in \
-        /opt/bootart-vm/modules/dm-mod.ko \
-        /opt/bootart-vm/modules/encrypted-keys.ko \
-        /opt/bootart-vm/modules/dm-crypt.ko
+        /opt/sart-vm/modules/dm-mod.ko \
+        /opt/sart-vm/modules/encrypted-keys.ko \
+        /opt/sart-vm/modules/dm-crypt.ko
     do
         [ -f "$module" ] || fail guest-dm-crypt-module-missing
         /bin/busybox insmod "$module" >/dev/null 2>&1 || fail guest-dm-crypt-module-load
     done
 
-    /opt/bootart/bootart daemon --mode boot --password-broker native \
+    /opt/sart/sart daemon --mode boot --password-broker native \
         --fps 30 --cycle-ms 2500 </dev/null >/dev/null 2>&1 &
-    bootart_pid=$!
-    [ "$bootart_pid" -gt 1 ] || fail product-child-pid
+    sart_pid=$!
+    [ "$sart_pid" -gt 1 ] || fail product-child-pid
     /bin/busybox sleep 1
-    [ -e "/proc/$bootart_pid/exe" ] || fail product-exited-too-early
-    child_exe="$(/bin/busybox readlink "/proc/$bootart_pid/exe" 2>/dev/null || true)"
+    [ -e "/proc/$sart_pid/exe" ] || fail product-exited-too-early
+    child_exe="$(/bin/busybox readlink "/proc/$sart_pid/exe" 2>/dev/null || true)"
     case "$child_exe" in
-        */bootart) ;;
+        */sart) ;;
         *) fail wrong-child-executable ;;
     esac
 
     ready=0
     for _ in $(/bin/busybox seq 1 100); do
-        if /opt/bootart/bootart native-ready >/dev/null 2>&1; then
+        if /opt/sart/sart native-ready >/dev/null 2>&1; then
             ready=1
             break
         fi
@@ -109,20 +109,20 @@ if [ "$password_preview" -eq 1 ]; then
     test_passphrase_hint=112
     test_passphrase_hint="${test_passphrase_hint}358"
     while [ "$attempt" -le 3 ]; do
-        serial_write 'BOOTART_VM_GUI_PASSWORD_PROMPT_V1'
+        serial_write 'SART_VM_GUI_PASSWORD_PROMPT_V1'
         (
-            /opt/bootart/bootart native-askpass \
+            /opt/sart/sart native-askpass \
                 --adapter initramfs-tools-busybox \
                 --prompt "Enter test passphrase $test_passphrase_hint (attempt $attempt of 3)" \
                 --attempts 3 --maximum-secret-bytes 128 \
                 8>&1 </dev/null >/dev/null 2>&1
         ) | /usr/sbin/cryptsetup open --type luks2 --key-file - \
-            /dev/vda bootart-test >/dev/null 2>&1
-        if [ "$?" -eq 0 ] && [ -b /dev/mapper/bootart-test ]; then
+            /dev/vda sart-test >/dev/null 2>&1
+        if [ "$?" -eq 0 ] && [ -b /dev/mapper/sart-test ]; then
             unlocked=1
             break
         fi
-        /opt/bootart/bootart message \
+        /opt/sart/sart message \
             'Wrong passphrase; try again' >/dev/null 2>&1 || true
         /bin/busybox sleep 1
         attempt=$((attempt + 1))
@@ -130,24 +130,24 @@ if [ "$password_preview" -eq 1 ]; then
     unset test_passphrase_hint
 
     if [ "$unlocked" -eq 1 ]; then
-        /opt/bootart/bootart message \
+        /opt/sart/sart message \
             'Encrypted QEMU drive unlocked' >/dev/null 2>&1 || true
         /bin/busybox sleep 2
-        /usr/sbin/cryptsetup close bootart-test >/dev/null 2>&1 || \
+        /usr/sbin/cryptsetup close sart-test >/dev/null 2>&1 || \
             fail encrypted-qemu-drive-close
-        /opt/bootart/bootart quit >/dev/null 2>&1 || \
+        /opt/sart/sart quit >/dev/null 2>&1 || \
             fail password-splash-quit
-        wait "$bootart_pid" || fail product-exit
-        printf '\033[2J\033[HBootart exited. Guest boot continued successfully.\n' \
+        wait "$sart_pid" || fail product-exit
+        printf '\033[2J\033[HSart exited. Guest boot continued successfully.\n' \
             >"$render_tty"
-        serial_write 'BOOTART_VM_GUI_PASSWORD_PASS_V1'
+        serial_write 'SART_VM_GUI_PASSWORD_PASS_V1'
         /bin/busybox sleep 3
     else
-        /opt/bootart/bootart message \
+        /opt/sart/sart message \
             'Encrypted QEMU drive remained locked' >/dev/null 2>&1 || true
         /bin/busybox sleep 2
-        /opt/bootart/bootart quit >/dev/null 2>&1 || true
-        wait "$bootart_pid" 2>/dev/null || true
+        /opt/sart/sart quit >/dev/null 2>&1 || true
+        wait "$sart_pid" 2>/dev/null || true
         fail encrypted-qemu-drive-unlock
     fi
 elif [ "$gui_preview" -eq 1 ]; then
@@ -155,27 +155,27 @@ elif [ "$gui_preview" -eq 1 ]; then
     # Keep color enabled: the animation engine intentionally becomes a static
     # fully-visible logo under --no-color.
     printf '\033[2J\033[H' >"$render_tty"
-    /opt/bootart/bootart play \
+    /opt/sart/sart play \
         --duration-ms "$duration_ms" --fps 30 --seed 42 --clear-first \
         --cols 80 --rows 24 >"$render_tty" 2>&1 &
 else
-    /opt/bootart/bootart play \
+    /opt/sart/sart play \
         --duration-ms "$duration_ms" --fps 10 --seed 42 --no-color \
         --cols 80 --rows 24 >"$render_tty" 2>&1 &
 fi
 if [ "$password_preview" -eq 0 ]; then
-    bootart_pid=$!
-    [ "$bootart_pid" -gt 1 ] || fail product-child-pid
+    sart_pid=$!
+    [ "$sart_pid" -gt 1 ] || fail product-child-pid
     /bin/busybox sleep 1
-    [ -e "/proc/$bootart_pid/exe" ] || fail product-exited-too-early
-    child_exe="$(/bin/busybox readlink "/proc/$bootart_pid/exe" 2>/dev/null || true)"
+    [ -e "/proc/$sart_pid/exe" ] || fail product-exited-too-early
+    child_exe="$(/bin/busybox readlink "/proc/$sart_pid/exe" 2>/dev/null || true)"
     case "$child_exe" in
-        */bootart) ;;
+        */sart) ;;
         *) fail wrong-child-executable ;;
     esac
-    wait "$bootart_pid" || fail product-exit
+    wait "$sart_pid" || fail product-exit
     if [ "$gui_preview" -eq 1 ]; then
-        printf '\033[2J\033[HBootart exited. Guest userspace boot continued.\n' \
+        printf '\033[2J\033[HSart exited. Guest userspace boot continued.\n' \
             >"$render_tty"
         /bin/busybox sleep 3
     fi

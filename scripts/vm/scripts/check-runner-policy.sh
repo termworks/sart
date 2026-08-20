@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 die() {
-    printf 'bootart-vm: runner policy: %s\n' "$*" >&2
+    printf 'sart-vm: runner policy: %s\n' "$*" >&2
     exit 2
 }
 
@@ -22,7 +22,7 @@ physical_root="$(cd -- "$repo_root" && pwd -P)" || die 'cannot resolve repositor
 runner_root="$repo_root/scripts/vm/runners"
 if [[ ! -e "$runner_root" ]]; then
     [[ -z "$requested_runner" ]] || die 'requested runner tree does not exist'
-    printf 'bootart-vm: runner source policy PASS (no runners present)\n'
+    printf 'sart-vm: runner source policy PASS (no runners present)\n'
     exit 0
 fi
 
@@ -98,7 +98,7 @@ for runner in "${runners[@]}"; do
                     report("virtual-machine environment variable is forbidden")
                     next
                 }
-                if (lower ~ /(interrupt-at-checkpoint|installer-test-seams|bootart-vm-test-static)/) {
+                if (lower ~ /(interrupt-at-checkpoint|installer-test-seams|sart-vm-test-static)/) {
                     report("feature-gated product test seam is forbidden in real-VM runners")
                     next
                 }
@@ -107,6 +107,20 @@ for runner in "${runners[@]}"; do
                     lower ~ /(^|[^[:alnum:]_.-])(bash|dash|sh|zsh|perl|ruby|python[0-9.]*)([^[:alnum:]_.-]|$)/ ||
                     text ~ /^[[:space:]]*["\047]?[$][({A-Za-z_]/) {
                     report("indirect process launch is forbidden")
+                    next
+                }
+
+                # A bare rm can stop an unattended prepare indefinitely when
+                # the runner is deleting a deliberately non-writable payload.
+                # Keep runner cleanup non-interactive and option-safe.
+                if (lower ~ /^[[:space:]]*rm[[:space:]]/ &&
+                    lower !~ /^[[:space:]]*rm[[:space:]]+-f[[:space:]]+--[[:space:]]/) {
+                    report("runner rm must be non-interactive and option-safe")
+                    next
+                }
+                if (lower ~ /^[[:space:]]*rmdir[[:space:]]/ &&
+                    lower !~ /^[[:space:]]*rmdir[[:space:]]+--[[:space:]]/) {
+                    report("runner rmdir must be option-safe")
                     next
                 }
 
@@ -135,4 +149,4 @@ for runner in "${runners[@]}"; do
 done
 
 [[ $violations -eq 0 ]] || die 'one or more runner sources violated the trust boundary'
-printf 'bootart-vm: runner source policy PASS (%d file(s))\n' "${#runners[@]}"
+printf 'sart-vm: runner source policy PASS (%d file(s))\n' "${#runners[@]}"

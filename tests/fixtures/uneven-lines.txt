@@ -1,3 +1,0 @@
-  short
-this is a much longer line
-mid

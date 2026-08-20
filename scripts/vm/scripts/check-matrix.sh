@@ -37,4 +37,4 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     esac
 done < "$matrix_file"
 
-printf 'bootart-vm: adapter matrix policy PASS; no adapter evidence promoted\n'
+printf 'sart-vm: adapter matrix policy PASS; no adapter evidence promoted\n'

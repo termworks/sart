@@ -11,10 +11,10 @@ umask 077
 }
 repo_root=${1%/}
 policy=$repo_root/scripts/make-boundary-policy.sh
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootart-make-boundary.XXXXXXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sart-make-boundary.XXXXXXXXXX")
 cleanup() {
     case "$tmp" in
-        "${TMPDIR:-/tmp}"/bootart-make-boundary.*) rm -rf -- "$tmp" ;;
+        "${TMPDIR:-/tmp}"/sart-make-boundary.*) rm -rf -- "$tmp" ;;
         *) printf 'refusing unsafe Make-boundary fixture cleanup: %s\n' "$tmp" >&2 ;;
     esac
 }
@@ -67,7 +67,7 @@ printf '%s\n' 'override VM_ROOT ::= /tmp/redirected-vm-root' \
 expect_rejected duplicate-vm-root-assignment
 
 fresh_fixture
-printf 'unsafe:\n\t@printf "%%s\\n" "$%s"\n' '(BOOTART_BIN)' >> "$fixture/Makefile"
+printf 'unsafe:\n\t@printf "%%s\\n" "$%s"\n' '(SART_BIN)' >> "$fixture/Makefile"
 expect_rejected root-recipe-interpolation
 
 fresh_fixture
@@ -93,22 +93,22 @@ payload="unused'; printf injected > '$marker'; #"
 # the product or QEMU. The hostile values must remain inert argv/environment
 # data rather than becoming shell source in the Make recipe.
 if make --no-print-directory -C "$repo_root/scripts/vm" \
-    vm-test-lifecycle-dracut-classic "BOOTART_BIN=$payload" >/dev/null 2>&1; then
+    vm-test-lifecycle-dracut-classic "SART_BIN=$payload" >/dev/null 2>&1; then
     printf 'blocked adapter probe unexpectedly passed\n' >&2
     exit 1
 fi
 [[ ! -e "$marker" ]] || {
-    printf 'BOOTART_BIN escaped into Make recipe shell source\n' >&2
+    printf 'SART_BIN escaped into Make recipe shell source\n' >&2
     exit 1
 }
 
 if make --no-print-directory -C "$repo_root" \
-    vm-test-lifecycle-dracut-classic "BOOTART_BIN=$payload" >/dev/null 2>&1; then
+    vm-test-lifecycle-dracut-classic "SART_BIN=$payload" >/dev/null 2>&1; then
     printf 'root blocked adapter probe unexpectedly passed\n' >&2
     exit 1
 fi
 [[ ! -e "$marker" ]] || {
-    printf 'root-to-VM BOOTART_BIN escaped into shell source\n' >&2
+    printf 'root-to-VM SART_BIN escaped into shell source\n' >&2
     exit 1
 }
 
@@ -159,7 +159,7 @@ fi
     exit 1
 }
 if make --no-print-directory -C "$repo_root" vm-test-lifecycle-dracut-classic \
-    "BOOTART_BIN=$make_payload" >/dev/null 2>&1; then
+    "SART_BIN=$make_payload" >/dev/null 2>&1; then
     printf 'root Make-function product payload unexpectedly passed blocked lane\n' >&2
     exit 1
 fi
@@ -177,10 +177,10 @@ make --no-print-directory -C "$repo_root" vm-matrix-check \
     exit 1
 }
 make --no-print-directory -C "$repo_root" assert-artifact-operation \
-    CURDIR=/tmp/bootart-invalid-command-line-root >/dev/null
+    CURDIR=/tmp/sart-invalid-command-line-root >/dev/null
 make --no-print-directory -C "$repo_root/scripts/vm" vm-matrix-check \
-    REPO_ROOT=/tmp/bootart-invalid-vm-repository-root \
-    VM_ROOT=/tmp/bootart-invalid-vm-state-root >/dev/null
+    REPO_ROOT=/tmp/sart-invalid-vm-repository-root \
+    VM_ROOT=/tmp/sart-invalid-vm-state-root >/dev/null
 
 if make -i --no-print-directory -C "$repo_root" help >/dev/null 2>&1; then
     printf 'root Make accepted --ignore-errors/-i\n' >&2
@@ -213,7 +213,7 @@ mkdir -p -- "$fake_bin"
 cat >"$fake_bin/nix" <<'FAKE_NIX'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-: "${BOOTART_NIX_TEST_CAPTURE:?}"
+: "${SART_NIX_TEST_CAPTURE:?}"
 source_root=
 for argument in "$@"; do
     case "$argument" in
@@ -225,11 +225,11 @@ for argument in "$@"; do
 done
 [[ -n "$source_root" && -d "$source_root" && ! -L "$source_root" ]]
 [[ ! -e "$source_root/target" && ! -e "$source_root/.git" ]]
-[[ -f "$source_root/cpp/src/installer_backend_dracut.cpp" ]]
+[[ -f "$source_root/src/installer_backend_dracut.cpp" ]]
 find "$source_root" -xdev -type l -print -quit | grep -q . && exit 91
-printf '%s\0' "$@" >"$BOOTART_NIX_TEST_CAPTURE"
+printf '%s\0' "$@" >"$SART_NIX_TEST_CAPTURE"
 if [[ ${1-} == build ]]; then
-    printf '%s\n' /nix/store/bootart-nix-source-fixture
+    printf '%s\n' /nix/store/sart-nix-source-fixture
 fi
 FAKE_NIX
 chmod 0700 -- "$fake_bin/nix"
@@ -240,7 +240,7 @@ find "$repo_root/target" -xdev -mindepth 1 -maxdepth 1 \
     -name '.nix-input.*' -printf '%f\n' | sort >"$snapshot_before"
 
 capture=$tmp/nix-check-argv
-PATH="$fake_bin:$PATH" BOOTART_NIX_TEST_CAPTURE=$capture \
+PATH="$fake_bin:$PATH" SART_NIX_TEST_CAPTURE=$capture \
     bash "$nix_wrapper" "$repo_root" offline check nix >/dev/null
 mapfile -d '' -t captured <"$capture"
 expected=(flake check path:SNAPSHOT --no-build --no-update-lock-file --offline)
@@ -263,18 +263,18 @@ for index in "${!expected[@]}"; do
 done
 
 capture=$tmp/nix-build-argv
-PATH="$fake_bin:$PATH" BOOTART_NIX_TEST_CAPTURE=$capture \
+PATH="$fake_bin:$PATH" SART_NIX_TEST_CAPTURE=$capture \
     bash "$nix_wrapper" "$repo_root" online build nix \
-    bootart-static >/dev/null
+    sart-static >/dev/null
 mapfile -d '' -t captured <"$capture"
 [[ ${captured[0]} == build && ${captured[1]} == --no-update-lock-file &&
    ${captured[2]} == --no-link && ${captured[3]} == --print-out-paths &&
-   ${captured[4]} == path:"$repo_root"/target/.nix-input.*#bootart-static &&
+   ${captured[4]} == path:"$repo_root"/target/.nix-input.*#sart-static &&
    ${#captured[@]} -eq 5 ]] || {
     printf 'bounded Nix build argv drifted\n' >&2
     exit 1
 }
-if PATH="$fake_bin:$PATH" BOOTART_NIX_TEST_CAPTURE=$capture \
+if PATH="$fake_bin:$PATH" SART_NIX_TEST_CAPTURE=$capture \
    bash "$nix_wrapper" "$repo_root" online build nix unreviewed-package \
    >/dev/null 2>&1; then
     printf 'bounded Nix wrapper accepted an unreviewed package\n' >&2
@@ -288,4 +288,4 @@ cmp -s -- "$snapshot_before" "$snapshot_after" || {
     exit 1
 }
 
-printf 'bootart-make-boundary: rejection and inert injection fixtures PASS\n'
+printf 'sart-make-boundary: rejection and inert injection fixtures PASS\n'

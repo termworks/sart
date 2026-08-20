@@ -6,7 +6,7 @@ set -Eeuo pipefail
 umask 077
 
 scan_fail() {
-    printf 'bootart-vm: secret scan contract failure stage=%s\n' "$1" >&2
+    printf 'sart-vm: secret scan contract failure stage=%s\n' "$1" >&2
     exit 2
 }
 
@@ -44,8 +44,8 @@ overlay_bytes=$(stat -c %s -- "$overlay")
 [[ "$overlay_bytes" =~ ^[1-9][0-9]*$ ]] || scan_fail overlay-size
 secret_bytes=${#secret}
 chunk_bytes=67108864
-offsets=$(mktemp "$run_dir/.bootart-secret-offsets.XXXXXX") || scan_fail offsets-create
-tail_errors=$(mktemp "$run_dir/.bootart-secret-tail.XXXXXX") || {
+offsets=$(mktemp "$run_dir/.sart-secret-offsets.XXXXXX") || scan_fail offsets-create
+tail_errors=$(mktemp "$run_dir/.sart-secret-tail.XXXXXX") || {
     rm -f -- "$offsets"
     scan_fail tail-errors-create
 }
@@ -153,7 +153,7 @@ unset secret
 
 if [[ $exact_status -eq 0 || $overlay_status -eq 0 ]]; then exit 0; fi
 if [[ $exact_status -ne 1 || $overlay_status -ne 1 ]]; then
-    printf 'bootart-vm: secret scan internal status exact=%s overlay=%s\n' \
+    printf 'sart-vm: secret scan internal status exact=%s overlay=%s\n' \
         "$exact_status" "$overlay_status" >&2
     exit 2
 fi

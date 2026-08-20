@@ -81,13 +81,13 @@ for source_file in "$template" "$metadata"; do
     mode="$(vm_stat_mode "$source_file")"
     (( (8#$mode & 0022) == 0 )) || vm_die "writable Ubuntu autoinstall source: $source_file"
 done
-grep -Fxq '        key: __BOOTART_VM_LUKS_PASSPHRASE__' "$template" ||
+grep -Fxq '        key: __SART_VM_LUKS_PASSPHRASE__' "$template" ||
     vm_die 'Ubuntu autoinstall template lacks its unique LUKS marker'
-[[ "$(grep -Fxc '        key: __BOOTART_VM_LUKS_PASSPHRASE__' "$template")" == 1 ]] ||
+[[ "$(grep -Fxc '        key: __SART_VM_LUKS_PASSPHRASE__' "$template")" == 1 ]] ||
     vm_die 'Ubuntu autoinstall template must contain one LUKS marker'
 
-ovmf_code=${BOOTART_OVMF_CODE:-}
-ovmf_vars_template=${BOOTART_OVMF_VARS:-}
+ovmf_code=${SART_OVMF_CODE:-}
+ovmf_vars_template=${SART_OVMF_VARS:-}
 if [[ -z "$ovmf_code" ]]; then
     for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
         if [[ -f "$candidate" && ! -L "$candidate" ]]; then ovmf_code=$candidate; break; fi
@@ -143,7 +143,7 @@ if [[ -e "$base" || -L "$base" || -e "$base_ovmf_vars" || -L "$base_ovmf_vars" |
     printf '%s  %s\n' "$recorded_ovmf_sha" "$base_ovmf_vars" |
         sha256sum --check --status - ||
         vm_die 'Ubuntu provisioned OVMF variables differ from lineage'
-    printf 'bootart-vm: validated cached, stock-unverified Ubuntu base: %s\n' "$base"
+    printf 'sart-vm: validated cached, stock-unverified Ubuntu base: %s\n' "$base"
     exit 0
 fi
 
@@ -189,7 +189,7 @@ trap 'exit 143' TERM
 
 printf -v luks_passphrase '%s%s' 112 358
 while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == '        key: __BOOTART_VM_LUKS_PASSPHRASE__' ]]; then
+    if [[ "$line" == '        key: __SART_VM_LUKS_PASSPHRASE__' ]]; then
         printf '        key: "%s"\n' "$luks_passphrase"
     else
         printf '%s\n' "$line"
@@ -268,7 +268,7 @@ bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
     "$serial_log" "$serial_overflow" < "$serial_fifo" &
 capture_pid=$!
 vm_assert_executable_identity "$qemu_executable" "$qemu_identity" 'configured QEMU executable'
-printf 'bootart-vm: installing Ubuntu 26.04 with normal Subiquity (timeout %ss)\n' "$provision_timeout"
+printf 'sart-vm: installing Ubuntu 26.04 with normal Subiquity (timeout %ss)\n' "$provision_timeout"
 set +e
 timeout --signal=TERM --kill-after=10s "${provision_timeout}s" "${qemu_args[@]}" &
 qemu_pid=$!
@@ -321,7 +321,7 @@ template_sha="$(sha256sum "$template" | awk '{ print $1 }')"
 metadata_sha="$(sha256sum "$metadata" | awk '{ print $1 }')"
 lineage_tmp="$run_dir/base.provisioned"
 printf '%s\n' \
-    'schema=BOOTART_UBUNTU_PROVISIONED_V1' \
+    'schema=SART_UBUNTU_PROVISIONED_V1' \
     'status=PROVISIONED_UNVERIFIED' \
     "iso_id=$image_id" \
     "iso_url=$iso_url" \
@@ -349,4 +349,4 @@ ln -- "$lineage_tmp" "$lineage" || {
     vm_die 'refusing to replace provisioned Ubuntu lineage'
 }
 rm -f -- "$target_disk" "$ovmf_vars" "$lineage_tmp"
-printf 'bootart-vm: Ubuntu base provisioned but not yet stock-boot verified: %s\n' "$base"
+printf 'sart-vm: Ubuntu base provisioned but not yet stock-boot verified: %s\n' "$base"

@@ -1,11 +1,11 @@
 #cloud-config
-hostname: bootart-arch-builder
+hostname: sart-arch-builder
 manage_etc_hosts: true
 ssh_pwauth: false
 users:
   - default
 write_files:
-  - path: /usr/local/sbin/bootart-provision-arch
+  - path: /usr/local/sbin/sart-provision-arch
     owner: root:root
     permissions: '0700'
     content: |
@@ -15,13 +15,13 @@ write_files:
 
       fail() {
           status=$?
-          printf 'BOOTART_VM_ARCH_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
+          printf 'SART_VM_ARCH_PROVISION_FAIL_V1|status=%s\n' "$status" >/dev/ttyS0 || :
           poweroff -f || :
           exit "$status"
       }
       trap fail EXIT
 
-      bootart_luks='__BOOTART_VM_LUKS_PASSPHRASE__'
+      sart_luks='__SART_VM_LUKS_PASSPHRASE__'
       target=/dev/vdb
       boot=${target}1
       encrypted=${target}2
@@ -34,10 +34,10 @@ write_files:
       test -b "$boot"
       test -b "$encrypted"
       mkfs.ext4 -F -q "$boot"
-      printf '%s' "$bootart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
+      printf '%s' "$sart_luks" | cryptsetup luksFormat --batch-mode --type luks2 \
           --pbkdf pbkdf2 --iter-time 100 --key-file - "$encrypted"
-      printf '%s' "$bootart_luks" | cryptsetup open --key-file - "$encrypted" cryptroot
-      unset bootart_luks
+      printf '%s' "$sart_luks" | cryptsetup open --key-file - "$encrypted" cryptroot
+      unset sart_luks
       cryptsetup status cryptroot >/dev/null
       mkfs.ext4 -F -q /dev/mapper/cryptroot
 
@@ -71,7 +71,7 @@ write_files:
       cat > /mnt/etc/default/grub <<GRUB_EOF
       GRUB_DEFAULT=0
       GRUB_TIMEOUT=1
-      GRUB_DISTRIBUTOR='Bootart VM'
+      GRUB_DISTRIBUTOR='Sart VM'
       GRUB_CMDLINE_LINUX="cryptdevice=UUID=${luks_uuid}:cryptroot root=/dev/mapper/cryptroot rw console=ttyS0,115200n8 console=tty0"
       GRUB_PRELOAD_MODULES="part_msdos"
       GRUB_TERMINAL_INPUT="console serial"
@@ -84,17 +84,17 @@ write_files:
       grub-install --target=i386-pc --boot-directory=/mnt/boot "$target"
       arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
-      printf '%s\n' bootart-vm > /mnt/etc/hostname
+      printf '%s\n' sart-vm > /mnt/etc/hostname
       printf '%s\n' 'root:arch' | arch-chroot /mnt chpasswd
-      arch-chroot /mnt useradd -m -G wheel bootart
-      printf '%s\n' 'bootart:ubuntu' | arch-chroot /mnt chpasswd
+      arch-chroot /mnt useradd -m -G wheel sart
+      printf '%s\n' 'sart:ubuntu' | arch-chroot /mnt chpasswd
       install -d -m 0755 /mnt/etc/sudoers.d
-      printf '%s\n' 'bootart ALL=(ALL:ALL) NOPASSWD: ALL' > /mnt/etc/sudoers.d/50-bootart-vm
-      chmod 0440 /mnt/etc/sudoers.d/50-bootart-vm
+      printf '%s\n' 'sart ALL=(ALL:ALL) NOPASSWD: ALL' > /mnt/etc/sudoers.d/50-sart-vm
+      chmod 0440 /mnt/etc/sudoers.d/50-sart-vm
       arch-chroot /mnt systemctl enable serial-getty@ttyS0.service
 
-      seed_mount=/media/bootart-kernel-seed
-      package_cache=/mnt/var/cache/bootart-kernel-update
+      seed_mount=/media/sart-kernel-seed
+      package_cache=/mnt/var/cache/sart-kernel-update
       mkdir -p "$seed_mount" "$package_cache"
       mount -o ro /dev/sr0 "$seed_mount"
       (cd "$seed_mount/kernel-packages" && sha256sum -c SHA256SUMS)
@@ -118,18 +118,18 @@ write_files:
       test "$(stat -c %a /mnt/etc)" = 755
       test "$(stat -c %a /mnt/usr)" = 755
       test "$(stat -c %a /mnt/var)" = 755
-      arch-chroot /mnt sudo -u bootart test -r /etc/profile
+      arch-chroot /mnt sudo -u sart test -r /etc/profile
       grep -Fq "cryptdevice=UUID=${luks_uuid}:cryptroot" /mnt/boot/grub/grub.cfg
       cryptsetup luksDump "$encrypted" | grep -Eq '^Version:[[:space:]]+2$'
 
       scan=112
       scan=${scan}358
       if printf '%s\n' "$scan" | grep -r -a -F -l --devices=skip -f - \
-          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/bootart-secret-paths; then
-          sed 's|^/mnt||' /tmp/bootart-secret-paths >/dev/ttyS0 || :
+          /mnt/etc /mnt/var /mnt/boot /mnt/root /mnt/home >/tmp/sart-secret-paths; then
+          sed 's|^/mnt||' /tmp/sart-secret-paths >/dev/ttyS0 || :
           exit 1
       fi
-      rm -f /tmp/bootart-secret-paths
+      rm -f /tmp/sart-secret-paths
       unset scan
 
       # pacstrap initializes a target-specific pacman keyring.  Its gpg-agent
@@ -143,9 +143,9 @@ write_files:
       # before closing the disposable target's encrypted mapping.
       umount -R /mnt
       cryptsetup close cryptroot
-      printf '%s\n' BOOTART_VM_ARCH_PROVISION_PASS_V1 >/dev/ttyS0
+      printf '%s\n' SART_VM_ARCH_PROVISION_PASS_V1 >/dev/ttyS0
       trap - EXIT
       poweroff
 runcmd:
-  - [ /usr/local/sbin/bootart-provision-arch ]
-final_message: bootart Arch provisioning cloud-init completed
+  - [ /usr/local/sbin/sart-provision-arch ]
+final_message: sart Arch provisioning cloud-init completed

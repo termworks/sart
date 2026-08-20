@@ -4,15 +4,15 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-pid1-policy: ERROR: %s\n' "$*" >&2
+    printf 'sart-pid1-policy: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
 [[ $# -eq 1 ]] || die 'usage: pid1-entry-policy.sh REPOSITORY_ROOT'
 repo_root=$1
-main=$repo_root/cpp/src/main.cpp
-daemon=$repo_root/cpp/src/splash/daemon.cpp
-process=$repo_root/cpp/src/process.cpp
+main=$repo_root/src/main.cpp
+daemon=$repo_root/src/splash/daemon.cpp
+process=$repo_root/src/process.cpp
 for source in "$main" "$daemon" "$process"; do
     [[ -f "$source" && ! -L "$source" ]] || die "required source is missing or symlinked: $source"
 done
@@ -47,4 +47,4 @@ run_line="$(grep -n -m1 'return run(argc, argv);' "$main" | cut -d: -f1)"
    "$guard_line" -lt "$run_line" ]] ||
     die 'binary PID-1 refusal must precede command parsing and dispatch'
 
-printf 'bootart-pid1-policy: PASS: C++ binary and daemon entries guard before side effects\n'
+printf 'sart-pid1-policy: PASS: C++ binary and daemon entries guard before side effects\n'

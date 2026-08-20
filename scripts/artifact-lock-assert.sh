@@ -8,7 +8,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact-lock: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact-lock: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -19,11 +19,11 @@ repo_root=${1%/}
 [[ "$(cd -- "$repo_root" && pwd -P)" == "$repo_root" ]] ||
     die 'repository root must be canonical'
 
-fd=${BOOTART_ARTIFACT_LOCK_FD:-}
+fd=${SART_ARTIFACT_LOCK_FD:-}
 [[ "$fd" =~ ^[3-9][0-9]*$ ]] || die 'artifact lock descriptor was not inherited'
 fd_path=/proc/$$/fd/$fd
 [[ -r "$fd_path" ]] || die 'inherited artifact lock descriptor is closed'
-expected=$(readlink -f -- "$repo_root/.bootart-artifacts.lock") ||
+expected=$(readlink -f -- "$repo_root/.sart-artifacts.lock") ||
     die 'cannot resolve tracked artifact lock file'
 actual=$(readlink -f -- "$fd_path") || die 'cannot resolve inherited artifact lock descriptor'
 [[ "$actual" == "$expected" ]] || die 'inherited descriptor does not name the tracked artifact lock'

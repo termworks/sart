@@ -1,11 +1,11 @@
 #cloud-config
-hostname: bootart-pmos-builder
+hostname: sart-pmos-builder
 manage_etc_hosts: true
 ssh_pwauth: false
 users:
   - default
 write_files:
-  - path: /usr/local/sbin/bootart-provision-postmarketos
+  - path: /usr/local/sbin/sart-provision-postmarketos
     owner: root:root
     permissions: '0700'
     content: |
@@ -26,13 +26,16 @@ write_files:
           if [ "${mdev_was_running:-no}" = yes ]; then
               rc-service mdev start >/dev/null 2>&1 || :
           fi
+          if [ -n "${post_root:-}" ] && mountpoint -q "$post_root/boot" 2>/dev/null; then
+              umount "$post_root/boot" 2>/dev/null || :
+          fi
           if [ -n "${post_root:-}" ] && mountpoint -q "$post_root" 2>/dev/null; then
               umount "$post_root" 2>/dev/null || :
           fi
           if [ -n "${post_mapper:-}" ] && [ -e "/dev/mapper/$post_mapper" ]; then
               cryptsetup close "$post_mapper" 2>/dev/null || :
           fi
-          printf 'BOOTART_VM_POSTMARKETOS_PROVISION_FAIL_V1|stage=%s|status=%s\n' \
+          printf 'SART_VM_POSTMARKETOS_PROVISION_FAIL_V1|stage=%s|status=%s\n' \
               "${stage:-startup}" "$status" >/dev/ttyS0 || :
           poweroff -f || :
           exit "$status"
@@ -40,16 +43,16 @@ write_files:
       trap fail EXIT
 
       target=/dev/vdb
-      input=/mnt/bootart-pmos-input
+      input=/mnt/sart-pmos-input
       work=/var/lib/pmbootstrap
       config=/etc/pmbootstrap_v3.cfg
       rootfs=$work/chroot_rootfs_qemu-aarch64
-      secret=/dev/virtio-ports/bootart.fde
+      secret=/dev/virtio-ports/sart.fde
       partition_settle_pid=
       hotplug_saved=
       mdev_was_running=no
-      post_root=/mnt/bootart-postinstall
-      post_mapper=bootart_postinstall
+      post_root=/mnt/sart-postinstall
+      post_mapper=sart_postinstall
 
       stage=builder-disk
       test -b /dev/vda
@@ -82,31 +85,43 @@ write_files:
       test -f /opt/pmaports/pmaports.cfg
       test "$(sed -n 's/^channel=//p' /opt/pmaports/pmaports.cfg)" = edge
       test "$(sed -n 's/^version=//p' /opt/pmaports/pmaports.cfg)" = 7
+      # The audited Fairphone device profile omits an explicit compression
+      # override, so postmarketos-mkinitfs selects its gzip default. Make this
+      # disposable QEMU device exercise that same format instead of the qemu
+      # profile's explicit Zstandard override.
+      stage=phone-compression-fixture
+      qemu_deviceinfo=/opt/pmaports/device/community/device-qemu-aarch64/deviceinfo
+      test -f "$qemu_deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="zstd"' "$qemu_deviceinfo")" = 1
+      sed -i 's/^deviceinfo_initfs_compression="zstd"$/deviceinfo_initfs_compression="gzip"/' \
+          "$qemu_deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="gzip"' "$qemu_deviceinfo")" = 1
+      unset qemu_deviceinfo
       printf '%s\n' 8 > "$work/version"
 
       stage=write-config
-      cat > "$config" <<'BOOTART_PMOS_CONFIG'
+      cat > "$config" <<'SART_PMOS_CONFIG'
       [pmbootstrap]
       aports = /opt/pmaports
       boot_size = 2048
       build_pkgs_on_install = False
       ccache_size = 0
       device = qemu-aarch64
-      extra_packages = none
+      extra_packages = __EXTRA_PACKAGES__
       extra_space = 0
-      hostname = bootart-pmos
+      hostname = sart-pmos
       is_default_channel = False
       jobs = 2
       kernel = stable
       locale = en_US.UTF-8
-      service_manager = openrc
+      service_manager = __SERVICE_MANAGER__
       ssh_keys = False
       timezone = GMT
       ui = console
       ui_extras = False
       user = user
       work = /var/lib/pmbootstrap
-      BOOTART_PMOS_CONFIG
+      SART_PMOS_CONFIG
       chmod 0600 "$config"
 
       # Every prompt except cryptsetup is fixed by the config, -y, and the
@@ -163,7 +178,7 @@ write_files:
           --as-root --config "$config" --aports /opt/pmaports --work "$work" \
           --assume-yes --details-to-stdout --timeout 1200 \
           install --disk="$target" --fde --filesystem ext4 \
-          --password bootart --no-local-pkgs \
+          --password sart --no-local-pkgs \
           > /dev/ttyS0 2>&1
       kill "$partition_settle_pid" 2>/dev/null || :
       wait "$partition_settle_pid" 2>/dev/null || :
@@ -194,12 +209,28 @@ write_files:
       test "$(package_version boot-deploy)" = 0.23.0-r0
       stage=installed-package-unl0kr
       test "$(package_version unl0kr)" = 3.5.1-r1
+      if test '__SERVICE_MANAGER__' = systemd; then
+          stage=installed-package-android-tools
+          package_version android-tools >/dev/null
+          stage=installed-executable-mkbootimg
+          test -x "$rootfs/usr/bin/mkbootimg"
+      fi
       stage=installed-executable-mkinitfs
       test -x "$rootfs/usr/sbin/mkinitfs"
       stage=installed-executable-boot-deploy
       test -x "$rootfs/usr/bin/boot-deploy"
-      stage=installed-executable-openrc
-      test -x "$rootfs/sbin/openrc"
+      stage=installed-service-manager
+      case '__SERVICE_MANAGER__' in
+          openrc)
+              test -x "$rootfs/sbin/openrc"
+              test ! -x "$rootfs/usr/lib/systemd/systemd"
+              ;;
+          systemd)
+              test -x "$rootfs/usr/lib/systemd/systemd"
+              test ! -x "$rootfs/sbin/openrc"
+              ;;
+          *) exit 1 ;;
+      esac
       stage=installed-executable-fde-unlock
       test -x "$rootfs/usr/bin/fde-unlock"
       stage=installed-executable-unl0kr
@@ -220,11 +251,33 @@ write_files:
       stage=installed-fde-contract
       grep -Fq 'unl0kr | cryptsetup' "$rootfs/usr/bin/fde-unlock"
 
+      # pmbootstrap consumed the repository's signed qemu device package,
+      # whose installed deviceinfo still says zstd. Rewrite only this
+      # disposable fixture's installed capability and regenerate through
+      # pmbootstrap's normal rootfs chroot path. The target copy is updated
+      # below after its encrypted root and ESP are reopened.
+      stage=installed-deviceinfo-compression
+      rootfs_deviceinfo="$rootfs/usr/share/deviceinfo/deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="zstd"' "$rootfs_deviceinfo")" = 1
+      sed -i 's/^deviceinfo_initfs_compression="zstd"$/deviceinfo_initfs_compression="gzip"/' \
+          "$rootfs_deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="gzip"' "$rootfs_deviceinfo")" = 1
+      stage=regenerate-gzip-initramfs
+      PMB_CHANNELS_CFG=/opt/pmaports/channels.cfg \
+      python3 /opt/pmbootstrap/pmbootstrap.py \
+          --as-root --config "$config" --aports /opt/pmaports --work "$work" \
+          --assume-yes --details-to-stdout --timeout 1200 \
+          initfs build > /dev/ttyS0 2>&1
+      rootfs_initramfs_magic=$(head -c 3 "$rootfs/boot/initramfs" |
+          od -An -tx1 | tr -d '[:space:]')
+      test "$rootfs_initramfs_magic" = 1f8b08
+      unset rootfs_initramfs_magic
+
       # Cache a signed, exact alternate kernel track inside the sealed base.
-      # Acceptance lanes have no network and transport only the Bootart ELF;
+      # Acceptance lanes have no network and transport only the Sart ELF;
       # the kernel-update proof therefore consumes these guest-local APKs.
       stage=kernel-update-cache
-      kernel_repository="$rootfs/var/cache/bootart-kernel-update"
+      kernel_repository="$rootfs/var/cache/sart-kernel-update"
       kernel_cache="$kernel_repository/aarch64"
       mkdir -p "$kernel_cache"
       mount --bind "$work/config_apk_keys" "$rootfs/etc/apk/keys"
@@ -266,7 +319,7 @@ write_files:
                         version == "7.2_rc5-r0") found++ }
                   END { print found + 0 }')
           candidate_index_sha=$(sha256sum "$candidate_index" | awk '{ print $1 }')
-          printf 'BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_CANDIDATE_V1|%s|%s|%s|%s\n' \
+          printf 'SART_VM_POSTMARKETOS_KERNEL_INDEX_CANDIDATE_V1|%s|%s|%s|%s\n' \
               "${candidate_index##*/}" "$device_index_matches" \
               "$mainline_index_matches" "$candidate_index_sha" >/dev/ttyS0
           if test "$device_index_matches" = 1 &&
@@ -290,7 +343,7 @@ write_files:
       case "$kernel_index_size:$kernel_index_sha" in
           *[!0-9:a-f]* | :* | *:) exit 1 ;;
       esac
-      printf 'BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_V1|%s|%s|%s\n' \
+      printf 'SART_VM_POSTMARKETOS_KERNEL_INDEX_V1|%s|%s|%s\n' \
           APKINDEX.tar.gz "$kernel_index_size" "$kernel_index_sha" \
           >/dev/ttyS0
       unset candidate_index candidate_index_sha device_index_matches \
@@ -306,32 +359,11 @@ write_files:
           case "$kernel_apk_size:$kernel_apk_sha" in
               *[!0-9:a-f]* | :* | *:) exit 1 ;;
           esac
-          printf 'BOOTART_VM_POSTMARKETOS_KERNEL_APK_V1|%s|%s|%s\n' \
+          printf 'SART_VM_POSTMARKETOS_KERNEL_APK_V1|%s|%s|%s\n' \
               "${kernel_apk##*/}" "$kernel_apk_size" "$kernel_apk_sha" \
               >/dev/ttyS0
       done
       unset kernel_apk kernel_apk_size kernel_apk_sha
-
-      # pmbootstrap copied the prepared rootfs to the encrypted target before
-      # returning. Reopen only that disposable guest disk and copy the already
-      # verified APKs into its offline cache; never retain the passphrase.
-      stage=kernel-update-cache-target-open
-      printf '%s' "$install_passphrase" |
-          cryptsetup open "${target}2" "$post_mapper" --key-file -
-      unset install_passphrase
-      stage=kernel-update-cache-target-copy
-      mkdir -p "$post_root"
-      mount "/dev/mapper/$post_mapper" "$post_root"
-      mkdir -p "$post_root/var/cache/bootart-kernel-update/aarch64"
-      cp -a "$kernel_cache"/. \
-          "$post_root/var/cache/bootart-kernel-update/aarch64/"
-      chmod 0400 "$post_root"/var/cache/bootart-kernel-update/aarch64/*.apk
-      chmod 0400 \
-          "$post_root/var/cache/bootart-kernel-update/aarch64/APKINDEX.tar.gz"
-      sync -f "$post_root/var/cache/bootart-kernel-update/aarch64"
-      umount "$post_root"
-      cryptsetup close "$post_mapper"
-      unset kernel_repository
 
       stage=disk-contract-root-node
       test -b "${target}2"
@@ -343,21 +375,105 @@ write_files:
       test -b "${target}1"
       stage=disk-contract-boot-filesystem
       test "$(blkid -s TYPE -o value "${target}1")" = vfat
+
+      # pmbootstrap copied the prepared rootfs to the encrypted target and
+      # unmounted both target filesystems before returning. Reopen only that
+      # disposable guest disk, mount its real ESP, and finish the sealed stock
+      # fixture there. Never retain the passphrase.
+      stage=kernel-update-cache-target-open
+      printf '%s' "$install_passphrase" |
+          cryptsetup open "${target}2" "$post_mapper" --key-file -
+      unset install_passphrase
+      mkdir -p "$post_root"
+      mount "/dev/mapper/$post_mapper" "$post_root"
+      test -d "$post_root/boot"
+      mount "${target}1" "$post_root/boot"
+
+      stage=target-deviceinfo-compression
+      target_deviceinfo="$post_root/usr/share/deviceinfo/deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="zstd"' "$target_deviceinfo")" = 1
+      sed -i 's/^deviceinfo_initfs_compression="zstd"$/deviceinfo_initfs_compression="gzip"/' \
+          "$target_deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_initfs_compression="gzip"' "$target_deviceinfo")" = 1
+      stage=install-fairphone-device-contract-fixture
+      fairphone_deviceinfo=/opt/pmaports/device/testing/device-fairphone-fp6/deviceinfo
+      test -f "$fairphone_deviceinfo"
+      test "$(sha256sum "$fairphone_deviceinfo" | awk '{ print $1 }')" = \
+          2e9d77cba8c60cd6a58576cdcc24355d8c9d8a2a750bb3ce0399b79591a7eac9
+      install -Dm0444 "$fairphone_deviceinfo" \
+          "$post_root/usr/share/sart-vm-fixtures/fairphone-fp6-deviceinfo"
+      test "$(grep -Fxc 'deviceinfo_flash_kernel_on_update="true"' \
+          "$post_root/usr/share/sart-vm-fixtures/fairphone-fp6-deviceinfo")" = 1
+      if test -x "$post_root/usr/lib/systemd/systemd"; then
+          # QEMU cannot emulate the Fairphone SoC or its bootloader.  Model
+          # only the exact A/B raw-partition contract on a disposable disk.
+          # Prefer the DTB shipped by the real postmarketOS kernel.  Synthesize
+          # one only when that kernel has no FP6 DTB; never create an ambiguous
+          # second match because Sart deliberately rejects ambiguity.
+          fp6_dtb_matches=0
+          for fp6_dtb in \
+              "$post_root"/boot/dtbs*/qcom/milos-fairphone-fp6.dtb; do
+              test -f "$fp6_dtb" || continue
+              fp6_dtb_matches=$((fp6_dtb_matches + 1))
+          done
+          test "$fp6_dtb_matches" -le 1
+          if test "$fp6_dtb_matches" = 0; then
+              install -d -m 0755 \
+                  "$post_root/boot/dtbs-sart-vm/qcom"
+              printf '%s\n' SART_VM_SYNTHETIC_FAIRPHONE_DTB_V1 > \
+                  "$post_root/boot/dtbs-sart-vm/qcom/milos-fairphone-fp6.dtb"
+              chmod 0444 \
+                  "$post_root/boot/dtbs-sart-vm/qcom/milos-fairphone-fp6.dtb"
+          fi
+          unset fp6_dtb fp6_dtb_matches
+          pmos_entry="$post_root/boot/loader/entries/pmos.conf"
+          test "$(grep -c '^options ' "$pmos_entry")" = 1
+          ! grep -Fq 'androidboot.slot_suffix=' "$pmos_entry"
+          sed -i '/^options /s/$/ androidboot.slot_suffix=_a/' "$pmos_entry"
+          test "$(grep -Fc 'androidboot.slot_suffix=_a' "$pmos_entry")" = 1
+          printf '%s\n' SART_VM_POSTMARKETOS_AB_SLOT_FIXTURE_V1 >/dev/ttyS0
+          unset pmos_entry
+      fi
+      printf '%s\n' \
+          'SART_VM_FAIRPHONE_FP6_DEVICEINFO_FIXTURE_V1|2e9d77cba8c60cd6a58576cdcc24355d8c9d8a2a750bb3ce0399b79591a7eac9' \
+          >/dev/ttyS0
+      cp "$rootfs/boot/initramfs" "$post_root/boot/initramfs"
+      chmod 0644 "$post_root/boot/initramfs"
+      sync -f "$post_root/boot"
+      unset rootfs_deviceinfo target_deviceinfo fairphone_deviceinfo
+
+      stage=kernel-update-cache-target-copy
+      mkdir -p "$post_root/var/cache/sart-kernel-update/aarch64"
+      cp -a "$kernel_cache"/. \
+          "$post_root/var/cache/sart-kernel-update/aarch64/"
+      chmod 0400 "$post_root"/var/cache/sart-kernel-update/aarch64/*.apk
+      chmod 0400 \
+          "$post_root/var/cache/sart-kernel-update/aarch64/APKINDEX.tar.gz"
+      sync -f "$post_root/var/cache/sart-kernel-update/aarch64"
+      unset kernel_repository
+
       stage=disk-contract-boot-files
       for relative in \
           initramfs \
           EFI/BOOT/BOOTAA64.EFI \
           loader/entries/pmos.conf; do
-          boot_file="$rootfs/boot/$relative"
+          boot_file="$post_root/boot/$relative"
           test -f "$boot_file"
           boot_size=$(stat -c %s "$boot_file")
           case "$boot_size" in
               '' | *[!0-9]*) exit 1 ;;
           esac
           test "$boot_size" -gt 0
-          printf 'BOOTART_VM_POSTMARKETOS_BOOT_FILE_V1|%s|%s\n' \
+          printf 'SART_VM_POSTMARKETOS_BOOT_FILE_V1|%s|%s\n' \
               "$relative" "$boot_size" >/dev/ttyS0
       done
+      stage=disk-contract-initramfs-compression
+      initramfs_magic=$(head -c 3 "$post_root/boot/initramfs" |
+          od -An -tx1 | tr -d '[:space:]')
+      test "$initramfs_magic" = 1f8b08
+      printf 'SART_VM_POSTMARKETOS_INITRAMFS_COMPRESSION_V1|gzip|%s\n' \
+          "$initramfs_magic" >/dev/ttyS0
+      unset initramfs_magic
 
       # The generic product correctly refuses a merged or unmounted /boot.
       # Persist the exact installer-created ESP mount so the normally booted
@@ -367,14 +483,71 @@ write_files:
       case "$boot_uuid" in
           '' | *[!0-9A-Fa-f-]*) exit 1 ;;
       esac
-      test -f "$rootfs/etc/fstab"
+      test -f "$post_root/etc/fstab"
       ! awk '$1 !~ /^#/ && $2 == "/boot" { found=1 } END { exit found ? 0 : 1 }' \
-          "$rootfs/etc/fstab"
-      printf 'UUID=%s /boot vfat defaults,noatime 0 2\n' "$boot_uuid" \
-          >> "$rootfs/etc/fstab"
-      grep -Fqx "UUID=$boot_uuid /boot vfat defaults,noatime 0 2" \
-          "$rootfs/etc/fstab"
+          "$post_root/etc/fstab"
+      if test -x "$post_root/usr/lib/systemd/systemd"; then
+          # The systemd image discovers the ESP through its GPT auto-generator.
+          # Adding a second fstab entry creates a duplicate boot.mount unit.
+          printf 'SART_VM_POSTMARKETOS_BOOT_MOUNT_V1|systemd-gpt-auto|%s\n' \
+              "$boot_uuid" >/dev/ttyS0
+      else
+          printf 'UUID=%s /boot vfat defaults,noatime 0 2\n' "$boot_uuid" \
+              >> "$post_root/etc/fstab"
+          grep -Fqx "UUID=$boot_uuid /boot vfat defaults,noatime 0 2" \
+              "$post_root/etc/fstab"
+          printf 'SART_VM_POSTMARKETOS_BOOT_MOUNT_V1|fstab|%s\n' \
+              "$boot_uuid" >/dev/ttyS0
+      fi
       unset boot_uuid
+
+      # pmbootstrap enforces a 512-MiB minimum ESP.  For the systemd fixture,
+      # consume only disposable VM space so that the installed guest exposes
+      # roughly the same free /boot capacity as the audited Fairphone.  The
+      # reserve is ordinary stock fixture data: Sart neither creates nor
+      # owns it, and every acceptance lane starts from this sealed base.
+      if test -x "$post_root/usr/lib/systemd/systemd"; then
+          stage=installed-boot-capacity-reserve
+          boot_capacity_target_kib=325000
+          set -- $(df -Pk "$post_root/boot" | tail -n 1)
+          boot_total_kib=$2
+          boot_free_kib=$4
+          case "$boot_total_kib:$boot_free_kib" in
+              *[!0-9:]* | :* | *:) exit 1 ;;
+          esac
+          printf 'SART_VM_POSTMARKETOS_BOOT_CAPACITY_BEFORE_V1|%s|%s\n' \
+              "$boot_total_kib" "$boot_free_kib" >/dev/ttyS0
+          # pmbootstrap's 512-MiB setting is partition policy; the usable
+          # FAT32 block count is lower after alignment and filesystem metadata.
+          test "$boot_total_kib" -ge 480000
+          test "$boot_total_kib" -le 530000
+          test "$boot_free_kib" -gt $((boot_capacity_target_kib + 4096))
+          boot_reserve_kib=$((boot_free_kib - boot_capacity_target_kib))
+          test "$boot_reserve_kib" -gt 0
+          busybox dd if=/dev/zero \
+              of="$post_root/boot/.sart-vm-capacity-reserve" \
+              bs=1024 count="$boot_reserve_kib" conv=fsync 2>/dev/null
+          chmod 0400 "$post_root/boot/.sart-vm-capacity-reserve"
+          set -- $(df -Pk "$post_root/boot" | tail -n 1)
+          boot_free_kib=$4
+          case "$boot_free_kib" in
+              '' | *[!0-9]*) exit 1 ;;
+          esac
+          test "$boot_free_kib" -ge 320000
+          test "$boot_free_kib" -le 330000
+          printf 'SART_VM_POSTMARKETOS_BOOT_CAPACITY_SEED_V1|%s|%s|%s\n' \
+              "$boot_total_kib" "$boot_free_kib" "$boot_reserve_kib" \
+              >/dev/ttyS0
+          unset boot_capacity_target_kib boot_total_kib boot_free_kib \
+              boot_reserve_kib
+      fi
+
+      stage=target-filesystem-close
+      sync -f "$post_root/boot"
+      sync -f "$post_root"
+      umount "$post_root/boot"
+      umount "$post_root"
+      cryptsetup close "$post_mapper"
 
       # Keep the stock locked root account.  The adapter runner must exercise
       # the same installed-user privilege escalation path used on a normal
@@ -388,9 +561,9 @@ write_files:
           --assume-yes shutdown
       sync
       umount "$input"
-      printf '%s\n' BOOTART_VM_POSTMARKETOS_PROVISION_PASS_V1 >/dev/ttyS0
+      printf '%s\n' SART_VM_POSTMARKETOS_PROVISION_PASS_V1 >/dev/ttyS0
       trap - EXIT
       poweroff
 runcmd:
-  - [ /usr/local/sbin/bootart-provision-postmarketos ]
-final_message: bootart postmarketOS builder cloud-init completed
+  - [ /usr/local/sbin/sart-provision-postmarketos ]
+final_message: sart postmarketOS builder cloud-init completed

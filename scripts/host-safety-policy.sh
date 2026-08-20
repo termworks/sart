@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 
 die() {
-    printf 'bootart-safety: %s\n' "$*" >&2
+    printf 'sart-safety: %s\n' "$*" >&2
     exit 2
 }
 
@@ -223,4 +223,4 @@ if target_matches="$(awk '
 fi
 
 [[ $violations -eq 0 ]] || die 'host command policy rejected one or more surfaces'
-printf 'bootart-safety: host command surfaces PASS\n'
+printf 'sart-safety: host command surfaces PASS\n'

@@ -9,33 +9,46 @@ policy=$repo_root/scripts/source-layout-policy.sh
 
 /bin/bash "$policy" "$repo_root" >/dev/null
 
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/bootart-source-layout.XXXXXXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/sart-source-layout.XXXXXXXXXX")
 cleanup() { rm -rf -- "$fixture"; }
 trap cleanup EXIT
-mkdir -p "$fixture/cpp/src" "$fixture/cpp/include/bootart"
-printf 'bootart\n0.1.0\n' >"$fixture/PROJECT"
+mkdir -p "$fixture/src" "$fixture/include/sart" "$fixture/tests"
 printf 'all:\n\t@true\n' >"$fixture/Makefile"
-printf 'all:\n\t@true\n' >"$fixture/cpp/Makefile"
-printf 'int main() { return 0; }\n' >"$fixture/cpp/src/main.cpp"
-printf '#pragma once\n' >"$fixture/cpp/include/bootart/core.hpp"
+printf 'int main() { return 0; }\n' >"$fixture/src/main.cpp"
+printf '#pragma once\n' >"$fixture/include/sart/core.hpp"
+printf 'int test_main() { return 0; }\n' >"$fixture/tests/core_tests.cpp"
 
 /bin/bash "$policy" "$fixture" >/dev/null
 
-printf 'int main() { return 0; }\n' >"$fixture/cpp/src/helper.cpp"
+printf 'sart\n0.1.0\n' >"$fixture/PROJECT"
+if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
+    echo 'source-layout policy accepted a PROJECT file' >&2
+    exit 1
+fi
+rm -f "$fixture/PROJECT"
+
+mkdir "$fixture/cpp"
+if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
+    echo 'source-layout policy accepted a nested C++ project' >&2
+    exit 1
+fi
+rmdir "$fixture/cpp"
+
+printf 'int main() { return 0; }\n' >"$fixture/src/helper.cpp"
 if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
     echo 'source-layout policy accepted a second main function' >&2
     exit 1
 fi
-rm -f "$fixture/cpp/src/helper.cpp"
+rm -f "$fixture/src/helper.cpp"
 
-printf 'fixture\n' >"$fixture/cpp/src/generated.txt"
+printf 'fixture\n' >"$fixture/src/generated.txt"
 if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
     echo 'source-layout policy accepted an unreviewed C++ tree file' >&2
     exit 1
 fi
-rm -f "$fixture/cpp/src/generated.txt"
+rm -f "$fixture/src/generated.txt"
 
-printf '// ubuntu-specific backend\n' >"$fixture/cpp/src/installer_backend_ubuntu.cpp"
+printf '// ubuntu-specific backend\n' >"$fixture/src/installer_backend_ubuntu.cpp"
 if /bin/bash "$policy" "$fixture" >/dev/null 2>&1; then
     echo 'source-layout policy accepted a distribution backend' >&2
     exit 1

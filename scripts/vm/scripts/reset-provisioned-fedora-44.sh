@@ -41,7 +41,7 @@ if [[ -e "$verified" || -L "$verified" ]]; then
         vm_die 'Fedora stock-verification lineage is not sealed'
 fi
 
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_FEDORA_PROVISIONED_V1 ]] ||
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_FEDORA_PROVISIONED_V1 ]] ||
     vm_die 'provisioned Fedora lineage schema is not owned by this harness'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
 ovmf_sha="$(sed -n 's/^ovmf_vars_sha256=//p' "$lineage")"
@@ -60,4 +60,4 @@ fi
 chmod 0600 -- "$base" "$ovmf" "$lineage"
 [[ ! -f "$verified" ]] || chmod 0600 -- "$verified"
 rm -f -- "$verified" "$lineage" "$ovmf" "$base"
-printf 'bootart-vm: removed authenticated disposable Fedora base; provisioning is required\n'
+printf 'sart-vm: removed authenticated disposable Fedora base; provisioning is required\n'

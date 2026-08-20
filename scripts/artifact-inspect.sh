@@ -5,7 +5,7 @@ set -euo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -14,8 +14,8 @@ usage() {
 usage: artifact-inspect.sh EXPECTED_ARCH ARTIFACT [PAYLOAD_DIR]
 
 EXPECTED_ARCH is x86_64 or aarch64. ARTIFACT must be a regular, executable,
-non-symlink ELF named bootart. When PAYLOAD_DIR is supplied, it must contain
-that artifact as bootart and no other executable, ELF, or symlink payload.
+non-symlink ELF named sart. When PAYLOAD_DIR is supplied, it must contain
+that artifact as sart and no other executable, ELF, or symlink payload.
 EOF
     exit 2
 }
@@ -53,7 +53,7 @@ esac
 [[ ! -L "$artifact" ]] || die "artifact must not be a symlink: $artifact"
 [[ -f "$artifact" ]] || die "artifact is not a regular file: $artifact"
 [[ -x "$artifact" ]] || die "artifact is not executable: $artifact"
-[[ ${artifact##*/} == bootart ]] || die "artifact must be named bootart: $artifact"
+[[ ${artifact##*/} == sart ]] || die "artifact must be named sart: $artifact"
 
 header=$("$readelf_tool" -hW -- "$artifact" 2>/dev/null) || \
     die "artifact is not a readable ELF: $artifact"
@@ -90,7 +90,7 @@ entry_value=$((entry_point))
 program_headers=$("$readelf_tool" -lW -- "$artifact" 2>/dev/null) || \
     die "could not inspect ELF program headers: $artifact"
 if grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' <<<"$program_headers"; then
-    die 'PT_INTERP is present; bootart must be statically linked'
+    die 'PT_INTERP is present; sart must be statically linked'
 fi
 
 executable_loads=$(awk '
@@ -123,7 +123,7 @@ done <<<"$executable_loads"
 dynamic_entries=$("$readelf_tool" -dW -- "$artifact" 2>/dev/null) || \
     die "could not inspect ELF dynamic entries: $artifact"
 if grep -Eq '\(NEEDED\)|(^|[[:space:]])NEEDED([[:space:]]|$)' <<<"$dynamic_entries"; then
-    die 'DT_NEEDED is present; bootart must have no shared-library dependencies'
+    die 'DT_NEEDED is present; sart must have no shared-library dependencies'
 fi
 
 if [[ -n "$payload_dir" ]]; then
@@ -132,8 +132,8 @@ if [[ -n "$payload_dir" ]]; then
     [[ ! -L "$payload_dir" ]] || die "payload directory must not be a symlink: $payload_dir"
 
     payload_dir=${payload_dir%/}
-    [[ "$artifact" == "$payload_dir/bootart" ]] || \
-        die "release artifact must be exactly $payload_dir/bootart"
+    [[ "$artifact" == "$payload_dir/sart" ]] || \
+        die "release artifact must be exactly $payload_dir/sart"
 
     symlink=$(find "$payload_dir" -mindepth 1 -type l -print -quit)
     [[ -z "$symlink" ]] || die "symlink payload is forbidden: $symlink"
@@ -160,4 +160,4 @@ if [[ -n "$payload_dir" ]]; then
         die "payload must contain exactly one ELF; found $elf_count"
 fi
 
-printf 'bootart-artifact: PASS: static %s ELF: %s\n' "$expected_arch" "$artifact"
+printf 'sart-artifact: PASS: static %s ELF: %s\n' "$expected_arch" "$artifact"

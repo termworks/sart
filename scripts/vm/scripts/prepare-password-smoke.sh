@@ -108,12 +108,12 @@ mapfile -t module_versions < <(
     vm_die 'locked modloop has an ambiguous kernel-module version'
 module_root=${module_versions[0]}
 install -D -m 0644 -- "$module_root/kernel/drivers/md/dm-mod.ko" \
-    "$overlay/opt/bootart-vm/modules/dm-mod.ko"
+    "$overlay/opt/sart-vm/modules/dm-mod.ko"
 install -D -m 0644 -- \
     "$module_root/kernel/security/keys/encrypted-keys/encrypted-keys.ko" \
-    "$overlay/opt/bootart-vm/modules/encrypted-keys.ko"
+    "$overlay/opt/sart-vm/modules/encrypted-keys.ko"
 install -D -m 0644 -- "$module_root/kernel/drivers/md/dm-crypt.ko" \
-    "$overlay/opt/bootart-vm/modules/dm-crypt.ko"
+    "$overlay/opt/sart-vm/modules/dm-crypt.ko"
 
 temporary="$(mktemp "$run_dir/.password-initramfs.XXXXXXXXXX")" ||
     vm_die 'cannot allocate password initramfs temporary'
@@ -127,4 +127,4 @@ chmod 0400 -- "$temporary"
 mv -fT -- "$temporary" "$output"
 trap - EXIT HUP INT TERM
 
-printf 'bootart-vm: prepared test-only password guest in %s\n' "$run_dir"
+printf 'sart-vm: prepared test-only password guest in %s\n' "$run_dir"

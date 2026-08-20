@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 [[ $# -eq 2 ]] || vm_die 'usage: state-init.sh REPO_ROOT VM_ROOT'
 repo_root=$1
 vm_root=$2
-sentinel="$vm_root/.bootart-vm-state"
+sentinel="$vm_root/.sart-vm-state"
 
 vm_check_layout "$repo_root" "$vm_root"
 umask 077
@@ -27,4 +27,4 @@ else
 fi
 
 vm_validate_state "$repo_root" "$vm_root"
-printf 'bootart-vm: private state ready: %s\n' "$vm_root"
+printf 'sart-vm: private state ready: %s\n' "$vm_root"

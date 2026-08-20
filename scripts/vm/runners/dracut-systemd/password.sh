@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == ubuntu-26.04-dracut-systemd || "$fixture" == fedora-44-dracut-systemd ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -86,7 +86,7 @@ EOF
         guest_journalctl='journal''ctl'
         guest_crypt='crypt''setup'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         case "$fixture" in
             ubuntu-26.04-dracut-systemd)
                 privileged_prompt="[$guest_sudo: authenticate] Password:"
@@ -94,7 +94,7 @@ EOF
                 guest_initramfs='/boot/initrd.img-$(uname -r)'
                 ;;
             fedora-44-dracut-systemd)
-                privileged_prompt="[$guest_sudo] password for bootart:"
+                privileged_prompt="[$guest_sudo] password for sart:"
                 stock_unlock_prompt='Please enter passphrase for disk'
                 guest_initramfs='/boot/initramfs-$(uname -r).img'
                 ;;
@@ -307,9 +307,9 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             sleep 2
@@ -318,9 +318,9 @@ EOF
             local request=$1 marker=$2 prompt_count marker_count marker_suffix
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                marker_suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                marker_suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -333,13 +333,13 @@ EOF
             # Kernel-console copies may precede the authoritative journal
             # replay. Work only from its final exact nine marker tokens.
             event_tokens=$(
-                { grep -a -o -E 'BOOTART_(PASSWORD|LIFECYCLE)_V1[|]event=[^|]*[|]pid=[0-9][0-9]*' "$run_dir/serial.log" || true; } |
+                { grep -a -o -E 'SART_(PASSWORD|LIFECYCLE)_V1[|]event=[^|]*[|]pid=[0-9][0-9]*' "$run_dir/serial.log" || true; } |
                     tail -n 9
             )
             event_token_count=$({ grep -c . <<< "$event_tokens" || true; })
             [[ "$event_token_count" == 9 ]]
-            password_events=$({ grep -F 'BOOTART_PASSWORD_V1|event=' <<< "$event_tokens" || true; })
-            lifecycle_events=$({ grep -F 'BOOTART_LIFECYCLE_V1|event=' <<< "$event_tokens" || true; })
+            password_events=$({ grep -F 'SART_PASSWORD_V1|event=' <<< "$event_tokens" || true; })
+            lifecycle_events=$({ grep -F 'SART_LIFECYCLE_V1|event=' <<< "$event_tokens" || true; })
             [[ -n "$password_events" && -n "$lifecycle_events" ]]
             ! grep -a -F -q -- 'Daemon error:' "$run_dir/serial.log"
             pid_count=$(
@@ -347,22 +347,22 @@ EOF
                     sed -n 's/.*|pid=\([0-9][0-9]*\).*/\1/p' | sort -u | wc -l
             )
             [[ "$pid_count" == 1 ]]
-            pid=$(sed -n 's/.*BOOTART_PASSWORD_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$password_events" | sed -n '1p')
+            pid=$(sed -n 's/.*SART_PASSWORD_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$password_events" | sed -n '1p')
             [[ "$pid" =~ ^[1-9][0-9]*$ ]]
             # A wrong answer closes that systemd request attempt; cryptsetup
             # then publishes the retry, followed by the successful close. The
-            # same Bootart daemon must own both prompt lifetimes.
+            # same Sart daemon must own both prompt lifetimes.
             for event in prompt-open prompt-close; do
-                event_count=$({ grep -F -o -- "BOOTART_PASSWORD_V1|event=$event|pid=$pid" <<< "$password_events" || true; } | wc -l)
+                event_count=$({ grep -F -o -- "SART_PASSWORD_V1|event=$event|pid=$pid" <<< "$password_events" || true; } | wc -l)
                 [[ "$event_count" == 2 ]]
             done
             for event in daemon-enter display-acquired root-handoff display-restored daemon-exit; do
-                event_count=$({ grep -F -o -- "BOOTART_LIFECYCLE_V1|event=$event|pid=$pid" <<< "$lifecycle_events" || true; } | wc -l)
+                event_count=$({ grep -F -o -- "SART_LIFECYCLE_V1|event=$event|pid=$pid" <<< "$lifecycle_events" || true; } | wc -l)
                 [[ "$event_count" == 1 ]]
             done
             event_sequence=$(
                 printf '%s\n' "$event_tokens" |
-                    sed -n 's/^BOOTART_[A-Z]*_V1|event=\([^|]*\)|pid=[0-9][0-9]*.*/\1/p' |
+                    sed -n 's/^SART_[A-Z]*_V1|event=\([^|]*\)|pid=[0-9][0-9]*.*/\1/p' |
                     tr '\n' ' ' | sed 's/ $//'
             )
             [[ "$event_sequence" == \
@@ -375,23 +375,23 @@ EOF
         qmp_key ret
         login_guest 1
 
-        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed'
+        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_PASSWORD_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_PASSWORD_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed'
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -k $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_PASSWORD_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_umount /mnt/sart-transport" \
+            SART_VM_PASSWORD_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 3
 
         initrd_count=$(count_log 'Running in initrd.')
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         prompt_count=$(count_log "$privileged_prompt")
         send_serial "$guest_sudo -k $guest_reboot"
         wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -399,7 +399,7 @@ EOF
 
         # A successful console-agent suppression deliberately removes the
         # stock serial passphrase line. Anchor the installed boot on systemd's
-        # initramfs identity, then let the ordered Bootart start job acquire its
+        # initramfs identity, then let the ordered Sart start job acquire its
         # VT and discover the real systemd request.
         wait_count 'Running in initrd.' "$((initrd_count + 1))"
         sleep 12
@@ -429,10 +429,10 @@ EOF
         # agent is either condition-skipped or never activated. Both states
         # are acceptable only with an inactive unit, no process, and a zero
         # main-process start timestamp.
-        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; /sbin/$guest_crypt status \"\$root_source\" >/dev/null; test \"\$(cat /sys/class/tty/tty0/active)\" = tty1; ! pgrep -x bootart; agent=systemd-tty-ask-password-agent; ! pgrep -f \"\$agent --watch --console\"; unset agent; ! /usr/bin/$guest_systemctl is-active --quiet systemd-ask-password-console.service; console_result=\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p Result --value); case \"\$console_result\" in exec-condition|success) ;; *) exit 1;; esac; unset console_result; test \"\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p ExecMainPID --value)\" = 0; test \"\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p ExecMainStartTimestampMonotonic --value)\" = 0; test \"\$(/usr/bin/$guest_systemctl show bootart-start.service -p Result --value)\" = success; work=\$(mktemp -d); cd \"\$work\"; /usr/bin/lsinitrd --unpack $guest_initramfs; /usr/bin/$guest_journalctl -b --no-pager -o cat > \"\$work/journal\"; scan=112; scan=\${scan}358; matches=\$({ printf \"%s\" \"\$scan\" | grep -r -a -F -l --devices=skip -f - /proc/[0-9]*/cmdline /proc/[0-9]*/environ /etc /var/lib /var/log /run/bootart \"\$work\" 2>/dev/null || true; printf \"(?<![[:alnum:]])%s(?![[:alnum:]])\" \"\$scan\" | grep -r -a -P -l --devices=skip -f - /boot 2>/dev/null || true; }); unset scan; test -z \"\$matches\"; unset matches root_source; cd /; $guest_remove -rf \"\$work\"; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_PASSWORD_ROOT_AND_SECRET_VERIFIED_V1
-        privileged_step "$guest_sudo -k $guest_sh -c '/usr/bin/$guest_journalctl -b --no-pager -o cat | grep -E \"^BOOTART_(PASSWORD|LIFECYCLE)_V1\"'" \
-            BOOTART_VM_PASSWORD_EVENTS_CAPTURED_V1
+        privileged_step "$guest_sudo -k $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; /sbin/$guest_crypt status \"\$root_source\" >/dev/null; test \"\$(cat /sys/class/tty/tty0/active)\" = tty1; ! pgrep -x sart; agent=systemd-tty-ask-password-agent; ! pgrep -f \"\$agent --watch --console\"; unset agent; ! /usr/bin/$guest_systemctl is-active --quiet systemd-ask-password-console.service; console_result=\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p Result --value); case \"\$console_result\" in exec-condition|success) ;; *) exit 1;; esac; unset console_result; test \"\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p ExecMainPID --value)\" = 0; test \"\$(/usr/bin/$guest_systemctl show systemd-ask-password-console.service -p ExecMainStartTimestampMonotonic --value)\" = 0; test \"\$(/usr/bin/$guest_systemctl show sart-start.service -p Result --value)\" = success; work=\$(mktemp -d); cd \"\$work\"; /usr/bin/lsinitrd --unpack $guest_initramfs; /usr/bin/$guest_journalctl -b --no-pager -o cat > \"\$work/journal\"; scan=112; scan=\${scan}358; matches=\$({ printf \"%s\" \"\$scan\" | grep -r -a -F -l --devices=skip -f - /proc/[0-9]*/cmdline /proc/[0-9]*/environ /etc /var/lib /var/log /run/sart \"\$work\" 2>/dev/null || true; printf \"(?<![[:alnum:]])%s(?![[:alnum:]])\" \"\$scan\" | grep -r -a -P -l --devices=skip -f - /boot 2>/dev/null || true; }); unset scan; test -z \"\$matches\"; unset matches root_source; cd /; $guest_remove -rf \"\$work\"; /usr/bin/sart $guest_install status'" \
+            SART_VM_PASSWORD_ROOT_AND_SECRET_VERIFIED_V1
+        privileged_step "$guest_sudo -k $guest_sh -c '/usr/bin/$guest_journalctl -b --no-pager -o cat | grep -E \"^SART_(PASSWORD|LIFECYCLE)_V1\"'" \
+            SART_VM_PASSWORD_EVENTS_CAPTURED_V1
         require_single_password_daemon
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1

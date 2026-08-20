@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == alpine-mkinitfs-openrc ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -83,10 +83,10 @@ EOF
         guest_remove='r''m'
         guest_sh='s''h'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         guest_initramfs=/boot/initramfs-virt
-        guest_manifest='/''var/lib/bootart/in''stall/manifest.v1'
-        guest_baseline=/var/tmp/bootart-uninstall-baseline.sha256
+        guest_manifest='/''var/lib/sart/in''stall/manifest.v1'
+        guest_baseline=/var/tmp/sart-uninstall-baseline.sha256
 
         count_log() {
             { grep -a -F -o -- "$1" "$run_dir/serial.log" 2>/dev/null || true; } | wc -l
@@ -263,7 +263,7 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
             send_serial alpine
             wait_count 'Password:' "$((password_count + 1))"
@@ -273,8 +273,8 @@ EOF
         privileged_step() {
             local request=$1 marker=$2 marker_count marker_suffix
             marker_count=$(count_log "$marker")
-            marker_suffix=${marker#BOOTART_}
-            send_serial "$request && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            marker_suffix=${marker#SART_}
+            send_serial "$request && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             wait_count "$marker" "$((marker_count + 1))"
         }
         unlock_stock() {
@@ -299,42 +299,42 @@ EOF
 
         unlock_stock
         login_guest 1
-        privileged_step "$guest_doas $guest_sh -ec 'sha256sum /boot/initramfs-virt /boot/extlinux.conf /usr/share/mkinitfs/initramfs-init /etc/mkinitfs/mkinitfs.conf > $guest_baseline; test ! -e $guest_manifest; test ! -e /usr/bin/bootart'" \
-            BOOTART_VM_MKINITFS_UNINSTALL_BASELINE_V1
-        privileged_step "$guest_doas $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_UNINSTALL_MOUNT_DIR_V1
-        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_UNINSTALL_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            BOOTART_VM_MKINITFS_UNINSTALL_INSTALLED_V1
-        privileged_step "$guest_doas /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_MKINITFS_UNINSTALL_STATUS_V1
+        privileged_step "$guest_doas $guest_sh -ec 'sha256sum /boot/initramfs-virt /boot/extlinux.conf /usr/share/mkinitfs/initramfs-init /etc/mkinitfs/mkinitfs.conf > $guest_baseline; test ! -e $guest_manifest; test ! -e /usr/bin/sart'" \
+            SART_VM_MKINITFS_UNINSTALL_BASELINE_V1
+        privileged_step "$guest_doas $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_MKINITFS_UNINSTALL_MOUNT_DIR_V1
+        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_MKINITFS_UNINSTALL_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            SART_VM_MKINITFS_UNINSTALL_INSTALLED_V1
+        privileged_step "$guest_doas /usr/bin/sart $guest_install status" \
+            SART_VM_MKINITFS_UNINSTALL_STATUS_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_doas $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_UNINSTALL_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_doas $guest_umount /mnt/sart-transport" \
+            SART_VM_MKINITFS_UNINSTALL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
 
-        login_before=$(count_log 'bootart-vm login:')
+        login_before=$(count_log 'sart-vm login:')
         syslinux_before=$(count_log SYSLINUX)
         send_serial "$guest_doas $guest_reboot"
         unlock_installed "$((syslinux_before + 1))"
         login_guest "$((login_before + 1))"
-        privileged_step "$guest_doas $guest_sh -ec 'test ! -e $guest_transport; test ! -e /mnt/bootart-transport/bootart; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_MKINITFS_UNINSTALL_DISK_BOOT_V1
-        privileged_step "$guest_doas /usr/bin/bootart $guest_install uninstall --confirm-host bootart-vm" \
-            BOOTART_VM_MKINITFS_UNINSTALL_APPLIED_V1
-        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e $guest_manifest; test ! -e /.bootart-installer-journal.v1; test ! -e /usr/bin/bootart; test ! -e /etc/init.d/bootart; test ! -e /etc/init.d/bootart-quit; test ! -e /etc/runlevels/boot/bootart; test ! -e /etc/runlevels/default/bootart-quit; test ! -e /etc/mkinitfs/features.d/bootart.files; test ! -e /usr/libexec/bootart/mkinitfs-findfs; test ! -e /usr/libexec/bootart/mkinitfs-runtime; test ! -e /etc/update-extlinux.d/50-bootart-known-good; test ! -e /boot/initramfs-virt.bootart-known-good'" \
-            BOOTART_VM_MKINITFS_UNINSTALL_TREE_CLEAN_V1
+        privileged_step "$guest_doas $guest_sh -ec 'test ! -e $guest_transport; test ! -e /mnt/sart-transport/sart; /usr/bin/sart $guest_install status'" \
+            SART_VM_MKINITFS_UNINSTALL_DISK_BOOT_V1
+        privileged_step "$guest_doas /usr/bin/sart $guest_install uninstall --confirm-host sart-vm" \
+            SART_VM_MKINITFS_UNINSTALL_APPLIED_V1
+        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e $guest_manifest; test ! -e /.sart-installer-journal.v1; test ! -e /usr/bin/sart; test ! -e /etc/init.d/sart; test ! -e /etc/init.d/sart-quit; test ! -e /etc/runlevels/boot/sart; test ! -e /etc/runlevels/default/sart-quit; test ! -e /etc/mkinitfs/features.d/sart.files; test ! -e /usr/libexec/sart/mkinitfs-findfs; test ! -e /usr/libexec/sart/mkinitfs-runtime; test ! -e /etc/update-extlinux.d/50-sart-known-good; test ! -e /boot/initramfs-virt.sart-known-good'" \
+            SART_VM_MKINITFS_UNINSTALL_TREE_CLEAN_V1
 
-        login_before=$(count_log 'bootart-vm login:')
+        login_before=$(count_log 'sart-vm login:')
         send_serial "$guest_doas $guest_reboot"
         unlock_stock
         login_guest "$((login_before + 1))"
-        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e /usr/bin/bootart; test ! -e $guest_manifest; test ! -S /run/bootart/control.sock'" \
-            BOOTART_VM_MKINITFS_UNINSTALL_STOCK_BOOT_V1
+        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e /usr/bin/sart; test ! -e $guest_manifest; test ! -S /run/sart/control.sock'" \
+            SART_VM_MKINITFS_UNINSTALL_STOCK_BOOT_V1
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1
         wait_count "$oracle" 1

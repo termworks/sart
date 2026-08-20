@@ -59,4 +59,4 @@ done
     "$args_file" >/dev/null || vm_die 'Arch provisioning share or passthrough denied'
 sha256sum "$args_file" | awk '{ print $1 }' > "$run_dir/provision-qemu.policy.sha256"
 chmod 0600 -- "$run_dir/provision-qemu.policy.sha256"
-printf 'bootart-vm: Arch provision QEMU command policy PASS\n'
+printf 'sart-vm: Arch provision QEMU command policy PASS\n'

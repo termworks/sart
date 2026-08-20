@@ -4,8 +4,8 @@
 set -Eeuo pipefail
 umask 077
 
-VM_STATE_SCHEMA='BOOTART_VM_STATE_V1'
-VM_RUN_SCHEMA='BOOTART_VM_RUN_V1'
+VM_STATE_SCHEMA='SART_VM_STATE_V1'
+VM_RUN_SCHEMA='SART_VM_RUN_V1'
 VM_RESOURCE_UNRESOLVED='UNRESOLVED'
 # Keep shell arithmetic, filesystem block calculations, and RLIMIT conversion
 # comfortably below signed 64-bit overflow. A larger guest requires a reviewed
@@ -13,7 +13,7 @@ VM_RESOURCE_UNRESOLVED='UNRESOLVED'
 VM_MAX_LOCKED_RESOURCE_BYTES=1125899906842624
 
 vm_die() {
-    printf 'bootart-vm: %s\n' "$*" >&2
+    printf 'sart-vm: %s\n' "$*" >&2
     exit 2
 }
 
@@ -373,7 +373,7 @@ vm_validate_state() {
     vm_assert_private_dir "$vm_root"
     vm_assert_private_dir "$vm_root/cache"
     vm_assert_private_dir "$vm_root/runs"
-    sentinel="$vm_root/.bootart-vm-state"
+    sentinel="$vm_root/.sart-vm-state"
     [[ -f "$sentinel" && ! -L "$sentinel" ]] || \
         vm_die "state ownership sentinel is missing: $sentinel"
     vm_assert_owned "$sentinel"
@@ -401,7 +401,7 @@ vm_validate_run() {
     [[ "$base" =~ ^run\.[A-Za-z0-9]{10}$ ]] || \
         vm_die "invalid run directory name: $base"
     vm_assert_private_dir "$run_dir"
-    sentinel="$run_dir/.bootart-vm-run"
+    sentinel="$run_dir/.sart-vm-run"
     [[ -f "$sentinel" && ! -L "$sentinel" ]] || \
         vm_die "run ownership sentinel is missing: $sentinel"
     vm_assert_owned "$sentinel"
@@ -422,7 +422,7 @@ vm_create_run() {
     run_dir="$(mktemp -d "$vm_root/runs/run.XXXXXXXXXX")" || \
         vm_die 'cannot allocate private run directory'
     chmod 0700 -- "$run_dir"
-    sentinel="$run_dir/.bootart-vm-run"
+    sentinel="$run_dir/.sart-vm-run"
     vm_run_sentinel_text "$vm_root" "$run_dir" > "$sentinel"
     chmod 0600 -- "$sentinel"
     vm_validate_run "$vm_root" "$run_dir"

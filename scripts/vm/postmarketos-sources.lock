@@ -1,4 +1,4 @@
-# bootart postmarketOS provisioning source lock, schema v1
+# sart postmarketOS provisioning source lock, schema v1
 #
 # Fields (pipe-separated):
 # component|revision|archive_url|sha256|download_bytes

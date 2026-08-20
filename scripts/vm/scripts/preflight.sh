@@ -28,4 +28,4 @@ if [[ -e "$vm_root" ]]; then
 fi
 
 blocked="$(awk -F '|' '$0 !~ /^#/ && NF && $2 == "blocked" { n++ } END { print n + 0 }' "$lock_file")"
-printf 'bootart-vm: preflight PASS (read-only); blocked image rows: %s\n' "$blocked"
+printf 'sart-vm: preflight PASS (read-only); blocked image rows: %s\n' "$blocked"

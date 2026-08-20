@@ -15,8 +15,11 @@ vm_validate_run "$vm_root" "$run_dir"
 [[ "$args_file" == "$run_dir/stock-qemu.args" && -f "$args_file" &&
    ! -L "$args_file" && "$(vm_stat_mode "$args_file")" == 600 ]] ||
     vm_die 'postmarketOS stock QEMU argument record is unsafe'
-[[ "$base" == "$vm_root/cache/provisioned/postmarketos-qemu-aarch64.qcow2" &&
-   -f "$base" && ! -L "$base" && "$(vm_stat_mode "$base")" == 400 ]] ||
+case "$base" in
+    "$vm_root/cache/provisioned/postmarketos-qemu-aarch64.qcow2"|"$vm_root/cache/provisioned/postmarketos-qemu-aarch64-systemd.qcow2") ;;
+    *) vm_die 'postmarketOS stock base path is outside the reviewed fixtures' ;;
+esac
+[[ -f "$base" && ! -L "$base" && "$(vm_stat_mode "$base")" == 400 ]] ||
     vm_die 'postmarketOS stock base is missing or unsealed'
 [[ "$overlay" == "$run_dir/stock-overlay.qcow2" && -f "$overlay" &&
    ! -L "$overlay" && "$(vm_stat_mode "$overlay")" == 600 ]] ||
@@ -72,4 +75,4 @@ done
     vm_die 'host forwarding, share, or passthrough denied'
 sha256sum "$args_file" | awk '{ print $1 }' > "$run_dir/stock-qemu.policy.sha256"
 chmod 0600 -- "$run_dir/stock-qemu.policy.sha256"
-printf 'bootart-vm: postmarketOS stock QEMU command policy PASS\n'
+printf 'sart-vm: postmarketOS stock QEMU command policy PASS\n'

@@ -10,8 +10,8 @@ source "$SCRIPT_DIR/lib.sh"
 source "$SCRIPT_DIR/matrix-lib.sh"
 
 [[ $# -eq 7 || $# -eq 8 ]] || vm_die \
-    'usage: run-adapter-lane.sh REPO_ROOT VM_ROOT LOCK_FILE MATRIX_FILE PAIR LANE BOOTART_BIN [FIXTURE]'
-[[ "${BOOTART_VM_MAKE_ENTRY:-}" == 1 ]] ||
+    'usage: run-adapter-lane.sh REPO_ROOT VM_ROOT LOCK_FILE MATRIX_FILE PAIR LANE SART_BIN [FIXTURE]'
+[[ "${SART_VM_MAKE_ENTRY:-}" == 1 ]] ||
     vm_die 'adapter VM lanes are Make-only; use make vm-test-{lifecycle,install,password}-PAIR'
 repo_root=$1
 vm_root=$2
@@ -19,7 +19,7 @@ lock_file=$3
 matrix_file=$4
 pair=$5
 lane=$6
-bootart_bin=$7
+sart_bin=$7
 fixture=${8:-}
 [[ -n "$fixture" ]] || fixture="$(vm_default_fixture "$pair")"
 
@@ -108,30 +108,36 @@ if [[ "$lock_status" == derived ]]; then
     case "$image_id" in
         ubuntu-26.04-dracut-systemd-amd64-derived)
             derived_prefix=ubuntu-26.04-dracut-systemd-amd64
-            derived_stock_oracle=BOOTART_VM_UBUNTU_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_UBUNTU_BASE_PASS_V1
             derived_requires_ovmf=1
             ;;
         fedora-44-dracut-systemd-amd64-derived)
             derived_prefix=fedora-44-dracut-systemd-amd64
-            derived_stock_oracle=BOOTART_VM_FEDORA_44_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_FEDORA_44_BASE_PASS_V1
             derived_requires_ovmf=1
             ;;
         debian-13.6-initramfs-tools-systemd-amd64-derived)
             derived_prefix=debian-13.6-initramfs-tools-systemd-amd64
-            derived_stock_oracle=BOOTART_VM_DEBIAN_13_6_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_DEBIAN_13_6_BASE_PASS_V1
             derived_requires_ovmf=1
             ;;
         alpine-3.24.1-mkinitfs-openrc-amd64-derived)
             derived_prefix=alpine-3.24.1-mkinitfs-openrc-amd64
-            derived_stock_oracle=BOOTART_VM_ALPINE_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_ALPINE_BASE_PASS_V1
             ;;
         arch-mkinitcpio-systemd-amd64-derived)
             derived_prefix=arch-mkinitcpio-systemd-amd64
-            derived_stock_oracle=BOOTART_VM_ARCH_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_ARCH_BASE_PASS_V1
             ;;
         postmarketos-qemu-aarch64-derived)
             derived_prefix=postmarketos-qemu-aarch64
-            derived_stock_oracle=BOOTART_VM_POSTMARKETOS_BASE_PASS_V1
+            derived_stock_oracle=SART_VM_POSTMARKETOS_BASE_PASS_V1
+            derived_requires_ovmf=1
+            derived_firmware_kind=aarch64-template
+            ;;
+        postmarketos-qemu-aarch64-systemd-derived)
+            derived_prefix=postmarketos-qemu-aarch64-systemd
+            derived_stock_oracle=SART_VM_POSTMARKETOS_SYSTEMD_BASE_PASS_V1
             derived_requires_ovmf=1
             derived_firmware_kind=aarch64-template
             ;;
@@ -182,26 +188,26 @@ base_virtual_bytes="$(QEMU_IMG="$qemu_img_executable" \
 assert_qemu_img_pinned
 vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"
 
-bootart_physical="$(readlink -f -- "$bootart_bin")" || vm_die 'cannot resolve static bootart input'
+sart_physical="$(readlink -f -- "$sart_bin")" || vm_die 'cannot resolve static sart input'
 arm_artifact_generation=
-case "$bootart_physical" in
-    "$repo_root/target/artifacts/generations/"*/release/bootart|\
-    "$vm_root/products/generations/"*/bootart) ;;
-    "$vm_root/cache/artifacts/aarch64/generations/"*/bootart)
-        arm_artifact_generation="${bootart_physical%/bootart}"
+case "$sart_physical" in
+    "$repo_root/target/artifacts/generations/"*/release/sart|\
+    "$vm_root/products/generations/"*/sart) ;;
+    "$vm_root/cache/artifacts/aarch64/generations/"*/sart)
+        arm_artifact_generation="${sart_physical%/sart}"
         arm_artifact_generation="${arm_artifact_generation##*/}"
         [[ "$arm_artifact_generation" =~ ^[0-9a-f]{64}$ ]] ||
             vm_die 'aarch64 artifact generation name is not a SHA-256 digest'
         ;;
-    *) vm_die 'adapter VM lane requires bootart from one immutable artifact generation' ;;
+    *) vm_die 'adapter VM lane requires sart from one immutable artifact generation' ;;
 esac
-[[ -f "$bootart_physical" && ! -L "$bootart_physical" ]] ||
-    vm_die 'static bootart input is missing or symlinked'
-vm_assert_owned "$bootart_physical"
+[[ -f "$sart_physical" && ! -L "$sart_physical" ]] ||
+    vm_die 'static sart input is missing or symlinked'
+vm_assert_owned "$sart_physical"
 READELF="$(command -v readelf)" bash "$repo_root/scripts/artifact-inspect.sh" \
-    "$guest_arch" "$bootart_physical"
+    "$guest_arch" "$sart_physical"
 if [[ -n "$arm_artifact_generation" ]]; then
-    [[ "$(sha256sum "$bootart_physical" | awk '{ print $1 }')" == \
+    [[ "$(sha256sum "$sart_physical" | awk '{ print $1 }')" == \
        "$arm_artifact_generation" ]] ||
         vm_die 'aarch64 artifact bytes differ from their content-addressed generation'
 fi
@@ -219,7 +225,7 @@ chmod 0700 -- "$runner_home" "$runner_tmp" "$runner_bin"
 # broad system directory with ordinary utilities.
 runner_tools=(
     bash awk basename cat chmod cp cpio date dirname find grep gzip head id
-    env install jq ln mkdir mke2fs mktemp od readlink rm sed sha256sum sleep socat sort
+    env install jq ln mkdir mke2fs mktemp od readlink rm rmdir sed sgdisk sha256sum sleep socat sort
     stat tail tar timeout touch tr truncate wc xorriso
 )
 for tool in "${runner_tools[@]}"; do
@@ -298,12 +304,12 @@ result_destination_is_safe() {
 emit_result() {
     local result_status=$1 reason=$2 line result_file temporary
     result_destination_is_safe || {
-        printf 'bootart-vm: refusing lane result write after run validation failed\n' >&2
+        printf 'sart-vm: refusing lane result write after run validation failed\n' >&2
         return 1
     }
     result_file="$run_dir/lane.result"
     [[ ! -e "$result_file" && ! -L "$result_file" ]] || {
-        printf 'bootart-vm: refusing to replace an existing lane result path\n' >&2
+        printf 'sart-vm: refusing to replace an existing lane result path\n' >&2
         return 1
     }
     line="$(vm_emit_lane_status "$fixture" "$pair" "$lane" "$result_status" "$image_id" "$oracle" "$reason")"
@@ -321,12 +327,12 @@ emit_result() {
 publish_pass_result() {
     local line result_file temporary
     result_destination_is_safe || {
-        printf 'bootart-vm: refusing PASS result write after run validation failed\n' >&2
+        printf 'sart-vm: refusing PASS result write after run validation failed\n' >&2
         return 1
     }
     result_file="$run_dir/lane.result"
     [[ ! -e "$result_file" && ! -L "$result_file" ]] || {
-        printf 'bootart-vm: refusing to replace an existing lane result path\n' >&2
+        printf 'sart-vm: refusing to replace an existing lane result path\n' >&2
         return 1
     }
     line="$(vm_emit_lane_status "$fixture" "$pair" "$lane" PASS "$image_id" "$oracle" exact-serial-oracle)"
@@ -366,10 +372,10 @@ purge_secret_artifacts_and_emit_failure() {
     # must not make a detected synthetic secret into retained diagnostics.
     find "$run_dir" -xdev -mindepth 1 -type d -exec chmod u+rwx -- '{}' +
     find "$run_dir" -xdev -depth -mindepth 1 \
-        ! -path "$run_dir/.bootart-vm-run" -delete
+        ! -path "$run_dir/.sart-vm-run" -delete
     vm_validate_run "$vm_root" "$run_dir"
     remaining="$(find "$run_dir" -xdev -mindepth 1 -maxdepth 1 -printf '%f\n')"
-    [[ "$remaining" == .bootart-vm-run ]] || \
+    [[ "$remaining" == .sart-vm-run ]] || \
         vm_die 'secret-bearing run cleanup left unexpected artifacts'
 
     set +e
@@ -459,7 +465,7 @@ on_exit() {
             emit_result FAIL infrastructure-error || true
         fi
     else
-        printf 'bootart-vm: run validation failed; refusing cleanup metadata reads and result writes\n' >&2
+        printf 'sart-vm: run validation failed; refusing cleanup metadata reads and result writes\n' >&2
     fi
     exit "$exit_status"
 }
@@ -468,8 +474,11 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf 'schema=BOOTART_VM_LANE_RUN_V2\nfixture=%s\npair=%s\nlane=%s\nimage=%s\noracle=%s\ntimeout_seconds=%s\n' \
-    "$fixture" "$pair" "$lane" "$image_id" "$oracle" "$timeout_seconds" > "$run_dir/lane.meta"
+sart_digest="$(sha256sum -- "$sart_physical" | awk '{ print $1 }')"
+[[ "$sart_digest" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cannot hash adapter Sart ELF'
+printf 'schema=SART_VM_LANE_RUN_V2\nfixture=%s\npair=%s\nlane=%s\nimage=%s\noracle=%s\ntimeout_seconds=%s\nsart_sha256=%s\n' \
+    "$fixture" "$pair" "$lane" "$image_id" "$oracle" "$timeout_seconds" \
+    "$sart_digest" > "$run_dir/lane.meta"
 chmod 0600 -- "$run_dir/lane.meta"
 vm_assert_file_size_at_most "$run_dir/lane.meta" "$max_evidence_bytes" 'lane metadata'
 overlay="$run_dir/overlay.qcow2"
@@ -501,7 +510,7 @@ set +e
 timeout --signal=TERM --kill-after=10s "${timeout_seconds}s" \
     bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_log_bytes" \
     "${runner_env[@]}" "$runner_bin/bash" "$runner" prepare \
-    "$repo_root" "$vm_root" "$run_dir" "$image" "$overlay" "$bootart_physical" "$oracle" "$fixture" \
+    "$repo_root" "$vm_root" "$run_dir" "$image" "$overlay" "$sart_physical" "$oracle" "$fixture" \
     >"$prepare_log_temporary" 2>&1
 prepare_status=$?
 set -e
@@ -685,11 +694,11 @@ report_lane_progress() {
         ((elapsed += 15))
         kill -0 "$qemu_pid" 2>/dev/null || return 0
         serial_bytes="$(vm_stat_size "$serial_file" 2>/dev/null || printf unknown)"
-        printf 'bootart-vm: lane running: fixture=%s lane=%s elapsed=%ss serial-bytes=%s\n' \
+        printf 'sart-vm: lane running: fixture=%s lane=%s elapsed=%ss serial-bytes=%s\n' \
             "$fixture" "$lane" "$elapsed" "$serial_bytes" >&2
     done
 }
-printf 'bootart-vm: starting bounded guest lane: fixture=%s lane=%s timeout=%ss\n' \
+printf 'sart-vm: starting bounded guest lane: fixture=%s lane=%s timeout=%ss\n' \
     "$fixture" "$lane" "$remaining_seconds"
 report_lane_progress &
 progress_pid=$!
@@ -697,7 +706,8 @@ progress_started=1
 set +e
 if [[ "$pair" == dracut-systemd || "$pair" == initramfs-tools ||
       "$pair" == 'mkinitc''pio' ||
-      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ]]; then
+      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ||
+      "$pair" == mkinitfs-boot-deploy-systemd ]]; then
     # The exact encrypted fixtures were provisioned with the user-approved
     # test passphrase 112358. Assemble it only after all blockers so plaintext
     # is not a source literal, then expose it through an inherited anonymous
@@ -709,9 +719,9 @@ if [[ "$pair" == dracut-systemd || "$pair" == initramfs-tools ||
     exec 9< <(printf '%s\n' "$synthetic_secret")
     timeout --signal=TERM --kill-after=10s "${remaining_seconds}s" \
         bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_log_bytes" \
-        "${runner_env[@]}" BOOTART_VM_SECRET_FD=9 "$runner_bin/bash" "$runner" drive \
+        "${runner_env[@]}" SART_VM_SECRET_FD=9 "$runner_bin/bash" "$runner" drive \
         "$repo_root" "$vm_root" "$run_dir" "$image" "$overlay" \
-        "$bootart_physical" "$oracle" "$fixture" > "$qmp_temporary" 2>&1
+        "$sart_physical" "$oracle" "$fixture" > "$qmp_temporary" 2>&1
     driver_status=$?
     exec 9<&-
 else
@@ -719,7 +729,7 @@ else
         bash "$SCRIPT_DIR/run-with-file-limit.sh" "$max_log_bytes" \
         "${runner_env[@]}" "$runner_bin/bash" "$runner" drive \
         "$repo_root" "$vm_root" "$run_dir" "$image" "$overlay" \
-        "$bootart_physical" "$oracle" "$fixture" > "$qmp_temporary" 2>&1
+        "$sart_physical" "$oracle" "$fixture" > "$qmp_temporary" 2>&1
     driver_status=$?
 fi
 set -e
@@ -789,7 +799,8 @@ vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
     vm_die 'QEMU arguments changed after validated launch'
 
 if [[ "$pair" == dracut-systemd || "$pair" == initramfs-tools ||
-      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ]]; then
+      "$pair" == mkinitfs-openrc || "$pair" == mkinitfs-boot-deploy-openrc ||
+      "$pair" == mkinitfs-boot-deploy-systemd ]]; then
     # Scan every retained regular artifact, including the qcow2 overlay, with
     # the secret supplied through an anonymous fd rather than argv,
     # environment, or a regular pattern file. The helper exact-scans ordinary
@@ -829,5 +840,5 @@ if ! bash "$SCRIPT_DIR/check-adapter-oracle.sh" "$run_dir/serial.log" "$oracle";
     vm_die 'ordered exact adapter serial evidence is invalid'
 fi
 
-printf 'bootart-vm: unpromoted adapter evidence retained: %s\n' "$run_dir"
+printf 'sart-vm: unpromoted adapter evidence retained: %s\n' "$run_dir"
 publish_pass_result

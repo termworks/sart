@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == alpine-mkinitfs-openrc ]] || exit 2
@@ -20,9 +20,9 @@ fixture=$9
 case "$action" in
     prepare)
         # The signed kernel APK is checksum-locked inside the encrypted base.
-        # The read-only transfer image still carries exactly one Bootart ELF.
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        # The read-only transfer image still carries exactly one Sart ELF.
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -67,7 +67,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -89,10 +89,10 @@ EOF
         guest_sed='s''ed'
         guest_sh='s''h'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         guest_initramfs=/boot/initramfs-stable
         guest_extlinux_settings=/etc/update-extlinux.conf
-        package_cache=/var/cache/bootart-kernel-update
+        package_cache=/var/cache/sart-kernel-update
         kernel_apk=$package_cache/linux-stable-7.1.5-r0.apk
         old_kernel=6.18.40-0-virt
         new_kernel=7.1.5-0-stable
@@ -239,7 +239,7 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
             send_serial alpine
             wait_count 'Password:' "$((password_count + 1))"
@@ -249,8 +249,8 @@ EOF
         privileged_step() {
             local request=$1 marker=$2 limit=${3:-600} marker_count marker_suffix
             marker_count=$(count_log "$marker")
-            marker_suffix=${marker#BOOTART_}
-            send_serial "$request && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            marker_suffix=${marker#SART_}
+            send_serial "$request && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             wait_count_for "$marker" "$((marker_count + 1))" "$limit"
         }
         unlock_stock() {
@@ -262,37 +262,37 @@ EOF
         unlock_stock
         login_guest 1
         privileged_step "$guest_doas $guest_sh -ec 'test \"\$(uname -r)\" = $old_kernel; $guest_apk info -e linux-virt; $guest_apk info -e linux-firmware-none; test ! -e /lib/modules/$new_kernel; test -f $kernel_apk; cd $package_cache; sha256sum -c SHA256SUMS'" \
-            BOOTART_VM_MKINITFS_KERNEL_OLD_V1
-        privileged_step "$guest_doas $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_KERNEL_MOUNT_DIR_V1
-        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_KERNEL_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            BOOTART_VM_MKINITFS_KERNEL_INSTALLED_V1 1200
-        privileged_step "$guest_doas /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_MKINITFS_KERNEL_STATUS_V1
+            SART_VM_MKINITFS_KERNEL_OLD_V1
+        privileged_step "$guest_doas $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_MKINITFS_KERNEL_MOUNT_DIR_V1
+        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_MKINITFS_KERNEL_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            SART_VM_MKINITFS_KERNEL_INSTALLED_V1 1200
+        privileged_step "$guest_doas /usr/bin/sart $guest_install status" \
+            SART_VM_MKINITFS_KERNEL_STATUS_V1
 
         # A signed Alpine stable-kernel package changes both release and
         # flavor. The persistent mkinitfs feature and patched initramfs source
         # must regenerate a bootable stable image containing the same ELF.
         privileged_step "$guest_doas $guest_sh -ec '$guest_sed -i \"s/^default=virt\$/default=stable/\" $guest_extlinux_settings; grep -Fxq \"default=stable\" $guest_extlinux_settings; $guest_apk add --no-interactive --no-network --no-cache $kernel_apk'" \
-            BOOTART_VM_MKINITFS_KERNEL_PACKAGE_INSTALLED_V1 1200
+            SART_VM_MKINITFS_KERNEL_PACKAGE_INSTALLED_V1 1200
         privileged_step "$guest_doas $guest_sh -ec '$guest_apk info -e linux-stable; test -d /lib/modules/$new_kernel; test -f /boot/vmlinuz-stable; test -f $guest_initramfs; grep -Fxq \"DEFAULT menu.c32\" /boot/extlinux.conf; grep -Fxq \"LABEL stable\" /boot/extlinux.conf; $guest_sed -n \"/^LABEL stable\$/,/^\$/p\" /boot/extlinux.conf | grep -Fxq \"  MENU DEFAULT\"; $guest_sed -n \"/^LABEL stable\$/,/^\$/p\" /boot/extlinux.conf | grep -Fq \"modules=sd-mod,usb-storage,ext4,virtio,virtio_pci,virtio_blk\"'" \
-            BOOTART_VM_MKINITFS_KERNEL_GENERATED_V1
-        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/bootart-kernel-initramfs; $guest_mkdir -p /var/tmp/bootart-kernel-initramfs; cd /var/tmp/bootart-kernel-initramfs; $guest_gzip -dc $guest_initramfs | cpio -idmu >/dev/null 2>&1; cmp /mnt/bootart-transport/bootart usr/bin/bootart; grep -Fq bootart:mkinitfs-findfs-native-v1 usr/libexec/bootart/mkinitfs-findfs; grep -Fq bootart:begin\ mkinitfs-early-v1 init; test -x sbin/nlplug-findfs; test -x sbin/cryptsetup; $guest_find lib/modules/$new_kernel -type f -name \"virtio_blk.ko*\" | grep -q .; $guest_find lib/modules/$new_kernel -type f -name \"virtio_pci.ko*\" | grep -q .; $guest_find lib/modules/$new_kernel -type f -name \"virtio.ko*\" | grep -q .; cd /; $guest_remove -rf /var/tmp/bootart-kernel-initramfs'" \
-            BOOTART_VM_MKINITFS_KERNEL_IMAGE_V1
-        privileged_step "$guest_doas $guest_sh -ec '/usr/bin/bootart $guest_install status | grep -F \"/boot/extlinux.conf expected-mode=0644 expected-sha256=\" | grep -F \"state=content-modified actual-sha256=\"'" \
-            BOOTART_VM_MKINITFS_KERNEL_DRIFT_DETECTED_V1
+            SART_VM_MKINITFS_KERNEL_GENERATED_V1
+        privileged_step "$guest_doas $guest_sh -ec '$guest_remove -rf /var/tmp/sart-kernel-initramfs; $guest_mkdir -p /var/tmp/sart-kernel-initramfs; cd /var/tmp/sart-kernel-initramfs; $guest_gzip -dc $guest_initramfs | cpio -idmu >/dev/null 2>&1; cmp /mnt/sart-transport/sart usr/bin/sart; grep -Fq sart:mkinitfs-findfs-native-v1 usr/libexec/sart/mkinitfs-findfs; grep -Fq sart:begin\ mkinitfs-early-v1 init; test -x sbin/nlplug-findfs; test -x sbin/cryptsetup; $guest_find lib/modules/$new_kernel -type f -name \"virtio_blk.ko*\" | grep -q .; $guest_find lib/modules/$new_kernel -type f -name \"virtio_pci.ko*\" | grep -q .; $guest_find lib/modules/$new_kernel -type f -name \"virtio.ko*\" | grep -q .; cd /; $guest_remove -rf /var/tmp/sart-kernel-initramfs'" \
+            SART_VM_MKINITFS_KERNEL_IMAGE_V1
+        privileged_step "$guest_doas $guest_sh -ec '/usr/bin/sart $guest_install status | grep -F \"/boot/extlinux.conf expected-mode=0644 expected-sha256=\" | grep -F \"state=content-modified actual-sha256=\"'" \
+            SART_VM_MKINITFS_KERNEL_DRIFT_DETECTED_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\n%s\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_doas $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_KERNEL_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_doas $guest_umount /mnt/sart-transport" \
+            SART_VM_MKINITFS_KERNEL_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 2
 
-        login_before=$(count_log 'bootart-vm login:')
+        login_before=$(count_log 'sart-vm login:')
         syslinux_before=$(count_log SYSLINUX)
         send_serial "$guest_doas $guest_reboot"
         wait_count SYSLINUX "$((syslinux_before + 1))"
@@ -307,10 +307,10 @@ EOF
         require_password_frame
         qmp_type_secret
         login_guest "$((login_before + 1))"
-        privileged_step "$guest_doas $guest_sh -ec 'test \"\$(uname -r)\" = $new_kernel; test \"\$(findmnt -n -o SOURCE /)\" = $guest_dev/mapper/root; test ! -e $guest_transport; test -z \"\$(find /sys/class/net -mindepth 1 -maxdepth 1 ! -name lo -print -quit)\"; /usr/bin/bootart $guest_install status | grep -Fx \"installed: true\"'" \
-            BOOTART_VM_MKINITFS_KERNEL_RUNNING_V1
-        privileged_step "$guest_doas $guest_sh -ec '/usr/bin/bootart $guest_install status | grep -F \"/boot/extlinux.conf expected-mode=0644 expected-sha256=\" | grep -F \"state=content-modified actual-sha256=\"'" \
-            BOOTART_VM_MKINITFS_KERNEL_REBOOTED_V1
+        privileged_step "$guest_doas $guest_sh -ec 'test \"\$(uname -r)\" = $new_kernel; test \"\$(findmnt -n -o SOURCE /)\" = $guest_dev/mapper/root; test ! -e $guest_transport; test -z \"\$(find /sys/class/net -mindepth 1 -maxdepth 1 ! -name lo -print -quit)\"; /usr/bin/sart $guest_install status | grep -Fx \"installed: true\"'" \
+            SART_VM_MKINITFS_KERNEL_RUNNING_V1
+        privileged_step "$guest_doas $guest_sh -ec '/usr/bin/sart $guest_install status | grep -F \"/boot/extlinux.conf expected-mode=0644 expected-sha256=\" | grep -F \"state=content-modified actual-sha256=\"'" \
+            SART_VM_MKINITFS_KERNEL_REBOOTED_V1
 
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\n%s\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\n%s\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1

@@ -1,7 +1,7 @@
 # Disposable VM harness
 
 Everything below `scripts/vm/` is test infrastructure. Nothing here is
-embedded in or shipped beside the `bootart` product ELF. Generated state is
+embedded in or shipped beside the `sart` product ELF. Generated state is
 kept below `target/vm/`; the harness must never be run with `sudo`.
 
 Use the root Makefile for product-consuming lanes. Do not invoke QEMU, Cargo,
@@ -74,7 +74,7 @@ make vm-verify-fedora-44-dracut-systemd
 Fedora stock verification, like Ubuntu verification, detaches network and
 installer media, rejects a wrong passphrase, accepts `112358`, checks the real
 LUKS2/dracut/systemd/GRUB facts and offline RPM cache, and seals immutable base
-lineage before any Bootart lane may consume it.
+lineage before any Sart lane may consume it.
 
 ## Exact Ubuntu lanes
 
@@ -153,13 +153,76 @@ The common runner has separate `prepare` and `drive` phases under an enumerated
 `env -i` environment. A runner cannot choose or launch QEMU, attest a different
 argv, modify wrapper-owned result/policy records, or publish PASS itself.
 
+The systemd fixture is a real pmbootstrap-installed postmarketOS
+`qemu-aarch64` operating system. It is not a Fairphone hardware emulator. The
+sealed guest also contains the exact pinned upstream Fairphone 6 `deviceinfo`
+as test-only data, the reviewed FP6 DTB, and the real mkinitfs/boot-deploy
+tools. Every systemd proof lane attaches a fresh regular-file-backed GPT disk
+with an exact 96-MiB `boot_a` partition and boots with
+`androidboot.slot_suffix=_a`. Sart disables boot-deploy's automatic raw
+writer with its managed `/etc/deviceinfo` guard and then owns the complete
+raw-partition transaction. The install, recovery, and uninstall lanes prove
+full-partition hashes rather than only candidate files. Provisioning, stock
+verification, and proof run only through root Make targets:
+
+```sh
+make vm-provision-postmarketos-qemu-aarch64-systemd
+make vm-verify-postmarketos-qemu-aarch64-systemd
+make vm-test-install-mkinitfs-boot-deploy-systemd
+make vm-test-password-mkinitfs-boot-deploy-systemd
+make vm-test-lifecycle-mkinitfs-boot-deploy-systemd
+make vm-test-recovery-mkinitfs-boot-deploy-systemd
+make vm-test-uninstall-mkinitfs-boot-deploy-systemd
+make vm-test-kernel-update-mkinitfs-boot-deploy-systemd
+```
+
+pmbootstrap's 512-MiB minimum ESP has 497684 KiB of usable FAT capacity in the
+sealed fixture. A VM-only reserve leaves approximately 325000 KiB free so the
+fresh proof lanes exercise the dynamic mkinitfs + boot-deploy capacity checks
+under a deliberately constrained ESP. The reserve is fixture data, not a product
+resource, and never exists on the host or phone.
+
+Every `vm-test-*` target uses a fresh overlay from the sealed unpatched base.
+The synthetic guest LUKS passphrase remains `112358`; it applies only to the
+disposable QEMU disk and never to the host or phone.
+
+The kernel-update lane proves the complete package lifecycle: the persistent
+guard prevents boot-deploy from writing behind Sart's journal, the package
+hook regenerates and inspects the initramfs and Android v2 image, Sart
+durably activates the image in the selected raw slot, the guest reboots it,
+uninstall generates and durably activates a Sart-free image for the current
+kernel, and the guest reboots that clean image. Rollback and explicit recovery
+restore the full journaled raw preimage; uninstall deliberately avoids restoring
+an install-time kernel that may no longer match current root modules.
+The recovery lane separately interrupts the ordinary release ELF during raw
+refresh, proves rollback of both partition and manifest, retries, and boots.
+These QEMU fixtures prove the exact software/raw-device contract used by the
+physical installer; they do not pretend to emulate Fairphone hardware.
+
 ## GUI inspection
 
 ```sh
 make vm-run-gui
 make vm-run-gui-password
 make vm-run-gui-ubuntu-26.04-dracut-systemd
+make vm-run-gui-fedora-44-dracut-systemd
+make vm-run-gui-debian-13.6-initramfs-tools-systemd
+make vm-run-gui-arch-mkinitcpio-systemd
+make vm-run-gui-alpine-3.24.1-mkinitfs-openrc
+make vm-run-gui-postmarketos-qemu-aarch64
+make vm-run-gui-postmarketos-qemu-aarch64-systemd
 ```
+
+Installed-distro GUI targets first inspect a persistent patched template below
+`target/vm/cache/gui/<fixture>/`. A valid template is booted immediately through
+a disposable child overlay: no product/Nix build, complete matrix scan, provisioning,
+or install lane runs on that path. If the template is absent, the target reuses
+an authenticated retained install when possible; otherwise it performs the
+one-time build/install proof and publishes a standalone patched template for
+later visual boots. These visual caches never count as adapter test evidence.
+Only `vm-run-gui-*` targets read this patched-template cache. Every `vm-test-*`
+lane ignores it, creates a fresh disposable overlay from the authenticated base,
+and performs the requested Sart operation again.
 
 The first two are component previews. The Ubuntu target uses the currently
 published immutable release ELF and reuses an authenticated stopped install for
@@ -174,10 +237,19 @@ cleans that child run.
 
 GUI observation supplements but never replaces the headless oracles.
 
+The final two targets select separate postmarketOS sealed fixtures and GUI
+caches: the first proves mkinitfs + boot-deploy + OpenRC, while the `-systemd`
+target proves the real postmarketOS systemd software stack. Neither emulates
+the Fairphone boot ROM, Android boot partitions, or hardware. On the first GUI
+launch only, either target may publish a patched standalone visual cache from
+an authenticated install. Subsequent GUI launches use that fixture-specific
+cache directly; every `vm-test-*` proof lane still starts from its immutable
+unpatched base and never consumes GUI cache state.
+
 ## Generic Alpine smoke
 
 `make vm-test-lifecycle-alpine` proves only that BusyBox remains PID 1 while a
-static Bootart ELF runs as an ordinary child in the small handcrafted
+static Sart ELF runs as an ordinary child in the small handcrafted
 initramfs. It is useful for PID-1 and component smoke coverage, but it is not an
 installed distribution, exact adapter-pair, or encrypted-root support proof.
 

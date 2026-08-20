@@ -4,41 +4,41 @@ override CURDIR := $(realpath .)
 ifneq ($(filter command line override,$(origin MAKEFLAGS)),)
     $(error assigning MAKEFLAGS is forbidden because it can conceal active VM safety-bypassing flags)
 endif
-override __BOOTART_VM_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
+override __SART_VM_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))
 ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)
     $(error --ignore-errors/-i is forbidden because it can bypass VM safety gates)
 endif
-ifeq ($(filter --%,$(__BOOTART_VM_MAKE_SHORT_FLAGS)),)
-ifneq ($(findstring i,$(__BOOTART_VM_MAKE_SHORT_FLAGS)),)
+ifeq ($(filter --%,$(__SART_VM_MAKE_SHORT_FLAGS)),)
+ifneq ($(findstring i,$(__SART_VM_MAKE_SHORT_FLAGS)),)
     $(error --ignore-errors/-i is forbidden because it can bypass VM safety gates)
 endif
 endif
 
-override __BOOTART_VM_IMAGE_ID_ORIGIN := $(origin IMAGE_ID)
-override __BOOTART_VM_IMAGE_ID_RAW := $(value IMAGE_ID)
-override __BOOTART_VM_BOOTART_BIN_ORIGIN := $(origin BOOTART_BIN)
-override __BOOTART_VM_BOOTART_BIN_RAW := $(value BOOTART_BIN)
-override __BOOTART_VM_QEMU_ORIGIN := $(origin QEMU)
-override __BOOTART_VM_QEMU_RAW := $(value QEMU)
-override __BOOTART_VM_QEMU_IMG_ORIGIN := $(origin QEMU_IMG)
-override __BOOTART_VM_QEMU_IMG_RAW := $(value QEMU_IMG)
-override __BOOTART_VM_TIMEOUT_SECONDS_ORIGIN := $(origin TIMEOUT_SECONDS)
-override __BOOTART_VM_TIMEOUT_SECONDS_RAW := $(value TIMEOUT_SECONDS)
-override __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_HOST_TIMEOUT_SECONDS)
-override __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
-override __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin ADAPTER_HOST_TIMEOUT_SECONDS)
-override __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW := $(value ADAPTER_HOST_TIMEOUT_SECONDS)
-override __BOOTART_VM_ARGS_FILE_RAW := $(value ARGS_FILE)
-override __BOOTART_VM_RUN_DIR_RAW := $(value RUN_DIR)
-override __BOOTART_VM_BASE_IMAGE_RAW := $(value BASE_IMAGE)
-override __BOOTART_VM_OVERLAY_RAW := $(value OVERLAY)
+override __SART_VM_IMAGE_ID_ORIGIN := $(origin IMAGE_ID)
+override __SART_VM_IMAGE_ID_RAW := $(value IMAGE_ID)
+override __SART_VM_SART_BIN_ORIGIN := $(origin SART_BIN)
+override __SART_VM_SART_BIN_RAW := $(value SART_BIN)
+override __SART_VM_QEMU_ORIGIN := $(origin QEMU)
+override __SART_VM_QEMU_RAW := $(value QEMU)
+override __SART_VM_QEMU_IMG_ORIGIN := $(origin QEMU_IMG)
+override __SART_VM_QEMU_IMG_RAW := $(value QEMU_IMG)
+override __SART_VM_TIMEOUT_SECONDS_ORIGIN := $(origin TIMEOUT_SECONDS)
+override __SART_VM_TIMEOUT_SECONDS_RAW := $(value TIMEOUT_SECONDS)
+override __SART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __SART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW := $(value LIFECYCLE_HOST_TIMEOUT_SECONDS)
+override __SART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN := $(origin ADAPTER_HOST_TIMEOUT_SECONDS)
+override __SART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW := $(value ADAPTER_HOST_TIMEOUT_SECONDS)
+override __SART_VM_ARGS_FILE_RAW := $(value ARGS_FILE)
+override __SART_VM_RUN_DIR_RAW := $(value RUN_DIR)
+override __SART_VM_BASE_IMAGE_RAW := $(value BASE_IMAGE)
+override __SART_VM_OVERLAY_RAW := $(value OVERLAY)
 
-unexport IMAGE_ID BOOTART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS
+unexport IMAGE_ID SART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS
 unexport LIFECYCLE_HOST_TIMEOUT_SECONDS ADAPTER_HOST_TIMEOUT_SECONDS
 unexport ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 
 # This Makefile drives disposable test infrastructure only. Nothing under scripts/vm/
-# is part of the bootart release payload.
+# is part of the sart release payload.
 override REPO_ROOT := $(realpath ../..)
 override VM_ROOT := $(REPO_ROOT)/target/vm
 override VM_SOURCE_ROOT := $(REPO_ROOT)/scripts/vm
@@ -49,48 +49,48 @@ override MATRIX_FILE := $(VM_SOURCE_ROOT)/adapter-matrix.lock
 ifneq ($(CURDIR),$(VM_SOURCE_ROOT))
     $(error scripts/vm/Makefile must be invoked with make -C scripts/vm)
 endif
-ifeq ($(__BOOTART_VM_IMAGE_ID_ORIGIN),undefined)
+ifeq ($(__SART_VM_IMAGE_ID_ORIGIN),undefined)
     override IMAGE_ID := alpine-virt-3.20.0-x86_64
 else
-    override IMAGE_ID := $(value __BOOTART_VM_IMAGE_ID_RAW)
+    override IMAGE_ID := $(value __SART_VM_IMAGE_ID_RAW)
 endif
-ifeq ($(__BOOTART_VM_BOOTART_BIN_ORIGIN),undefined)
-    override BOOTART_BIN := $(REPO_ROOT)/target/artifacts/current/release/bootart
+ifeq ($(__SART_VM_SART_BIN_ORIGIN),undefined)
+    override SART_BIN := $(REPO_ROOT)/target/artifacts/current/release/sart
 else
-    override BOOTART_BIN := $(value __BOOTART_VM_BOOTART_BIN_RAW)
+    override SART_BIN := $(value __SART_VM_SART_BIN_RAW)
 endif
-ifeq ($(__BOOTART_VM_QEMU_ORIGIN),undefined)
+ifeq ($(__SART_VM_QEMU_ORIGIN),undefined)
     override QEMU := qemu-system-x86_64
 else
-    override QEMU := $(value __BOOTART_VM_QEMU_RAW)
+    override QEMU := $(value __SART_VM_QEMU_RAW)
 endif
-ifeq ($(__BOOTART_VM_QEMU_IMG_ORIGIN),undefined)
+ifeq ($(__SART_VM_QEMU_IMG_ORIGIN),undefined)
     override QEMU_IMG := qemu-img
 else
-    override QEMU_IMG := $(value __BOOTART_VM_QEMU_IMG_RAW)
+    override QEMU_IMG := $(value __SART_VM_QEMU_IMG_RAW)
 endif
-ifeq ($(__BOOTART_VM_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_VM_TIMEOUT_SECONDS_ORIGIN),undefined)
     override TIMEOUT_SECONDS := 90
 else
-    override TIMEOUT_SECONDS := $(value __BOOTART_VM_TIMEOUT_SECONDS_RAW)
+    override TIMEOUT_SECONDS := $(value __SART_VM_TIMEOUT_SECONDS_RAW)
 endif
-ifeq ($(__BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
     override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180
 else
-    override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
+    override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __SART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)
 endif
-ifeq ($(__BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
+ifeq ($(__SART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_ORIGIN),undefined)
     # Preserve the matrix's full guest deadline after bounded image checks.
     override ADAPTER_HOST_TIMEOUT_SECONDS := 5100
 else
-    override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
+    override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __SART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)
 endif
-override ARGS_FILE := $(value __BOOTART_VM_ARGS_FILE_RAW)
-override RUN_DIR := $(value __BOOTART_VM_RUN_DIR_RAW)
-override BASE_IMAGE := $(value __BOOTART_VM_BASE_IMAGE_RAW)
-override OVERLAY := $(value __BOOTART_VM_OVERLAY_RAW)
+override ARGS_FILE := $(value __SART_VM_ARGS_FILE_RAW)
+override RUN_DIR := $(value __SART_VM_RUN_DIR_RAW)
+override BASE_IMAGE := $(value __SART_VM_BASE_IMAGE_RAW)
+override OVERLAY := $(value __SART_VM_OVERLAY_RAW)
 
-override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc
+override ADAPTER_PAIRS := dracut-systemd dracut-classic initramfs-tools mkinitc$()pio mkinitfs-openrc mkinitfs-boot-deploy-openrc mkinitfs-boot-deploy-systemd
 override ADAPTER_LIFECYCLE_TARGETS := $(addprefix vm-test-lifecycle-,$(ADAPTER_PAIRS))
 override ADAPTER_INSTALL_TARGETS := $(addprefix vm-test-install-,$(ADAPTER_PAIRS))
 override ADAPTER_PASSWORD_TARGETS := $(addprefix vm-test-password-,$(ADAPTER_PAIRS))
@@ -101,25 +101,26 @@ override ADAPTER_TEST_TARGETS := $(ADAPTER_LIFECYCLE_TARGETS) $(ADAPTER_INSTALL_
 
 # Documented configurable values are exported as data and expanded only by the shell.
 # Structural paths and target lists above reject Make CLI/environment changes.
-export IMAGE_ID BOOTART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
+export IMAGE_ID SART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
 export ADAPTER_HOST_TIMEOUT_SECONDS ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 export REPO_ROOT VM_ROOT VM_SOURCE_ROOT LOCK_FILE KERNEL_PACKAGE_LOCK POSTMARKETOS_SOURCE_LOCK MATRIX_FILE
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
-.PHONY: help vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd \
+.PHONY: help vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd \
 	vm-test-lifecycle-alpine vm-validate-lifecycle-timeouts vm-validate-adapter-timeout vm-test-adapters \
 	$(ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd \
 	vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd \
 	vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd \
 	vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd \
-	vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-clean
+	vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-run-gui-postmarketos-qemu-aarch64-systemd vm-clean
 .PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
+.PHONY: vm-run-gui-fedora-44-dracut-systemd vm-run-gui-debian-13.6-initramfs-tools-systemd vm-run-gui-arch-mkinitc$()pio-systemd vm-run-gui-alpine-3.24.1-mkinitfs-openrc
 
 help:
 	@printf '%s\n' \
-		'Disposable bootart VM test infrastructure (never installed or shipped)' \
+		'Disposable sart VM test infrastructure (never installed or shipped)' \
 		'' \
 		'  make -C scripts/vm vm-script-check          syntax-check host and guest shell data' \
 		'  make -C scripts/vm vm-policy-fixtures       inert argv/runner rejection fixtures' \
@@ -181,6 +182,8 @@ help:
 		'  root only: make vm-run-gui                  finite splash then visible guest handoff' \
 		'  root only: make vm-run-gui-password         interactive disposable encrypted qcow2' \
 		'  root only: make vm-run-gui-ubuntu-26.04-dracut-systemd' \
+		'  root only: make vm-run-gui-postmarketos-qemu-aarch64' \
+		'  root only: make vm-run-gui-postmarketos-qemu-aarch64-systemd' \
 		'                                      show real boot; reuse matching proven install' \
 		'          product lanes require the root artifact-lock wrapper when ready' \
 		'  make -C scripts/vm vm-clean                 remove validated owned run dirs only' \
@@ -230,11 +233,11 @@ vm-script-check: vm-policy-fixtures vm-runner-policy-check vm-timeout-containmen
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
 	@bash "$${VM_SOURCE_ROOT}/scripts/check-blocked-lanes.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
-	@printf '%s\n' 'bootart-vm: script syntax PASS'
+	@printf '%s\n' 'sart-vm: script syntax PASS'
 
 # Uses private /tmp fixtures and inert fake executables. It exercises both
 # QEMU argv checkers plus the common adapter launch ordering without creating
-# target/vm, resolving bootart, or launching QEMU.
+# target/vm, resolving sart, or launching QEMU.
 vm-policy-fixtures:
 	@bash "$${VM_SOURCE_ROOT}/scripts/check-policy-fixtures.sh" "$${REPO_ROOT}"
 	@bash "$${VM_SOURCE_ROOT}/scripts/check-runner-policy-fixtures.sh" "$${REPO_ROOT}"
@@ -245,7 +248,7 @@ vm-runner-policy-check:
 	@bash "$${VM_SOURCE_ROOT}/scripts/check-runner-policy.sh" "$${REPO_ROOT}"
 
 # Pure shell/sleep fixture proving outer deadlines kill the complete child
-# process group. It never resolves or launches Bootart, a runner, QEMU, or VM.
+# process group. It never resolves or launches Sart, a runner, QEMU, or VM.
 vm-timeout-containment-check:
 	@bash "$${VM_SOURCE_ROOT}/scripts/check-timeout-containment.sh" "$${REPO_ROOT}"
 
@@ -409,7 +412,7 @@ vm-verify-alpine-3.24.1-mkinitfs-openrc: vm-preflight vm-state-init vm-provision
 
 vm-reset-postmarketos-qemu-aarch64: vm-state-init
 	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-postmarketos-qemu-aarch64.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" postmarketos-qemu-aarch64
 
 vm-provision-postmarketos-qemu-aarch64: vm-preflight vm-state-init vm-image-alpine-3.24.1 vm-review-postmarketos-sources
 	@timeout --signal=TERM --kill-after=20s 14500s \
@@ -422,7 +425,26 @@ vm-provision-postmarketos-qemu-aarch64: vm-preflight vm-state-init vm-image-alpi
 vm-verify-postmarketos-qemu-aarch64: vm-preflight vm-state-init vm-provision-postmarketos-qemu-aarch64
 	@timeout --signal=TERM --kill-after=15s 3740s \
 		bash "$${VM_SOURCE_ROOT}/scripts/verify-postmarketos-qemu-aarch64-base.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${QEMU}" "$${QEMU_IMG}" 1800 1800
+		"$${REPO_ROOT}" "$${VM_ROOT}" postmarketos-qemu-aarch64 openrc \
+		"$${QEMU}" "$${QEMU_IMG}" 1800 1800
+
+vm-reset-postmarketos-qemu-aarch64-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/reset-provisioned-postmarketos-qemu-aarch64.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" postmarketos-qemu-aarch64-systemd
+
+vm-provision-postmarketos-qemu-aarch64-systemd: vm-preflight vm-state-init vm-image-alpine-3.24.1 vm-review-postmarketos-sources
+	@timeout --signal=TERM --kill-after=20s 14500s \
+		bash "$${VM_SOURCE_ROOT}/scripts/provision-postmarketos-qemu-aarch64.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${POSTMARKETOS_SOURCE_LOCK}" \
+		alpine-generic-3.24.1-x86_64-bios-cloudinit-r0 \
+		postmarketos-qemu-aarch64-systemd-derived \
+		"$${QEMU}" "$${QEMU_IMG}" 14400
+
+vm-verify-postmarketos-qemu-aarch64-systemd: vm-preflight vm-state-init vm-provision-postmarketos-qemu-aarch64-systemd
+	@timeout --signal=TERM --kill-after=15s 3740s \
+		bash "$${VM_SOURCE_ROOT}/scripts/verify-postmarketos-qemu-aarch64-base.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" postmarketos-qemu-aarch64-systemd systemd \
+		"$${QEMU}" "$${QEMU_IMG}" 1800 1800
 
 # This target never downloads. The exact locked image must already be cached.
 vm-validate-lifecycle-timeouts:
@@ -439,7 +461,7 @@ vm-validate-lifecycle-timeouts:
 vm-test-lifecycle-alpine: vm-preflight vm-state-init vm-validate-lifecycle-timeouts
 	@timeout --signal=TERM --kill-after=10s \
 		"$${LIFECYCLE_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-lifecycle.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${IMAGE_ID}" "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${IMAGE_ID}" "$${SART_BIN}"
 
 vm-validate-adapter-timeout:
 	@case "$${ADAPTER_HOST_TIMEOUT_SECONDS}" in ''|*[!0-9]*) \
@@ -451,34 +473,73 @@ vm-validate-adapter-timeout:
 # retaining a single deny-by-default runner contract. The outer timeout bounds
 # the entire host entry point; the matrix also fixes the inner guest deadline.
 $(ADAPTER_LIFECYCLE_TARGETS): vm-test-lifecycle-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' lifecycle "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' lifecycle "$${SART_BIN}"
 
 $(ADAPTER_INSTALL_TARGETS): vm-test-install-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' install "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' install "$${SART_BIN}"
 
 $(ADAPTER_PASSWORD_TARGETS): vm-test-password-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' password "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' password "$${SART_BIN}"
 
 $(ADAPTER_RECOVERY_TARGETS): vm-test-recovery-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' recovery "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' recovery "$${SART_BIN}"
 
 $(ADAPTER_UNINSTALL_TARGETS): vm-test-uninstall-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' uninstall "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' uninstall "$${SART_BIN}"
 
 $(ADAPTER_KERNEL_UPDATE_TARGETS): vm-test-kernel-update-%: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' kernel-update "$${BOOTART_BIN}"
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' kernel-update "$${SART_BIN}"
+
+# A proof target must be runnable from a clean checkout.  Bind every concrete
+# adapter family to its stock-boot verifier so a missing base is provisioned
+# and authenticated instead of failing later with an opaque `.verified` error.
+vm-test-lifecycle-dracut-systemd vm-test-install-dracut-systemd \
+vm-test-password-dracut-systemd vm-test-recovery-dracut-systemd \
+vm-test-uninstall-dracut-systemd vm-test-kernel-update-dracut-systemd: \
+	vm-verify-ubuntu-26.04-dracut-systemd
+
+vm-test-lifecycle-initramfs-tools vm-test-install-initramfs-tools \
+vm-test-password-initramfs-tools vm-test-recovery-initramfs-tools \
+vm-test-uninstall-initramfs-tools vm-test-kernel-update-initramfs-tools: \
+	vm-verify-debian-13.6-initramfs-tools-systemd
+
+vm-test-lifecycle-mkinitc$()pio vm-test-install-mkinitc$()pio \
+vm-test-password-mkinitc$()pio vm-test-recovery-mkinitc$()pio \
+vm-test-uninstall-mkinitc$()pio vm-test-kernel-update-mkinitc$()pio: \
+	vm-verify-arch-mkinitc$()pio-systemd
+
+vm-test-lifecycle-mkinitfs-openrc vm-test-install-mkinitfs-openrc \
+vm-test-password-mkinitfs-openrc vm-test-recovery-mkinitfs-openrc \
+vm-test-uninstall-mkinitfs-openrc vm-test-kernel-update-mkinitfs-openrc: \
+	vm-verify-alpine-3.24.1-mkinitfs-openrc
+
+vm-test-lifecycle-mkinitfs-boot-deploy-openrc \
+vm-test-install-mkinitfs-boot-deploy-openrc \
+vm-test-password-mkinitfs-boot-deploy-openrc \
+vm-test-recovery-mkinitfs-boot-deploy-openrc \
+vm-test-uninstall-mkinitfs-boot-deploy-openrc \
+vm-test-kernel-update-mkinitfs-boot-deploy-openrc: \
+	vm-verify-postmarketos-qemu-aarch64
+
+vm-test-lifecycle-mkinitfs-boot-deploy-systemd \
+vm-test-install-mkinitfs-boot-deploy-systemd \
+vm-test-password-mkinitfs-boot-deploy-systemd \
+vm-test-recovery-mkinitfs-boot-deploy-systemd \
+vm-test-uninstall-mkinitfs-boot-deploy-systemd \
+vm-test-kernel-update-mkinitfs-boot-deploy-systemd: \
+	vm-verify-postmarketos-qemu-aarch64-systemd
 
 vm-test-debian-13.6-initramfs-tools-systemd: \
 	vm-test-install-initramfs-tools \
@@ -513,40 +574,40 @@ vm-test-ubuntu-26.04-dracut-systemd: \
 	vm-test-kernel-update-dracut-systemd
 
 vm-test-install-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd install "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd install "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-lifecycle-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd lifecycle "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd lifecycle "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-password-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd password "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd password "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-recovery-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd recovery "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd recovery "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-uninstall-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd uninstall "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd uninstall "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-kernel-update-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
-	@BOOTART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
+	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		dracut-systemd kernel-update "$${BOOTART_BIN}" fedora-44-dracut-systemd
+		dracut-systemd kernel-update "$${SART_BIN}" fedora-44-dracut-systemd
 
 vm-test-fedora-44-dracut-systemd: \
 	vm-test-install-fedora-44-dracut-systemd \
@@ -565,19 +626,49 @@ vm-run-gui: vm-preflight vm-state-init
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" alpine-virt-3.20.0-x86_64
 	@bash "$${VM_SOURCE_ROOT}/scripts/run-gui.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
-		alpine-virt-3.20.0-x86_64 "$${BOOTART_BIN}" "$${QEMU}"
+		alpine-virt-3.20.0-x86_64 "$${SART_BIN}" "$${QEMU}"
 
 vm-run-gui-password: vm-preflight vm-state-init
 	@IMAGE_ID=alpine-virt-3.20.0-x86_64 bash "$${VM_SOURCE_ROOT}/scripts/fetch-image.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" alpine-virt-3.20.0-x86_64
 	@bash "$${VM_SOURCE_ROOT}/scripts/run-gui-password.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" \
-		alpine-virt-3.20.0-x86_64 "$${BOOTART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+		alpine-virt-3.20.0-x86_64 "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
 
-vm-run-gui-ubuntu-26.04-dracut-systemd: vm-preflight vm-state-init vm-validate-adapter-timeout
-	@bash "$${VM_SOURCE_ROOT}/scripts/run-ubuntu-gui.sh" \
+vm-run-gui-ubuntu-26.04-dracut-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-x86-installed-gui.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
-		"$${BOOTART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+		ubuntu-26.04-dracut-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-fedora-44-dracut-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-x86-installed-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		fedora-44-dracut-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-debian-13.6-initramfs-tools-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-x86-installed-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		debian-13.6-initramfs-tools-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-arch-mkinitc$()pio-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-x86-installed-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		arch-mkinitc$()pio-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-alpine-3.24.1-mkinitfs-openrc: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-x86-installed-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		alpine-mkinitfs-openrc "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-postmarketos-qemu-aarch64: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-postmarketos-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		postmarketos-qemu-aarch64 "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
+
+vm-run-gui-postmarketos-qemu-aarch64-systemd: vm-state-init
+	@bash "$${VM_SOURCE_ROOT}/scripts/run-postmarketos-gui.sh" \
+		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
+		postmarketos-qemu-aarch64-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
 
 # Developer-facing checker for a generated one-argument-per-line QEMU command.
 # Example: make -C scripts/vm vm-policy-check ARGS_FILE=... RUN_DIR=...

@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == ubuntu-26.04-dracut-systemd || "$fixture" == fedora-44-dracut-systemd ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -84,14 +84,14 @@ EOF
         guest_systemctl='system''ctl'
         guest_journalctl='journal''ctl'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         case "$fixture" in
             ubuntu-26.04-dracut-systemd)
                 privileged_prompt="[$guest_sudo: authenticate] Password:"
                 stock_unlock_prompt='Please enter passphrase for disk crypt-root:'
                 ;;
             fedora-44-dracut-systemd)
-                privileged_prompt="[$guest_sudo] password for bootart:"
+                privileged_prompt="[$guest_sudo] password for sart:"
                 stock_unlock_prompt='Please enter passphrase for disk'
                 ;;
         esac
@@ -186,7 +186,7 @@ EOF
                 END { exit !(total > 0 && zero * 100 >= total * 65) }
             '
         }
-        require_bootart_layout() {
+        require_sart_layout() {
             local image=$1
             [[ "$(sed -n '1p' -- "$image")" == P6 ]]
             [[ "$(sed -n '2p' -- "$image")" == '1280 800' ]]
@@ -194,7 +194,7 @@ EOF
             [[ "$(stat -c '%s' -- "$image")" == 3072016 ]]
 
             # A stock systemd console is also mostly black and changes while
-            # jobs progress.  Reject it by requiring the dedicated Bootart VT
+            # jobs progress.  Reject it by requiring the dedicated Sart VT
             # layout: empty upper/left margins and visible centered artwork.
             # The exact PPM header above is 16 bytes; the remaining bytes are
             # 1280x800 RGB pixels.
@@ -229,10 +229,10 @@ EOF
                 }
             '
         }
-        require_bootart_layout_any() {
+        require_sart_layout_any() {
             local image
             for image in "$@"; do
-                if require_bootart_layout "$image"; then
+                if require_sart_layout "$image"; then
                     return 0
                 fi
             done
@@ -268,14 +268,14 @@ EOF
                 }
             '
         }
-        wait_bootart_password_screendump() {
+        wait_sart_password_screendump() {
             local name=$1 limit=$2 elapsed=0 refresh=no image
             image="$run_dir/$name"
             while (( elapsed < limit )); do
                 qmp_screendump "$name" "$refresh"
                 refresh=yes
                 if require_black_background "$image" &&
-                    require_bootart_layout "$image" &&
+                    require_sart_layout "$image" &&
                     require_password_box "$image"; then
                     return 0
                 fi
@@ -292,16 +292,16 @@ EOF
         require_same_daemon_lifecycle() {
             local events pid_count pid event
             events=$(
-                { grep -a -F 'BOOTART_LIFECYCLE_V1|event=' "$run_dir/serial.log" || true; }
+                { grep -a -F 'SART_LIFECYCLE_V1|event=' "$run_dir/serial.log" || true; }
             )
             [[ -n "$events" ]]
             ! grep -a -F -q -- 'Daemon error:' "$run_dir/serial.log"
-            pid_count=$(sed -n 's/.*BOOTART_LIFECYCLE_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$events" | sort -u | wc -l)
+            pid_count=$(sed -n 's/.*SART_LIFECYCLE_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$events" | sort -u | wc -l)
             [[ "$pid_count" == 1 ]]
-            pid=$(sed -n 's/.*BOOTART_LIFECYCLE_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$events" | sed -n '1p')
+            pid=$(sed -n 's/.*SART_LIFECYCLE_V1|event=[^|]*|pid=\([0-9][0-9]*\).*/\1/p' <<< "$events" | sed -n '1p')
             [[ "$pid" =~ ^[1-9][0-9]*$ ]]
             for event in daemon-enter display-acquired root-handoff display-restored daemon-exit; do
-                grep -F -q -- "BOOTART_LIFECYCLE_V1|event=$event|pid=$pid" <<< "$events"
+                grep -F -q -- "SART_LIFECYCLE_V1|event=$event|pid=$pid" <<< "$events"
             done
         }
         unlock_root() {
@@ -313,9 +313,9 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
-            send_serial bootart
+            send_serial sart
             wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu
             sleep 2
@@ -324,9 +324,9 @@ EOF
             local request=$1 marker=$2 prompt_count marker_count marker_suffix
             prompt_count=$(count_log "$privileged_prompt")
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                marker_suffix=${marker#BOOTART_}
-                request+=" && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                marker_suffix=${marker#SART_}
+                request+=" && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"
             wait_count "$privileged_prompt" "$((prompt_count + 1))"
@@ -336,41 +336,41 @@ EOF
 
         unlock_root 1
         login_guest 1
-        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_LIFECYCLE_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_LIFECYCLE_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_sudo -k /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed'
+        privileged_step "$guest_sudo -k $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_LIFECYCLE_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -k $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_LIFECYCLE_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -k /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed'
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -k $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_LIFECYCLE_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -k $guest_umount /mnt/sart-transport" \
+            SART_VM_LIFECYCLE_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 3
 
         initrd_count=$(count_log 'Running in initrd.')
-        login_count=$(count_log 'bootart-vm login:')
+        login_count=$(count_log 'sart-vm login:')
         prompt_count=$(count_log "$privileged_prompt")
         send_serial "$guest_sudo -k $guest_reboot"
         wait_count "$privileged_prompt" "$((prompt_count + 1))"
         send_serial ubuntu
 
-        # A healthy Bootart daemon suppresses the stock serial password agent.
+        # A healthy Sart daemon suppresses the stock serial password agent.
         # Anchor the installed boot on systemd's initramfs identity; the QMP
-        # screenshots below then prove that Bootart owns the visible prompt.
+        # screenshots below then prove that Sart owns the visible prompt.
         wait_count 'Running in initrd.' "$((initrd_count + 1))"
         visual_before_failed=0
         visual_after_failed=0
-        wait_bootart_password_screendump lifecycle-before-1.ppm 60
+        wait_sart_password_screendump lifecycle-before-1.ppm 60
         sleep 1
         qmp_screendump lifecycle-before-2.ppm
         sleep 1
         qmp_screendump lifecycle-before-3.ppm
         require_black_background "$run_dir/lifecycle-before-1.ppm" || visual_before_failed=1
-        require_bootart_layout_any "$run_dir/lifecycle-before-1.ppm" "$run_dir/lifecycle-before-2.ppm" "$run_dir/lifecycle-before-3.ppm" || visual_before_failed=1
+        require_sart_layout_any "$run_dir/lifecycle-before-1.ppm" "$run_dir/lifecycle-before-2.ppm" "$run_dir/lifecycle-before-3.ppm" || visual_before_failed=1
         require_distinct_frames "$run_dir/lifecycle-before-1.ppm" "$run_dir/lifecycle-before-2.ppm" "$run_dir/lifecycle-before-3.ppm" || visual_before_failed=1
 
         sleep 7
@@ -383,14 +383,14 @@ EOF
         sleep 1
         qmp_screendump lifecycle-after-3.ppm
         require_black_background "$run_dir/lifecycle-after-1.ppm" || visual_after_failed=1
-        require_bootart_layout_any "$run_dir/lifecycle-after-1.ppm" "$run_dir/lifecycle-after-2.ppm" "$run_dir/lifecycle-after-3.ppm" || visual_after_failed=1
+        require_sart_layout_any "$run_dir/lifecycle-after-1.ppm" "$run_dir/lifecycle-after-2.ppm" "$run_dir/lifecycle-after-3.ppm" || visual_after_failed=1
         require_distinct_frames "$run_dir/lifecycle-after-1.ppm" "$run_dir/lifecycle-after-2.ppm" "$run_dir/lifecycle-after-3.ppm" || visual_after_failed=1
 
         login_guest "$((login_count + 1))"
-        privileged_step "$guest_sudo -k $guest_sh -c 'test \"\$(cat /proc/1/comm)\" = systemd && test \"\$(cat /sys/class/tty/tty0/active)\" = tty1 && ! pgrep -x bootart && /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_LIFECYCLE_HANDOFF_VERIFIED_V1
-        privileged_step "$guest_sudo -k $guest_sh -c '/usr/bin/$guest_systemctl --no-pager --full status bootart-start.service bootart-show.service bootart-switch-root.service bootart-quit.service || true; /usr/bin/$guest_journalctl -b --no-pager -o short-monotonic -u bootart-start.service -u bootart-show.service -u bootart-switch-root.service -u bootart-quit.service || true'" \
-            BOOTART_VM_LIFECYCLE_DIAGNOSTICS_CAPTURED_V1
+        privileged_step "$guest_sudo -k $guest_sh -c 'test \"\$(cat /proc/1/comm)\" = systemd && test \"\$(cat /sys/class/tty/tty0/active)\" = tty1 && ! pgrep -x sart && /usr/bin/sart $guest_install status'" \
+            SART_VM_LIFECYCLE_HANDOFF_VERIFIED_V1
+        privileged_step "$guest_sudo -k $guest_sh -c '/usr/bin/$guest_systemctl --no-pager --full status sart-start.service sart-show.service sart-switch-root.service sart-quit.service || true; /usr/bin/$guest_journalctl -b --no-pager -o short-monotonic -u sart-start.service -u sart-show.service -u sart-switch-root.service -u sart-quit.service || true'" \
+            SART_VM_LIFECYCLE_DIAGNOSTICS_CAPTURED_V1
         require_same_daemon_lifecycle
         qmp_screendump lifecycle-login-1.ppm
         sleep 5

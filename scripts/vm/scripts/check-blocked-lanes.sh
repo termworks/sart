@@ -16,12 +16,12 @@ matrix_file=$4
 vm_check_layout "$repo_root" "$vm_root"
 vm_validate_matrix "$matrix_file" "$lock_file"
 
-proof="$(mktemp -d "${TMPDIR:-/tmp}/bootart-blocked-proof.XXXXXXXXXX")" ||
+proof="$(mktemp -d "${TMPDIR:-/tmp}/sart-blocked-proof.XXXXXXXXXX")" ||
     vm_die 'cannot allocate blocked-lane proof directory'
 chmod 0700 -- "$proof"
 cleanup() {
     trap - EXIT HUP INT TERM
-    if [[ "$proof" == "${TMPDIR:-/tmp}"/bootart-blocked-proof.* && -d "$proof" && ! -L "$proof" ]]; then
+    if [[ "$proof" == "${TMPDIR:-/tmp}"/sart-blocked-proof.* && -d "$proof" && ! -L "$proof" ]]; then
         rm -rf -- "$proof"
     fi
 }
@@ -33,22 +33,22 @@ trap 'exit 143' TERM
 product_marker=$proof/product.invoked
 qemu_marker=$proof/qemu.invoked
 qemu_img_marker=$proof/qemu-img.invoked
-product_shim=$proof/bootart-marker
+product_shim=$proof/sart-marker
 qemu_shim=$proof/qemu-marker
 qemu_img_shim=$proof/qemu-img-marker
 cat > "$product_shim" <<'EOF'
 #!/bin/sh
-: > "$BOOTART_BLOCKED_PRODUCT_MARKER"
+: > "$SART_BLOCKED_PRODUCT_MARKER"
 exit 97
 EOF
 cat > "$qemu_shim" <<'EOF'
 #!/bin/sh
-: > "$BOOTART_BLOCKED_QEMU_MARKER"
+: > "$SART_BLOCKED_QEMU_MARKER"
 exit 97
 EOF
 cat > "$qemu_img_shim" <<'EOF'
 #!/bin/sh
-: > "$BOOTART_BLOCKED_QEMU_IMG_MARKER"
+: > "$SART_BLOCKED_QEMU_IMG_MARKER"
 exit 97
 EOF
 chmod 0500 -- "$product_shim" "$qemu_shim" "$qemu_img_shim"
@@ -110,10 +110,10 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     esac
     blocked_rows=$((blocked_rows + 1))
     set +e
-    output="$(BOOTART_VM_MAKE_ENTRY=1 \
-        BOOTART_BLOCKED_PRODUCT_MARKER="$product_marker" \
-        BOOTART_BLOCKED_QEMU_MARKER="$qemu_marker" \
-        BOOTART_BLOCKED_QEMU_IMG_MARKER="$qemu_img_marker" \
+    output="$(SART_VM_MAKE_ENTRY=1 \
+        SART_BLOCKED_PRODUCT_MARKER="$product_marker" \
+        SART_BLOCKED_QEMU_MARKER="$qemu_marker" \
+        SART_BLOCKED_QEMU_IMG_MARKER="$qemu_img_marker" \
         QEMU="$qemu_shim" QEMU_IMG="$qemu_img_shim" \
         bash "$SCRIPT_DIR/run-adapter-lane.sh" \
         "$repo_root" "$vm_root" "$lock_file" "$matrix_file" "$pair" "$lane" \
@@ -135,5 +135,5 @@ for marker in "$product_marker" "$qemu_marker" "$qemu_img_marker"; do
 done
 [[ $checked -eq $blocked_rows ]] ||
     vm_die "expected $blocked_rows blocked adapter lanes, checked $checked"
-printf 'bootart-vm: blocked rejection policy PASS (%s lanes: %s BLOCKED_UNVERIFIED, %s BLOCKED_UNIMPLEMENTED); marker product/QEMU/QEMU_IMG executables not invoked; bounded VM-state manifest unchanged\n' \
+printf 'sart-vm: blocked rejection policy PASS (%s lanes: %s BLOCKED_UNVERIFIED, %s BLOCKED_UNIMPLEMENTED); marker product/QEMU/QEMU_IMG executables not invoked; bounded VM-state manifest unchanged\n' \
     "$checked" "$unverified_rows" "$unimplemented_rows"

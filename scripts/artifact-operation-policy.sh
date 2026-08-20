@@ -7,7 +7,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact-operations: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact-operations: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -169,13 +169,13 @@ require_ready_script_lock() {
 
 require_ready_script_lock run-adapter-lane.sh \
     'vm_require_ready_matrix_runner "$repo_root" "$pair" "$lane" \' \
-    'bootart_physical="$(readlink -f -- "$bootart_bin")" || vm_die '\''cannot resolve static bootart input'\'''
+    'sart_physical="$(readlink -f -- "$sart_bin")" || vm_die '\''cannot resolve static sart input'\'''
 require_ready_script_lock run-lifecycle.sh \
     '[[ "$status" == verified ]] || vm_die \' \
     'image="$vm_root/cache/images/$filename"'
 require_ready_script_lock prepare-smoke.sh \
     'vm_validate_run "$vm_root" "$run_dir"' \
-    'bootart_physical="$(readlink -f -- "$bootart_bin")" || \'
+    'sart_physical="$(readlink -f -- "$sart_bin")" || \'
 for locked_target in \
     _static-build-locked _artifact-check-locked _artifact-cli-check-locked \
     _release-package-locked \
@@ -187,7 +187,7 @@ do
 done
 
 require_first_recipe_command compile '$(MAKE) --no-print-directory clean'
-recipe_line_number _clean-locked '$(MAKE) -C cpp clean MODE=debug; \' >/dev/null
+recipe_line_number _clean-locked '$(MAKE) --no-print-directory cpp-clean' >/dev/null
 
 package_line=$(recipe_line_number _release-readiness-locked \
     '$(MAKE) --no-print-directory _release-package-locked')
@@ -196,7 +196,7 @@ manifest_line=$(recipe_line_number _release-readiness-locked \
 vm_line=$(recipe_line_number _release-readiness-locked \
     '$(MAKE) --no-print-directory _vm-test-release-ubuntu-26.04-dracut-systemd-locked \')
 pin_line=$(recipe_line_number _release-readiness-locked \
-    'BOOTART_BIN="$$generation/release/bootart"; \')
+    'SART_BIN="$$generation/release/sart"; \')
 for line in "$package_line" "$manifest_line" "$vm_line" "$pin_line"; do
     [[ "$line" =~ ^[1-9][0-9]*$ ]] || die 'release exact-generation wiring is incomplete'
 done
@@ -223,4 +223,4 @@ then
     die 'obsolete target-local publication lock remains in a command surface'
 fi
 
-printf 'bootart-artifact-operations: PASS: one cross-process lock pins build/package/VM/cleanup\n'
+printf 'sart-artifact-operations: PASS: one cross-process lock pins build/package/VM/cleanup\n'

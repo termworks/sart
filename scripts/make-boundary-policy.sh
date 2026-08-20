@@ -10,7 +10,7 @@ set -Eeuo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-make-boundary: ERROR: %s\n' "$*" >&2
+    printf 'sart-make-boundary: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -106,7 +106,7 @@ for guard in \
     'override SHELL := /bin/bash' \
     'override CURDIR := $(realpath .)' \
     'ifneq ($(filter command line override,$(origin MAKEFLAGS)),)' \
-    'override __BOOTART_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))' \
+    'override __SART_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))' \
     'ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)' \
     'ifneq ($(words $(CURDIR)),1)' \
     "ifneq (\$(findstring ',\$(CURDIR)),)" \
@@ -172,7 +172,7 @@ for guard in \
     'override SHELL := /bin/bash' \
     'override CURDIR := $(realpath .)' \
     'ifneq ($(filter command line override,$(origin MAKEFLAGS)),)' \
-    'override __BOOTART_VM_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))' \
+    'override __SART_VM_MAKE_SHORT_FLAGS := $(firstword $(MAKEFLAGS))' \
     'ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)' \
     'override REPO_ROOT := $(realpath ../..)' \
     'override VM_ROOT := $(REPO_ROOT)/target/vm' \
@@ -205,21 +205,21 @@ done
 
 root_inputs=(
     TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
-    ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN
+    ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS SART_BIN
     ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 )
 root_default_inputs=(
     TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
-    ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN
+    ADAPTER_HOST_TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS SART_BIN
 )
 for variable in "${root_inputs[@]}"; do
-    internal=__BOOTART_${variable}_RAW
+    internal=__SART_${variable}_RAW
     require_line "$root_make" "override $internal := \$(value $variable)"
     require_assignment_count "$root_make" "$internal" 1
     require_unexport "$root_make" "$variable"
 done
 for variable in "${root_default_inputs[@]}"; do
-    internal=__BOOTART_${variable}_ORIGIN
+    internal=__SART_${variable}_ORIGIN
     require_line "$root_make" "override $internal := \$(origin $variable)"
     require_assignment_count "$root_make" "$internal" 1
 done
@@ -227,7 +227,7 @@ done
 root_exports=(
     TEST_TIMEOUT_SECONDS QEMU QEMU_IMG IMAGE_ID TIMEOUT_SECONDS
     ADAPTER_HOST_TIMEOUT_SECONDS
-    LIFECYCLE_HOST_TIMEOUT_SECONDS BOOTART_BIN ARGS_FILE RUN_DIR
+    LIFECYCLE_HOST_TIMEOUT_SECONDS SART_BIN ARGS_FILE RUN_DIR
     BASE_IMAGE OVERLAY
 )
 for variable in "${root_exports[@]}"; do
@@ -235,21 +235,21 @@ for variable in "${root_exports[@]}"; do
 done
 
 vm_inputs=(
-    IMAGE_ID BOOTART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
+    IMAGE_ID SART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS LIFECYCLE_HOST_TIMEOUT_SECONDS
     ADAPTER_HOST_TIMEOUT_SECONDS ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY
 )
 vm_default_inputs=(
-    IMAGE_ID BOOTART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS
+    IMAGE_ID SART_BIN QEMU QEMU_IMG TIMEOUT_SECONDS
     LIFECYCLE_HOST_TIMEOUT_SECONDS ADAPTER_HOST_TIMEOUT_SECONDS
 )
 for variable in "${vm_inputs[@]}"; do
-    internal=__BOOTART_VM_${variable}_RAW
+    internal=__SART_VM_${variable}_RAW
     require_line "$vm_make" "override $internal := \$(value $variable)"
     require_assignment_count "$vm_make" "$internal" 1
     require_unexport "$vm_make" "$variable"
 done
 for variable in "${vm_default_inputs[@]}"; do
-    internal=__BOOTART_VM_${variable}_ORIGIN
+    internal=__SART_VM_${variable}_ORIGIN
     require_line "$vm_make" "override $internal := \$(origin $variable)"
     require_assignment_count "$vm_make" "$internal" 1
 done
@@ -265,49 +265,49 @@ done
 
 for guard in \
     'override TEST_TIMEOUT_SECONDS := 120' \
-    'override TEST_TIMEOUT_SECONDS := $(value __BOOTART_TEST_TIMEOUT_SECONDS_RAW)' \
+    'override TEST_TIMEOUT_SECONDS := $(value __SART_TEST_TIMEOUT_SECONDS_RAW)' \
     'override NIX_OFFLINE := 1' \
-    'override NIX_OFFLINE := $(value __BOOTART_NIX_OFFLINE_RAW)' \
+    'override NIX_OFFLINE := $(value __SART_NIX_OFFLINE_RAW)' \
     'override QEMU := qemu-system-x86_64' \
-    'override QEMU := $(value __BOOTART_QEMU_RAW)' \
+    'override QEMU := $(value __SART_QEMU_RAW)' \
     'override QEMU_IMG := qemu-img' \
-    'override QEMU_IMG := $(value __BOOTART_QEMU_IMG_RAW)' \
+    'override QEMU_IMG := $(value __SART_QEMU_IMG_RAW)' \
     'override IMAGE_ID := alpine-virt-3.20.0-x86_64' \
-    'override IMAGE_ID := $(value __BOOTART_IMAGE_ID_RAW)' \
+    'override IMAGE_ID := $(value __SART_IMAGE_ID_RAW)' \
     'override TIMEOUT_SECONDS := 90' \
-    'override TIMEOUT_SECONDS := $(value __BOOTART_TIMEOUT_SECONDS_RAW)' \
+    'override TIMEOUT_SECONDS := $(value __SART_TIMEOUT_SECONDS_RAW)' \
     'override ADAPTER_HOST_TIMEOUT_SECONDS := 5100' \
-    'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
+    'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __SART_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180' \
-    'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
-    'override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'override BOOTART_BIN := $(value __BOOTART_BOOTART_BIN_RAW)' \
-    '$(VM_ADAPTER_TEST_TARGETS): override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
+    'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __SART_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
+    'override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'override SART_BIN := $(value __SART_SART_BIN_RAW)' \
+    '$(VM_ADAPTER_TEST_TARGETS): override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
     '$(VM_ADAPTER_RUNNABLE_TARGETS): static-build' \
-    'vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-install-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-password-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-recovery-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-uninstall-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-install-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-password-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-recovery-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-uninstall-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-test-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-ubuntu-26.04-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-fedora-44-dracut-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-debian-13.6-initramfs-tools-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-arch-mkinitc$()pio-systemd: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override BOOTART_BIN := $(STATIC_CURRENT_POINTER)/release/bootart' \
-    'vm-run-gui-postmarketos-qemu-aarch64: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'vm-run-gui-postmarketos-qemu-aarch64-systemd: override BOOTART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
-    'override ARGS_FILE := $(value __BOOTART_ARGS_FILE_RAW)' \
-    'override RUN_DIR := $(value __BOOTART_RUN_DIR_RAW)' \
-    'override BASE_IMAGE := $(value __BOOTART_BASE_IMAGE_RAW)' \
-    'override OVERLAY := $(value __BOOTART_OVERLAY_RAW)'
+    'vm-test-lifecycle-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-install-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-password-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-recovery-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-uninstall-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-kernel-update-mkinitfs-boot-deploy-openrc: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-lifecycle-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-install-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-password-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-recovery-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-uninstall-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-kernel-update-mkinitfs-boot-deploy-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-test-ubuntu-26.04-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-ubuntu-26.04-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-fedora-44-dracut-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-debian-13.6-initramfs-tools-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-arch-mkinitc$()pio-systemd: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-alpine-3.24.1-mkinitfs-openrc: override SART_BIN := $(STATIC_CURRENT_POINTER)/release/sart' \
+    'vm-run-gui-postmarketos-qemu-aarch64: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'vm-run-gui-postmarketos-qemu-aarch64-systemd: override SART_BIN := $(CURDIR)/target/vm/cache/artifacts/aarch64/current' \
+    'override ARGS_FILE := $(value __SART_ARGS_FILE_RAW)' \
+    'override RUN_DIR := $(value __SART_RUN_DIR_RAW)' \
+    'override BASE_IMAGE := $(value __SART_BASE_IMAGE_RAW)' \
+    'override OVERLAY := $(value __SART_OVERLAY_RAW)'
 do
     require_line "$root_make" "$guard"
 done
@@ -318,30 +318,30 @@ for variable in TEST_TIMEOUT_SECONDS NIX_OFFLINE QEMU QEMU_IMG IMAGE_ID \
 do
     require_assignment_count "$root_make" "$variable" 2
 done
-require_assignment_count "$root_make" BOOTART_BIN 25
+require_assignment_count "$root_make" SART_BIN 25
 for variable in ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY; do
     require_assignment_count "$root_make" "$variable" 1
 done
 
 for guard in \
     'override IMAGE_ID := alpine-virt-3.20.0-x86_64' \
-    'override IMAGE_ID := $(value __BOOTART_VM_IMAGE_ID_RAW)' \
-    'override BOOTART_BIN := $(REPO_ROOT)/target/artifacts/current/release/bootart' \
-    'override BOOTART_BIN := $(value __BOOTART_VM_BOOTART_BIN_RAW)' \
+    'override IMAGE_ID := $(value __SART_VM_IMAGE_ID_RAW)' \
+    'override SART_BIN := $(REPO_ROOT)/target/artifacts/current/release/sart' \
+    'override SART_BIN := $(value __SART_VM_SART_BIN_RAW)' \
     'override QEMU := qemu-system-x86_64' \
-    'override QEMU := $(value __BOOTART_VM_QEMU_RAW)' \
+    'override QEMU := $(value __SART_VM_QEMU_RAW)' \
     'override QEMU_IMG := qemu-img' \
-    'override QEMU_IMG := $(value __BOOTART_VM_QEMU_IMG_RAW)' \
+    'override QEMU_IMG := $(value __SART_VM_QEMU_IMG_RAW)' \
     'override TIMEOUT_SECONDS := 90' \
-    'override TIMEOUT_SECONDS := $(value __BOOTART_VM_TIMEOUT_SECONDS_RAW)' \
+    'override TIMEOUT_SECONDS := $(value __SART_VM_TIMEOUT_SECONDS_RAW)' \
     'override LIFECYCLE_HOST_TIMEOUT_SECONDS := 180' \
-    'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
+    'override LIFECYCLE_HOST_TIMEOUT_SECONDS := $(value __SART_VM_LIFECYCLE_HOST_TIMEOUT_SECONDS_RAW)' \
     'override ADAPTER_HOST_TIMEOUT_SECONDS := 5100' \
-    'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __BOOTART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
-    'override ARGS_FILE := $(value __BOOTART_VM_ARGS_FILE_RAW)' \
-    'override RUN_DIR := $(value __BOOTART_VM_RUN_DIR_RAW)' \
-    'override BASE_IMAGE := $(value __BOOTART_VM_BASE_IMAGE_RAW)' \
-    'override OVERLAY := $(value __BOOTART_VM_OVERLAY_RAW)'
+    'override ADAPTER_HOST_TIMEOUT_SECONDS := $(value __SART_VM_ADAPTER_HOST_TIMEOUT_SECONDS_RAW)' \
+    'override ARGS_FILE := $(value __SART_VM_ARGS_FILE_RAW)' \
+    'override RUN_DIR := $(value __SART_VM_RUN_DIR_RAW)' \
+    'override BASE_IMAGE := $(value __SART_VM_BASE_IMAGE_RAW)' \
+    'override OVERLAY := $(value __SART_VM_OVERLAY_RAW)'
 do
     require_line "$vm_make" "$guard"
 done
@@ -351,7 +351,7 @@ for variable in IMAGE_ID QEMU QEMU_IMG TIMEOUT_SECONDS \
 do
     require_assignment_count "$vm_make" "$variable" 2
 done
-require_assignment_count "$vm_make" BOOTART_BIN 2
+require_assignment_count "$vm_make" SART_BIN 2
 for variable in ARGS_FILE RUN_DIR BASE_IMAGE OVERLAY; do
     require_assignment_count "$vm_make" "$variable" 1
 done
@@ -363,10 +363,10 @@ root_normalized_min=999999
 root_normalized_max=0
 for variable in "${root_inputs[@]}"; do
     raw_line=$(guard_line_number "$root_make" \
-        "override __BOOTART_${variable}_RAW := \$(value $variable)")
+        "override __SART_${variable}_RAW := \$(value $variable)")
     unexport_line=$(directive_line_number "$root_make" unexport "$variable")
     normalized_line=$(guard_line_number "$root_make" \
-        "override $variable := \$(value __BOOTART_${variable}_RAW)")
+        "override $variable := \$(value __SART_${variable}_RAW)")
     if (( raw_line > root_raw_max )); then root_raw_max=$raw_line; fi
     if (( unexport_line < root_unexport_min )); then root_unexport_min=$unexport_line; fi
     if (( unexport_line > root_unexport_max )); then root_unexport_max=$unexport_line; fi
@@ -393,10 +393,10 @@ vm_normalized_min=999999
 vm_normalized_max=0
 for variable in "${vm_inputs[@]}"; do
     raw_line=$(guard_line_number "$vm_make" \
-        "override __BOOTART_VM_${variable}_RAW := \$(value $variable)")
+        "override __SART_VM_${variable}_RAW := \$(value $variable)")
     unexport_line=$(directive_line_number "$vm_make" unexport "$variable")
     normalized_line=$(guard_line_number "$vm_make" \
-        "override $variable := \$(value __BOOTART_VM_${variable}_RAW)")
+        "override $variable := \$(value __SART_VM_${variable}_RAW)")
     if (( raw_line > vm_raw_max )); then vm_raw_max=$raw_line; fi
     if (( unexport_line < vm_unexport_min )); then vm_unexport_min=$unexport_line; fi
     if (( unexport_line > vm_unexport_max )); then vm_unexport_max=$unexport_line; fi
@@ -444,8 +444,8 @@ reject_recipe_expansion() {
 }
 
 reject_recipe_expansion "$root_make" \
-    'TEST_TIMEOUT_SECONDS|QEMU|QEMU_IMG|IMAGE_ID|TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|BOOTART_BIN|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY'
+    'TEST_TIMEOUT_SECONDS|QEMU|QEMU_IMG|IMAGE_ID|TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|SART_BIN|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY'
 reject_recipe_expansion "$vm_make" \
-    'IMAGE_ID|BOOTART_BIN|QEMU|QEMU_IMG|TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY|REPO_ROOT|VM_ROOT|VM_SOURCE_ROOT|LOCK_FILE|MATRIX_FILE'
+    'IMAGE_ID|SART_BIN|QEMU|QEMU_IMG|TIMEOUT_SECONDS|LIFECYCLE_HOST_TIMEOUT_SECONDS|ADAPTER_HOST_TIMEOUT_SECONDS|ARGS_FILE|RUN_DIR|BASE_IMAGE|OVERLAY|REPO_ROOT|VM_ROOT|VM_SOURCE_ROOT|LOCK_FILE|MATRIX_FILE'
 
-printf 'bootart-make-boundary: PASS: structural paths are pinned and documented inputs remain literal shell data\n'
+printf 'sart-make-boundary: PASS: structural paths are pinned and documented inputs remain literal shell data\n'

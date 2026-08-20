@@ -128,4 +128,4 @@ temporary="$(mktemp "$run_dir/.provision-qemu.policy.XXXXXXXXXX")" ||
 chmod 0600 -- "$temporary"
 sha256sum "$args_file" | awk '{ print $1 }' > "$temporary"
 mv -T -- "$temporary" "$policy_file"
-printf 'bootart-vm: %s provision QEMU command policy PASS\n' "$profile"
+printf 'sart-vm: %s provision QEMU command policy PASS\n' "$profile"

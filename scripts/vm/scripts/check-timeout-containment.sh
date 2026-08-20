@@ -10,14 +10,14 @@ umask 077
 }
 repo_root=$1
 [[ "$repo_root" == /* && -d "$repo_root" && ! -L "$repo_root" ]] || {
-    printf 'bootart-vm: invalid repository root for timeout fixture\n' >&2
+    printf 'sart-vm: invalid repository root for timeout fixture\n' >&2
     exit 2
 }
 
 foreground_option='--fore''ground'
 if grep -R -n -E -- "timeout[^#]*${foreground_option}" \
     "$repo_root/scripts/vm/Makefile" "$repo_root/scripts/vm/scripts" >/dev/null; then
-    printf 'bootart-vm: foreground timeout would not contain descendant processes\n' >&2
+    printf 'sart-vm: foreground timeout would not contain descendant processes\n' >&2
     exit 1
 fi
 
@@ -38,11 +38,11 @@ awk '
             !seen["adapter-install"] || !seen["adapter-password"]) exit 1
     }
 ' "$repo_root/scripts/vm/Makefile" || {
-    printf 'bootart-vm: one or more VM host entry recipes lost process-group timeout containment\n' >&2
+    printf 'sart-vm: one or more VM host entry recipes lost process-group timeout containment\n' >&2
     exit 1
 }
 
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootart-timeout-containment.XXXXXXXXXX")"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/sart-timeout-containment.XXXXXXXXXX")"
 record="$tmp/descendant"
 worker="$tmp/worker.sh"
 descendant_pid=
@@ -66,8 +66,8 @@ cleanup() {
         kill -KILL "$descendant_pid" 2>/dev/null || true
     fi
     case "$tmp" in
-        "${TMPDIR:-/tmp}"/bootart-timeout-containment.*) rm -rf -- "$tmp" ;;
-        *) printf 'bootart-vm: refusing unsafe timeout-fixture cleanup: %s\n' "$tmp" >&2 ;;
+        "${TMPDIR:-/tmp}"/sart-timeout-containment.*) rm -rf -- "$tmp" ;;
+        *) printf 'sart-vm: refusing unsafe timeout-fixture cleanup: %s\n' "$tmp" >&2 ;;
     esac
 }
 trap cleanup EXIT
@@ -98,19 +98,19 @@ set -e
 case "$timeout_status" in
     124|137) ;;
     *)
-        printf 'bootart-vm: containment fixture returned unexpected status %s\n' \
+        printf 'sart-vm: containment fixture returned unexpected status %s\n' \
             "$timeout_status" >&2
         exit 1
         ;;
 esac
 
 [[ -f "$record" && ! -L "$record" ]] || {
-    printf 'bootart-vm: containment fixture did not publish descendant identity\n' >&2
+    printf 'sart-vm: containment fixture did not publish descendant identity\n' >&2
     exit 1
 }
 read -r descendant_pid descendant_start <"$record"
 [[ "$descendant_pid" =~ ^[1-9][0-9]*$ && "$descendant_start" =~ ^[1-9][0-9]*$ ]] || {
-    printf 'bootart-vm: invalid descendant identity in containment fixture\n' >&2
+    printf 'sart-vm: invalid descendant identity in containment fixture\n' >&2
     exit 1
 }
 
@@ -120,8 +120,8 @@ for _ in $(seq 1 30); do
 done
 if same_live_process "$descendant_pid" "$descendant_start"; then
     ps -p "$descendant_pid" -o pid,ppid,pgid,stat,cmd >&2 || true
-    printf 'bootart-vm: timeout left a live descendant outside containment\n' >&2
+    printf 'sart-vm: timeout left a live descendant outside containment\n' >&2
     exit 1
 fi
 
-printf 'bootart-vm: process-group timeout containment PASS\n'
+printf 'sart-vm: process-group timeout containment PASS\n'

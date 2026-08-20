@@ -13,13 +13,13 @@ vm_validate_lock "$repo_root/scripts/vm/images.lock"
 vm_validate_kernel_package_lock "$repo_root/scripts/vm/kernel-packages.lock"
 vm_validate_postmarketos_source_lock "$repo_root/scripts/vm/postmarketos-sources.lock"
 
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootart-resource-policy.XXXXXXXXXX")" ||
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/sart-resource-policy.XXXXXXXXXX")" ||
     vm_die 'cannot allocate resource policy fixture root'
-marker="$tmp/.bootart-resource-policy"
+marker="$tmp/.sart-resource-policy"
 : > "$marker"
 cleanup() {
     trap - EXIT HUP INT TERM
-    if [[ "$tmp" == "${TMPDIR:-/tmp}"/bootart-resource-policy.* && -d "$tmp" && ! -L "$tmp" && \
+    if [[ "$tmp" == "${TMPDIR:-/tmp}"/sart-resource-policy.* && -d "$tmp" && ! -L "$tmp" && \
           -f "$marker" && ! -L "$marker" ]]; then
         chmod -R u+w -- "$tmp" 2>/dev/null || true
         rm -rf -- "$tmp"
@@ -315,15 +315,15 @@ ambient_qemu_img="$tmp/ambient-qemu-img"
 ambient_qemu_img_marker="$tmp/ambient-qemu-img.called"
 cat > "$ambient_qemu_img" <<'EOF'
 #!/bin/sh
-printf invoked > "$BOOTART_FIXTURE_AMBIENT_QEMU_IMG_MARKER"
+printf invoked > "$SART_FIXTURE_AMBIENT_QEMU_IMG_MARKER"
 exit 99
 EOF
 chmod 0500 -- "$ambient_qemu_img"
-export BOOTART_FIXTURE_AMBIENT_QEMU_IMG_MARKER="$ambient_qemu_img_marker"
+export SART_FIXTURE_AMBIENT_QEMU_IMG_MARKER="$ambient_qemu_img_marker"
 export QEMU_IMG="$ambient_qemu_img"
 cat > "$mock_bin/qemu-img" <<'EOF'
 #!/bin/sh
-printf '{"format":"qcow2","virtual-size":%s}\n' "${BOOTART_FIXTURE_VIRTUAL:-8192}"
+printf '{"format":"qcow2","virtual-size":%s}\n' "${SART_FIXTURE_VIRTUAL:-8192}"
 EOF
 chmod 0500 -- "$mock_bin/qemu-img"
 image="$tmp/image.qcow2"
@@ -345,7 +345,7 @@ for oversized_virtual in \
     999999999999999999999999999999999999999999
 do
     if (PATH="$mock_bin:$PATH" QEMU_IMG="$mock_bin/qemu-img" \
-        BOOTART_FIXTURE_VIRTUAL="$oversized_virtual" \
+        SART_FIXTURE_VIRTUAL="$oversized_virtual" \
         vm_assert_qcow2_virtual_size "$image" 8192) >/dev/null 2>&1; then
         vm_die "qcow2 virtual-size helper accepted an extreme value: $oversized_virtual"
     fi
@@ -371,8 +371,8 @@ fetch_root="$fetch_repo/target/vm"
 mkdir -p -- "$fetch_root/cache" "$fetch_root/runs"
 chmod 0700 -- "$fetch_repo" "$fetch_repo/target" "$fetch_root" \
     "$fetch_root/cache" "$fetch_root/runs"
-vm_state_sentinel_text "$fetch_repo" "$fetch_root" > "$fetch_root/.bootart-vm-state"
-chmod 0600 -- "$fetch_root/.bootart-vm-state"
+vm_state_sentinel_text "$fetch_repo" "$fetch_root" > "$fetch_root/.sart-vm-state"
+chmod 0600 -- "$fetch_root/.sart-vm-state"
 cat > "$mock_bin/findmnt" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"filesystems":[]}'
@@ -388,7 +388,7 @@ curl_record="$tmp/curl.called"
 cat > "$mock_bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
-printf '%s\n' "$@" > "$BOOTART_FIXTURE_CURL_RECORD"
+printf '%s\n' "$@" > "$SART_FIXTURE_CURL_RECORD"
 arguments=" $* "
 case "$arguments" in *' --connect-timeout 15 '*) ;; *) exit 91 ;; esac
 case "$arguments" in *' --max-time 900 '*) ;; *) exit 92 ;; esac
@@ -405,27 +405,27 @@ for argument in "$@"; do
     fi
 done
 [ -n "$output" ] || exit 94
-d''d if="$BOOTART_FIXTURE_PAYLOAD" of="$output" bs=4096 status=none
+d''d if="$SART_FIXTURE_PAYLOAD" of="$output" bs=4096 status=none
 EOF
 chmod 0500 -- "$mock_bin/findmnt" "$mock_bin/curl"
-PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$payload" \
-    BOOTART_FIXTURE_CURL_RECORD="$curl_record" \
+PATH="$mock_bin:$PATH" SART_FIXTURE_PAYLOAD="$payload" \
+    SART_FIXTURE_CURL_RECORD="$curl_record" \
     bash "$fetcher" "$fetch_repo" "$fetch_root" "$fetch_lock" fetch-fixture >/dev/null
 cached="$fetch_root/cache/images/fetch.qcow2"
 [[ -f "$curl_record" && -f "$cached" && "$(vm_stat_size "$cached")" == 4096 && \
    "$(vm_stat_mode "$cached")" == 400 ]] ||
     vm_die 'inert fetch fixture did not publish the exact bounded payload'
 rm -f -- "$curl_record"
-PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$payload" \
-    BOOTART_FIXTURE_CURL_RECORD="$curl_record" \
+PATH="$mock_bin:$PATH" SART_FIXTURE_PAYLOAD="$payload" \
+    SART_FIXTURE_CURL_RECORD="$curl_record" \
     bash "$fetcher" "$fetch_repo" "$fetch_root" "$fetch_lock" fetch-fixture >/dev/null
 [[ ! -e "$curl_record" ]] || vm_die 'verified cache hit unexpectedly invoked curl'
 chmod 0600 -- "$cached"
 rm -f -- "$cached" "$curl_record"
 oversized_payload="$tmp/fetch-payload-oversized"
 head -c 4097 /dev/zero > "$oversized_payload"
-if PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$oversized_payload" \
-    BOOTART_FIXTURE_CURL_RECORD="$curl_record" \
+if PATH="$mock_bin:$PATH" SART_FIXTURE_PAYLOAD="$oversized_payload" \
+    SART_FIXTURE_CURL_RECORD="$curl_record" \
     bash "$fetcher" "$fetch_repo" "$fetch_root" "$fetch_lock" fetch-fixture \
     >/dev/null 2>&1; then
     vm_die 'oversized inert download unexpectedly passed the hard file-size limit'
@@ -437,15 +437,15 @@ if find "$fetch_root/cache/images" -maxdepth 1 -name '.fetch.qcow2.partial.*' \
     vm_die 'oversized inert download left a partial file behind'
 fi
 rm -f -- "$curl_record"
-PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$payload" \
-    BOOTART_FIXTURE_CURL_RECORD="$curl_record" \
+PATH="$mock_bin:$PATH" SART_FIXTURE_PAYLOAD="$payload" \
+    SART_FIXTURE_CURL_RECORD="$curl_record" \
     bash "$fetcher" "$fetch_repo" "$fetch_root" "$fetch_lock" fetch-fixture >/dev/null
 rm -f -- "$curl_record"
 chmod 0600 -- "$cached"
 : > "$cached"
 chmod 0400 -- "$cached"
-if PATH="$mock_bin:$PATH" BOOTART_FIXTURE_PAYLOAD="$payload" \
-    BOOTART_FIXTURE_CURL_RECORD="$curl_record" \
+if PATH="$mock_bin:$PATH" SART_FIXTURE_PAYLOAD="$payload" \
+    SART_FIXTURE_CURL_RECORD="$curl_record" \
     bash "$fetcher" "$fetch_repo" "$fetch_root" "$fetch_lock" fetch-fixture \
     >/dev/null 2>&1; then
     vm_die 'cached image with the wrong exact size unexpectedly passed'
@@ -455,6 +455,7 @@ fi
 adapter="$repo_root/scripts/vm/scripts/run-adapter-lane.sh"
 for required in \
     'vm_require_free_bytes "$vm_root/runs" "$max_run_bytes"' \
+    '"$qemu_img_executable" create -f qcow2 -F qcow2 -b "$image" "$overlay"' \
     'vm_assert_qcow2_virtual_size "$image" "$max_virtual_bytes"' \
     'run-with-file-limit.sh" "$max_file_bytes"' \
     'runner-produced seed.img must have mode 0600 before common sealing' \
@@ -467,6 +468,8 @@ do
     grep -F -- "$required" "$adapter" >/dev/null ||
         vm_die "adapter resource guard is missing: $required"
 done
+! grep -F -- 'cache/gui' "$adapter" >/dev/null ||
+    vm_die 'adapter proof lanes must never read the patched GUI cache'
 [[ "$(grep -Fc '>/dev/null 2>&1' "$adapter")" -ge 3 ]] ||
     vm_die 'adapter prepare/qemu diagnostics are not all bounded or discarded'
 
@@ -517,10 +520,10 @@ preparer="$repo_root/scripts/vm/scripts/prepare-smoke.sh"
 for required in \
     'vm_assert_guest_source_tree "$repo_root"' \
     'guest_source_sha[$source]="$(vm_sha256_file "$guest_source/$source")"' \
-    'bootart_source_sha="$(vm_sha256_file "$bootart_physical")"' \
+    'sart_source_sha="$(vm_sha256_file "$sart_physical")"' \
     'VM guest source changed while being copied' \
     'VM guest copy does not match pinned source' \
-    'bootart guest copy does not match pinned source'
+    'sart guest copy does not match pinned source'
 do
     grep -F -- "$required" "$preparer" >/dev/null ||
         vm_die "guest preparation integrity guard is missing: $required"
@@ -568,9 +571,9 @@ for required in \
     "printf '\\033[2J\\033[H'" \
     '--fps 30 --seed 42 --clear-first' \
     '--fps 10 --seed 42 --no-color' \
-    'Bootart exited. Guest userspace boot continued.' \
-    'BOOTART_VM_GUI_PASSWORD_PROMPT_V1' \
-    'BOOTART_VM_GUI_PASSWORD_PASS_V1' \
+    'Sart exited. Guest userspace boot continued.' \
+    'SART_VM_GUI_PASSWORD_PROMPT_V1' \
+    'SART_VM_GUI_PASSWORD_PASS_V1' \
     'test_passphrase_hint=112' \
     'test_passphrase_hint="${test_passphrase_hint}358"' \
     'Enter test passphrase $test_passphrase_hint (attempt $attempt of 3)' \
@@ -594,7 +597,7 @@ for required in \
     'file=$drive,format=qcow2,if=none,id=encrypted' \
     'virtio-blk-pci,drive=encrypted' \
     'test_passphrase=112358' \
-    'type 112358 when Bootart asks' \
+    'type 112358 when Sart asks' \
     'unset test_passphrase'
 do
     grep -F -- "$required" "$password_gui" >/dev/null ||
@@ -635,8 +638,8 @@ ubuntu_stock="$repo_root/scripts/vm/scripts/verify-ubuntu-26.04-base.sh"
 ubuntu_stock_policy="$repo_root/scripts/vm/scripts/check-stock-installed-command.sh"
 for required in \
     'GRUB_CMDLINE_LINUX_DEFAULT=\"console=ttyS0,115200n8 console=tty0\"' \
-    '/target/var/cache/bootart-kernel-update' \
-    '/run/bootart-kernel-seed/kernel-packages/SHA256SUMS' \
+    '/target/var/cache/sart-kernel-update' \
+    '/run/sart-kernel-seed/kernel-packages/SHA256SUMS' \
     'shut''down: power''off'
 do
     grep -F -- "$required" "$ubuntu_template" >/dev/null ||
@@ -659,7 +662,7 @@ done
 for required in \
     'for key in 0 0 0 0 0 0 ret' \
     'for key in 1 1 2 3 5 8 ret' \
-    "! grep -a -F -q 'bootart-vm login:'" \
+    "! grep -a -F -q 'sart-vm login:'" \
     "wait_for_log 'Please enter passphrase for disk crypt-root:'" \
     '-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0' \
     "printf -v secret_pattern '%s%s' 112 358" \
@@ -667,9 +670,9 @@ for required in \
     "guest_remove='r''m'" \
     '/etc /var/lib /var/log /boot "$work"' \
     'boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"' \
-    'BOOTART_VM_PACKAGE|\${binary:Package}|\${Version}' \
-    'BOOTART_VM_SECRET_PATH|%s' \
-    'BOOTART_VM_KERNEL_CACHE_PASS_V1' \
+    'SART_VM_PACKAGE|\${binary:Package}|\${Version}' \
+    'SART_VM_SECRET_PATH|%s' \
+    'SART_VM_KERNEL_CACHE_PASS_V1' \
     'kernel_package_lock_sha256=' \
     'kernel_package_set_sha256=' \
     'for retained_evidence in "$serial_log" "$args_file"' \
@@ -691,20 +694,20 @@ done
 
 kernel_runner="$repo_root/scripts/vm/runners/dracut-systemd/kernel-update.sh"
 for required in \
-    '-graft-points /bootart="$bootart"' \
+    '-graft-points /sart="$sart"' \
     '-nic' \
     'none' \
     '--install $package_cache/linux-main-modules-zfs-7.1.0-5-generic_7.1.0-5.5_amd64.deb' \
     'new_kernel=7.1.0-5-generic' \
-    '/usr/bin/cmp /mnt/bootart-transport/bootart usr/bin/bootart' \
+    '/usr/bin/cmp /mnt/sart-transport/sart usr/bin/sart' \
     'test \"\$(uname -r)\" = $new_kernel' \
-    'BOOTART_VM_KERNEL_UPDATE_REBOOT_HASH_V1'
+    'SART_VM_KERNEL_UPDATE_REBOOT_HASH_V1'
 do
     grep -F -- "$required" "$kernel_runner" >/dev/null ||
         vm_die "kernel-update runner guard is missing: $required"
 done
-[[ "$(grep -Fc '/bootart=' "$kernel_runner")" == 1 ]] ||
-    vm_die 'kernel-update product transport must contain exactly one Bootart file'
+[[ "$(grep -Fc '/sart=' "$kernel_runner")" == 1 ]] ||
+    vm_die 'kernel-update product transport must contain exactly one Sart file'
 ! grep -F -- '-nic user' "$kernel_runner" >/dev/null ||
     vm_die 'kernel-update proof runner must not expose guest networking'
 
@@ -716,10 +719,10 @@ cleanup_run="$cleanup_vm/runs/run.ABCDEFGHIJ"
 mkdir -p -- "$cleanup_vm/cache" "$cleanup_run/runner-bin"
 chmod 0700 -- "$cleanup_repo" "$cleanup_repo/target" "$cleanup_vm" \
     "$cleanup_vm/cache" "$cleanup_vm/runs" "$cleanup_run"
-vm_state_sentinel_text "$cleanup_repo" "$cleanup_vm" > "$cleanup_vm/.bootart-vm-state"
-chmod 0600 -- "$cleanup_vm/.bootart-vm-state"
-vm_run_sentinel_text "$cleanup_vm" "$cleanup_run" > "$cleanup_run/.bootart-vm-run"
-chmod 0600 -- "$cleanup_run/.bootart-vm-run"
+vm_state_sentinel_text "$cleanup_repo" "$cleanup_vm" > "$cleanup_vm/.sart-vm-state"
+chmod 0600 -- "$cleanup_vm/.sart-vm-state"
+vm_run_sentinel_text "$cleanup_vm" "$cleanup_run" > "$cleanup_run/.sart-vm-run"
+chmod 0600 -- "$cleanup_run/.sart-vm-run"
 ln -s -- "$(command -v true)" "$cleanup_run/runner-bin/true"
 chmod 0500 -- "$cleanup_run/runner-bin"
 bash "$repo_root/scripts/vm/scripts/cleanup-runs.sh" \
@@ -727,4 +730,4 @@ bash "$repo_root/scripts/vm/scripts/cleanup-runs.sh" \
 [[ ! -e "$cleanup_run" ]] ||
     vm_die 'guarded cleanup retained a mode-0500 runner command namespace'
 
-printf 'bootart-vm: resource lock/limit fixtures PASS (no network, runner, product, or QEMU)\n'
+printf 'sart-vm: resource lock/limit fixtures PASS (no network, runner, product, or QEMU)\n'

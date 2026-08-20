@@ -30,7 +30,7 @@ for sealed in "$base" "$base_ovmf" "$lineage"; do
         vm_die "missing or unsealed provisioned input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_UBUNTU_PROVISIONED_V1 &&
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_UBUNTU_PROVISIONED_V1 &&
    "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
     vm_die 'provisioned lineage is not awaiting stock verification'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
@@ -49,20 +49,20 @@ printf '%s  %s\n' "$ovmf_sha" "$base_ovmf" | sha256sum --check --status - ||
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_UBUNTU_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_UBUNTU_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^ovmf_vars_sha256=//p' "$verified")" == "$ovmf_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
        "$(sed -n 's/^kernel_package_lock_sha256=//p' "$verified")" == "$kernel_package_lock_sha" &&
        "$(sed -n 's/^kernel_package_set_sha256=//p' "$verified")" == "$kernel_package_set_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_UBUNTU_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == SART_VM_UBUNTU_BASE_PASS_V1 ]] ||
         vm_die 'stock-verification lineage is stale or invalid'
-    printf 'BOOTART_VM_UBUNTU_BASE_PASS_V1\n'
+    printf 'SART_VM_UBUNTU_BASE_PASS_V1\n'
     exit 0
 fi
 
-ovmf_code=${BOOTART_OVMF_CODE:-}
+ovmf_code=${SART_OVMF_CODE:-}
 if [[ -z "$ovmf_code" ]]; then
     for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
         if [[ -f "$candidate" && ! -L "$candidate" ]]; then ovmf_code=$candidate; break; fi
@@ -173,10 +173,10 @@ wait_for_log 'Please enter passphrase for disk crypt-root:' "$boot_timeout" ||
 sleep 10
 for key in 0 0 0 0 0 0 ret; do qmp_send_key "$key"; done
 sleep 10
-! grep -a -F -q 'bootart-vm login:' "$serial_log" ||
+! grep -a -F -q 'sart-vm login:' "$serial_log" ||
     vm_die 'the deliberately wrong stock passphrase unexpectedly reached login'
 for key in 1 1 2 3 5 8 ret; do qmp_send_key "$key"; done
-wait_for_log 'bootart-vm login:' "$login_timeout" ||
+wait_for_log 'sart-vm login:' "$login_timeout" ||
     vm_die 'stock Ubuntu did not reach normal login after real root unlock'
 
 guest_crypt='crypt''setup'
@@ -190,24 +190,24 @@ guest_check+='set -eu; test "$(cat /proc/1/comm)" = systemd; test "$(findmnt -n 
 guest_check+="$guest_dev/mapper/crypt-root; $guest_crypt luksDump $guest_dev/vda3"
 guest_check+=' | grep -Eq "^Version:[[:space:]]+2$"; image=/boot/initrd.img-$(uname -r); test -f "$image"; lsinitrd "$image" | grep -Fq usr/lib/systemd/systemd; lsinitrd "$image" | grep -Eq "'
 guest_check+="$guest_crypt|systemd-$guest_crypt"
-guest_check+='"; work=$(mktemp -d); (cd "$work" && lsinitrd --unpack "$image"); scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "BOOTART_VM_SECRET_PATH|%s\n" "$matches"; '
+guest_check+='"; work=$(mktemp -d); (cd "$work" && lsinitrd --unpack "$image"); scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "SART_VM_SECRET_PATH|%s\n" "$matches"; '
 guest_check+="$guest_remove"' -r -f -- "$work"; exit 1; fi; unset scan boundary matches; '
-guest_check+="$guest_remove"' -r -f -- "$work"; dpkg-query -W -f="BOOTART_VM_PACKAGE|\${binary:Package}|\${Version}\n" linux-image-generic systemd '
+guest_check+="$guest_remove"' -r -f -- "$work"; dpkg-query -W -f="SART_VM_PACKAGE|\${binary:Package}|\${Version}\n" linux-image-generic systemd '
 guest_check+="$guest_dracut $guest_crypt"' grub-efi-amd64; '
-guest_check+='cache=/var/cache/bootart-kernel-update; test -d "$cache"; (cd "$cache" && sha256sum -c SHA256SUMS); actual=$(find "$cache" -maxdepth 1 -type f -printf "%f\n" | sort); expected="SHA256SUMS
+guest_check+='cache=/var/cache/sart-kernel-update; test -d "$cache"; (cd "$cache" && sha256sum -c SHA256SUMS); actual=$(find "$cache" -maxdepth 1 -type f -printf "%f\n" | sort); expected="SHA256SUMS
 linux-image-7.1.0-5-generic_7.1.0-5.5+1_amd64.deb
 linux-main-modules-zfs-7.1.0-5-generic_7.1.0-5.5_amd64.deb
-linux-modules-7.1.0-5-generic_7.1.0-5.5_amd64.deb"; test "$actual" = "$expected"; ! dpkg-query -W linux-image-7.1.0-5-generic >/dev/null 2>&1; marker=BOOTART_VM_KERNEL_CACHE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; marker=BOOTART_VM_UBUNTU_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker actual expected cache; '
+linux-modules-7.1.0-5-generic_7.1.0-5.5_amd64.deb"; test "$actual" = "$expected"; ! dpkg-query -W linux-image-7.1.0-5-generic >/dev/null 2>&1; marker=SART_VM_KERNEL_CACHE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; marker=SART_VM_UBUNTU_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker actual expected cache; '
 guest_check+="$guest_power'"
 {
-    printf '\nbootart\n'; sleep 2
+    printf '\nsart\n'; sleep 2
     printf 'ubuntu\n'; sleep 3
     printf '%s\n' "$guest_check"; sleep 2
     printf 'ubuntu\n'; sleep 2
 } | timeout --signal=TERM --kill-after=2s 30s socat - "UNIX-CONNECT:$serial_socket" >/dev/null || true
-wait_for_log 'BOOTART_VM_UBUNTU_BASE_PASS_V1' "$login_timeout" ||
+wait_for_log 'SART_VM_UBUNTU_BASE_PASS_V1' "$login_timeout" ||
     vm_die 'stock Ubuntu guest verification did not emit its authenticated result'
-wait_for_log 'BOOTART_VM_KERNEL_CACHE_PASS_V1' "$login_timeout" ||
+wait_for_log 'SART_VM_KERNEL_CACHE_PASS_V1' "$login_timeout" ||
     vm_die 'stock Ubuntu guest did not authenticate the offline kernel package cache'
 
 set +e
@@ -217,9 +217,9 @@ set -e
 qemu_pid=
 [[ $qemu_status -eq 0 ]] ||
     vm_die "stock Ubuntu QEMU did not power off cleanly: status $qemu_status"
-oracle_count="$(grep -a -Fc 'BOOTART_VM_UBUNTU_BASE_PASS_V1' "$serial_log" || true)"
+oracle_count="$(grep -a -Fc 'SART_VM_UBUNTU_BASE_PASS_V1' "$serial_log" || true)"
 [[ "$oracle_count" == 1 ]] || vm_die 'stock Ubuntu oracle must occur exactly once'
-kernel_cache_oracle_count="$(grep -a -Fc 'BOOTART_VM_KERNEL_CACHE_PASS_V1' "$serial_log" || true)"
+kernel_cache_oracle_count="$(grep -a -Fc 'SART_VM_KERNEL_CACHE_PASS_V1' "$serial_log" || true)"
 [[ "$kernel_cache_oracle_count" == 1 ]] ||
     vm_die 'kernel package cache oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 67108864 'stock Ubuntu serial evidence'
@@ -239,15 +239,15 @@ unset secret_pattern
 verified_tmp="$run_dir/base.verified"
 serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 printf '%s\n' \
-    'schema=BOOTART_UBUNTU_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
+    'schema=SART_UBUNTU_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" "ovmf_vars_sha256=$ovmf_sha" \
     "source_lineage_sha256=$source_lineage_sha" \
     "kernel_package_lock_sha256=$kernel_package_lock_sha" \
     "kernel_package_set_sha256=$kernel_package_set_sha" \
     "stock_serial_sha256=$serial_sha" \
-    'stock_oracle=BOOTART_VM_UBUNTU_BASE_PASS_V1' > "$verified_tmp"
+    'stock_oracle=SART_VM_UBUNTU_BASE_PASS_V1' > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" ||
     vm_die 'refusing to replace stock-verification lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_UBUNTU_BASE_PASS_V1\n'
+printf 'SART_VM_UBUNTU_BASE_PASS_V1\n'

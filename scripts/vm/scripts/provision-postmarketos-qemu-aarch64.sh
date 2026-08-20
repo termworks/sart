@@ -34,6 +34,26 @@ IFS='|' read -r _ derived_status derived_url derived_sha derived_format derived_
    "$derived_virtual" == 8589934592 ]] ||
     vm_die 'postmarketOS derived-image row is inconsistent with its builder source'
 
+case "$derived_id" in
+    postmarketos-qemu-aarch64-derived)
+        service_manager=openrc
+        extra_packages=none
+        cache_prefix=postmarketos-qemu-aarch64
+        boot_size_mib=2048
+        ;;
+    postmarketos-qemu-aarch64-systemd-derived)
+        service_manager=systemd
+        extra_packages=android-tools
+        cache_prefix=postmarketos-qemu-aarch64-systemd
+        # pmbootstrap rejects boot partitions smaller than 512 MiB.  The
+        # systemd fixture therefore uses that supported minimum and the guest
+        # provisioning script consumes disposable space until the remaining
+        # free capacity matches the audited Fairphone-sized contract.
+        boot_size_mib=512
+        ;;
+    *) vm_die "unreviewed postmarketOS derived image: $derived_id" ;;
+esac
+
 qemu="$(vm_resolve_qemu "$configured_qemu")"
 qemu_img="$(vm_resolve_qemu_img "$configured_qemu_img")"
 qemu_identity="$(vm_executable_identity "$qemu")"
@@ -86,31 +106,44 @@ for marker in PMBOOTSTRAP PMAPORTS MKINITFS BOOT_DEPLOY BUFFYBOX; do
     [[ "$(grep -Fc "__${marker}_SHA256__" "$template")" == 1 ]] ||
         vm_die "postmarketOS builder template marker is not unique: $marker"
 done
+[[ "$(grep -Fc '__SERVICE_MANAGER__' "$template")" == 3 ]] ||
+    vm_die 'postmarketOS builder service-manager markers differ from the reviewed template'
+[[ "$(grep -Fc '__EXTRA_PACKAGES__' "$template")" == 1 ]] ||
+    vm_die 'postmarketOS builder extra-package marker differs from the reviewed template'
+[[ "$(grep -Fc 'boot_size = 2048' "$template")" == 1 ]] ||
+    vm_die 'postmarketOS builder boot-size source differs from the reviewed template'
 
 provisioned="$vm_root/cache/provisioned"
 if [[ ! -e "$provisioned" ]]; then mkdir -- "$provisioned"; chmod 0700 -- "$provisioned"; fi
 vm_assert_private_dir "$provisioned"
 base="$provisioned/$derived_filename"
-lineage="$provisioned/postmarketos-qemu-aarch64.provisioned"
+lineage="$provisioned/$cache_prefix.provisioned"
 if [[ -e "$base" || -L "$base" || -e "$lineage" || -L "$lineage" ]]; then
     [[ -f "$base" && ! -L "$base" && -f "$lineage" && ! -L "$lineage" &&
        "$(vm_stat_mode "$base")" == 400 && "$(vm_stat_mode "$lineage")" == 400 ]] ||
         vm_die 'partial or unsafe postmarketOS provisioned cache entry exists'
     vm_assert_owned "$base"; vm_assert_owned "$lineage"
-    [[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_POSTMARKETOS_PROVISIONED_V1 &&
+    lineage_boot_size_mib="$(sed -n 's/^boot_size_mib=//p' "$lineage")"
+    [[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_POSTMARKETOS_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED &&
        "$(sed -n 's/^builder_sha256=//p' "$lineage")" == "$builder_sha" &&
        "$(sed -n 's/^source_lock_sha256=//p' "$lineage")" == "$source_lock_sha" &&
        "$(sed -n 's/^template_sha256=//p' "$lineage")" == "$template_sha" &&
        "$(sed -n 's/^metadata_sha256=//p' "$lineage")" == "$metadata_sha" ]] ||
         vm_die 'cached postmarketOS provisioned lineage is stale'
+    if [[ "$service_manager" == systemd ]]; then
+        [[ "$lineage_boot_size_mib" == "$boot_size_mib" ]] ||
+            vm_die 'cached postmarketOS systemd base predates the phone-sized /boot contract'
+    elif [[ -n "$lineage_boot_size_mib" && "$lineage_boot_size_mib" != "$boot_size_mib" ]]; then
+        vm_die 'cached postmarketOS OpenRC base has an unexpected /boot size'
+    fi
     base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
     [[ "$base_sha" =~ ^[0-9a-f]{64}$ ]] || vm_die 'cached postmarketOS base hash is invalid'
     printf '%s  %s\n' "$base_sha" "$base" | sha256sum --check --status - ||
         vm_die 'cached postmarketOS base differs from lineage'
     QEMU_IMG="$qemu_img" vm_assert_qcow2_virtual_size \
         "$base" "$derived_virtual" "$derived_virtual" >/dev/null
-    printf 'bootart-vm: validated cached, stock-unverified postmarketOS base: %s\n' "$base"
+    printf 'sart-vm: validated cached, stock-unverified postmarketOS base: %s\n' "$base"
     exit 0
 fi
 
@@ -157,6 +190,9 @@ sed \
     -e "s/__MKINITFS_SHA256__/${source_sha[postmarketos-mkinitfs]}/g" \
     -e "s/__BOOT_DEPLOY_SHA256__/${source_sha[boot-deploy]}/g" \
     -e "s/__BUFFYBOX_SHA256__/${source_sha[buffybox]}/g" \
+    -e "s/__SERVICE_MANAGER__/${service_manager}/g" \
+    -e "s/__EXTRA_PACKAGES__/${extra_packages}/g" \
+    -e "s/boot_size = 2048/boot_size = ${boot_size_mib}/" \
     "$template" > "$user_data"
 ! grep -Eq '__[A-Z_]+__' "$user_data" || vm_die 'unresolved postmarketOS builder marker'
 cp -- "$metadata" "$meta_data"
@@ -194,7 +230,7 @@ qemu_args=(
     -nic user,model=virtio-net-pci
     -device virtio-serial-pci
     -chardev "pipe,id=fde,path=$secret_base"
-    -device virtserialport,chardev=fde,name=bootart.fde
+    -device virtserialport,chardev=fde,name=sart.fde
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny
     -no-reboot -boot c,strict=on
     -drive "file=$builder_overlay,format=qcow2,if=virtio,cache=none,aio=threads"
@@ -222,33 +258,52 @@ drain_pid=$!
 writer_pid=$!
 
 vm_assert_executable_identity "$qemu" "$qemu_identity" 'postmarketOS builder QEMU'
-printf 'bootart-vm: provisioning encrypted postmarketOS qemu-aarch64 inside disposable QEMU (timeout %ss)\n' \
-    "$provision_timeout"
+printf 'sart-vm: provisioning encrypted postmarketOS qemu-aarch64 (%s) inside disposable QEMU (timeout %ss)\n' \
+    "$service_manager" "$provision_timeout"
 set +e
 timeout --signal=TERM --kill-after=15s "${provision_timeout}s" "${qemu_args[@]}" &
 qemu_pid=$!
 wait "$qemu_pid"; qemu_status=$?; qemu_pid=
+if [[ $qemu_status -ne 0 && "$writer_pid" =~ ^[1-9][0-9]*$ ]]; then
+    kill -TERM "$writer_pid" 2>/dev/null || true
+fi
 wait "$writer_pid"; writer_status=$?; writer_pid=
 set -e
 kill -TERM "$drain_pid" 2>/dev/null || true; wait "$drain_pid" 2>/dev/null || true; drain_pid=
 kill -TERM "$capture_pid" 2>/dev/null || true; wait "$capture_pid" 2>/dev/null || true; capture_pid=
 rm -f -- "$serial_fifo" "$secret_in" "$secret_out"
-[[ $writer_status -eq 0 ]] || vm_die 'postmarketOS private passphrase writer failed'
 [[ $qemu_status -eq 0 ]] ||
     vm_die "postmarketOS builder QEMU failed or timed out: status $qemu_status"
+[[ $writer_status -eq 0 ]] || vm_die 'postmarketOS private passphrase writer failed'
 [[ ! -e "$serial_overflow" ]] || vm_die 'postmarketOS provisioning serial output exceeded its bound'
-[[ "$(grep -a -Fc BOOTART_VM_POSTMARKETOS_PROVISION_PASS_V1 "$serial_log" || true)" == 1 ]] ||
+[[ "$(grep -a -Fc SART_VM_POSTMARKETOS_PROVISION_PASS_V1 "$serial_log" || true)" == 1 ]] ||
     vm_die "postmarketOS provision oracle is absent; inspect $serial_log"
-! grep -a -Fq BOOTART_VM_POSTMARKETOS_PROVISION_FAIL_V1 "$serial_log" ||
+! grep -a -Fq SART_VM_POSTMARKETOS_PROVISION_FAIL_V1 "$serial_log" ||
     vm_die "postmarketOS builder reported failure; inspect $serial_log"
-[[ "$(grep -a -Fc 'BOOTART_VM_POSTMARKETOS_KERNEL_APK_V1|' "$serial_log" || true)" == 2 ]] ||
+[[ "$(grep -a -Fc 'SART_VM_POSTMARKETOS_KERNEL_APK_V1|' "$serial_log" || true)" == 2 ]] ||
     vm_die 'postmarketOS provisioner did not attest exactly two kernel-update APKs'
-[[ "$(grep -a -Fc 'BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_V1|' "$serial_log" || true)" == 1 ]] ||
+[[ "$(grep -a -Fc 'SART_VM_POSTMARKETOS_KERNEL_INDEX_V1|' "$serial_log" || true)" == 1 ]] ||
     vm_die 'postmarketOS provisioner did not attest exactly one kernel repository index'
+[[ "$(grep -a -Fc 'SART_VM_POSTMARKETOS_BOOT_MOUNT_V1|' "$serial_log" || true)" == 1 ]] ||
+    vm_die 'postmarketOS provisioner did not attest exactly one installed /boot policy'
+[[ "$(grep -a -Fc 'SART_VM_POSTMARKETOS_INITRAMFS_COMPRESSION_V1|gzip|1f8b08' "$serial_log" || true)" == 1 ]] ||
+    vm_die 'postmarketOS provisioner did not attest its gzip software-stack initramfs'
+[[ "$(grep -a -Fc 'SART_VM_FAIRPHONE_FP6_DEVICEINFO_FIXTURE_V1|2e9d77cba8c60cd6a58576cdcc24355d8c9d8a2a750bb3ce0399b79591a7eac9' "$serial_log" || true)" == 1 ]] ||
+    vm_die 'postmarketOS provisioner did not install the exact pinned Fairphone 6 device contract fixture'
+capacity_seed_count="$(grep -a -Fc 'SART_VM_POSTMARKETOS_BOOT_CAPACITY_SEED_V1|' "$serial_log" || true)"
+if [[ "$service_manager" == systemd ]]; then
+    [[ "$capacity_seed_count" == 1 ]] ||
+        vm_die 'postmarketOS systemd provisioner did not attest its constrained /boot capacity'
+    [[ "$(grep -a -Fc 'SART_VM_POSTMARKETOS_BOOT_CAPACITY_BEFORE_V1|' "$serial_log" || true)" == 1 ]] ||
+        vm_die 'postmarketOS systemd provisioner did not attest pre-reserve /boot capacity'
+else
+    [[ "$capacity_seed_count" == 0 ]] ||
+        vm_die 'postmarketOS OpenRC provisioner unexpectedly constrained /boot capacity'
+fi
 kernel_apk_fact() {
     local wanted=$1 field=$2 value
     value="$(awk -F '|' -v wanted="$wanted" -v field="$field" '
-        $1 == "BOOTART_VM_POSTMARKETOS_KERNEL_APK_V1" && $2 == wanted {
+        $1 == "SART_VM_POSTMARKETOS_KERNEL_APK_V1" && $2 == wanted {
             value=$field
             sub(/\r$/, "", value)
             print value
@@ -267,7 +322,7 @@ mainline_kernel_sha="$(kernel_apk_fact "$mainline_kernel_apk" 4)"
 kernel_index_fact() {
     local field=$1 value
     value="$(awk -F '|' -v field="$field" '
-        $1 == "BOOTART_VM_POSTMARKETOS_KERNEL_INDEX_V1" {
+        $1 == "SART_VM_POSTMARKETOS_KERNEL_INDEX_V1" {
             value=$field
             sub(/\r$/, "", value)
             print value
@@ -324,11 +379,13 @@ serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 args_sha="$(sha256sum "$args_file" | awk '{ print $1 }')"
 lineage_tmp="$run_dir/base.provisioned"
 printf '%s\n' \
-    'schema=BOOTART_POSTMARKETOS_PROVISIONED_V1' \
+    'schema=SART_POSTMARKETOS_PROVISIONED_V1' \
     'status=PROVISIONED_UNVERIFIED' \
     "builder_id=$builder_id" "builder_url=$builder_url" \
     "builder_sha256=$builder_sha" "builder_bytes=$builder_bytes" \
     "source_lock_sha256=$source_lock_sha" \
+    "service_manager=$service_manager" \
+    "boot_size_mib=$boot_size_mib" \
     "template_sha256=$template_sha" "metadata_sha256=$metadata_sha" \
     "pmbootstrap_revision=${source_revision[pmbootstrap]}" \
     "pmbootstrap_sha256=${source_sha[pmbootstrap]}" \
@@ -349,7 +406,7 @@ printf '%s\n' \
     "base_sha256=$base_sha" "base_virtual_bytes=$derived_virtual" \
     "qemu_sha256=$qemu_sha" "qemu_img_sha256=$qemu_img_sha" \
     "provision_serial_sha256=$serial_sha" "provision_args_sha256=$args_sha" \
-    'provision_oracle=BOOTART_VM_POSTMARKETOS_PROVISION_PASS_V1' > "$lineage_tmp"
+    'provision_oracle=SART_VM_POSTMARKETOS_PROVISION_PASS_V1' > "$lineage_tmp"
 chmod 0400 -- "$target_disk" "$lineage_tmp"
 ln -- "$target_disk" "$base" || vm_die 'refusing to replace postmarketOS base'
 ln -- "$lineage_tmp" "$lineage" || {
@@ -358,4 +415,5 @@ ln -- "$lineage_tmp" "$lineage" || {
 }
 rm -f -- "$lineage_tmp"
 published=yes
-printf 'bootart-vm: sealed stock-unverified encrypted postmarketOS base: %s\n' "$base"
+printf 'sart-vm: sealed stock-unverified encrypted postmarketOS %s base: %s\n' \
+    "$service_manager" "$base"

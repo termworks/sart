@@ -7,10 +7,27 @@ ulimit -c 0
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib.sh"
 
-[[ $# -eq 6 ]] || vm_die \
-    'usage: verify-postmarketos-qemu-aarch64-base.sh REPO VM HOST_QEMU QEMU_IMG BOOT_TIMEOUT LOGIN_TIMEOUT'
-repo_root=$1; vm_root=$2; configured_host_qemu=$3; configured_qemu_img=$4
-boot_timeout=$5; login_timeout=$6
+[[ $# -eq 8 ]] || vm_die \
+    'usage: verify-postmarketos-qemu-aarch64-base.sh REPO VM CACHE_PREFIX SERVICE_MANAGER HOST_QEMU QEMU_IMG BOOT_TIMEOUT LOGIN_TIMEOUT'
+repo_root=$1; vm_root=$2; cache_prefix=$3; service_manager=$4
+configured_host_qemu=$5; configured_qemu_img=$6; boot_timeout=$7; login_timeout=$8
+case "$cache_prefix:$service_manager" in
+    postmarketos-qemu-aarch64:openrc)
+        stock_oracle=SART_VM_POSTMARKETOS_BASE_PASS_V1
+        expected_pid1='init|openrc-init'
+        expected_manager_tool=/sbin/openrc
+        forbidden_manager_tool=/usr/lib/systemd/systemd
+        expected_boot_size_mib=2048
+        ;;
+    postmarketos-qemu-aarch64-systemd:systemd)
+        stock_oracle=SART_VM_POSTMARKETOS_SYSTEMD_BASE_PASS_V1
+        expected_pid1=systemd
+        expected_manager_tool=/usr/lib/systemd/systemd
+        forbidden_manager_tool=/sbin/openrc
+        expected_boot_size_mib=512
+        ;;
+    *) vm_die "unreviewed postmarketOS stock contract: $cache_prefix:$service_manager" ;;
+esac
 [[ "$boot_timeout" =~ ^[1-9][0-9]{2,3}$ && "$boot_timeout" -le 1800 ]] ||
     vm_die 'postmarketOS stock boot timeout must be 100..1800 seconds'
 [[ "$login_timeout" =~ ^[1-9][0-9]{2,3}$ && "$login_timeout" -le 1800 ]] ||
@@ -36,17 +53,23 @@ uefi_code="$(readlink -f -- "$uefi_code")"
 uefi_vars_template="$(readlink -f -- "$uefi_vars_template")"
 
 provisioned="$vm_root/cache/provisioned"
-base="$provisioned/postmarketos-qemu-aarch64.qcow2"
-lineage="$provisioned/postmarketos-qemu-aarch64.provisioned"
-verified="$provisioned/postmarketos-qemu-aarch64.verified"
+base="$provisioned/$cache_prefix.qcow2"
+lineage="$provisioned/$cache_prefix.provisioned"
+verified="$provisioned/$cache_prefix.verified"
 for sealed in "$base" "$lineage"; do
     [[ -f "$sealed" && ! -L "$sealed" && "$(vm_stat_mode "$sealed")" == 400 ]] ||
         vm_die "missing or unsealed postmarketOS input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_POSTMARKETOS_PROVISIONED_V1 &&
-   "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_POSTMARKETOS_PROVISIONED_V1 &&
+   "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED &&
+   "$(sed -n 's/^service_manager=//p' "$lineage")" == "$service_manager" ]] ||
     vm_die 'postmarketOS lineage is not awaiting stock verification'
+lineage_boot_size_mib="$(sed -n 's/^boot_size_mib=//p' "$lineage")"
+if [[ "$service_manager" == systemd ]]; then
+    [[ "$lineage_boot_size_mib" == "$expected_boot_size_mib" ]] ||
+        vm_die 'postmarketOS systemd lineage lacks the phone-sized /boot contract'
+fi
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
 device_kernel_apk="$(sed -n 's/^device_kernel_apk=//p' "$lineage")"
 device_kernel_bytes="$(sed -n 's/^device_kernel_apk_bytes=//p' "$lineage")"
@@ -80,15 +103,15 @@ QEMU_IMG="$qemu_img" vm_assert_qcow2_virtual_size "$base" 8589934592 8589934592 
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'postmarketOS stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_POSTMARKETOS_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_POSTMARKETOS_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
        "$(sed -n 's/^uefi_code_sha256=//p' "$verified")" == "$uefi_code_sha" &&
        "$(sed -n 's/^uefi_vars_template_sha256=//p' "$verified")" == "$uefi_vars_template_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_POSTMARKETOS_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == "$stock_oracle" ]] ||
         vm_die 'postmarketOS stock-verification lineage is stale'
-    printf 'BOOTART_VM_POSTMARKETOS_BASE_PASS_V1\n'
+    printf '%s\n' "$stock_oracle"
     exit 0
 fi
 
@@ -109,7 +132,7 @@ scrubbed=no
 report_error() {
     local status=$?
     trap - ERR
-    printf 'bootart-vm: postmarketOS stock verifier failed: line=%s status=%s\n' \
+    printf 'sart-vm: postmarketOS stock verifier failed: line=%s status=%s\n' \
         "${BASH_LINENO[0]}" "$status" >&2
     exit "$status"
 }
@@ -320,18 +343,25 @@ capture_screen "$retry_screen"
    "$(sha256sum "$retry_screen" | awk '{ print $1 }')" ]] ||
     vm_die 'stock unl0kr field did not react to reviewed keyboard input'
 qmp_send_key ret
-wait_for_log 'bootart-pmos login:' "$login_timeout" ||
+wait_for_log 'sart-pmos login:' "$login_timeout" ||
     vm_die 'postmarketOS did not reach serial login after stock unl0kr unlock'
 
 guest_sys='/''sys'
 guest_sudo='su''do'
-guest_check='sh -c '\''set -u; fail() { prefix=BOOTART_VM_POSTMARKETOS_BASE_FAIL_; printf "%s%s\n" "$prefix" "$1"; exit 1; }; case "$(cat /proc/1/comm)" in init|openrc-init) : ;; *) fail PID1 ;; esac; root_device=; roots=0; while read -r _ _ device _ mountpoint rest; do if test "$mountpoint" = /; then root_device=$device; roots=$((roots + 1)); fi; done < /proc/self/mountinfo; test "$roots" = 1 || fail ROOT_COUNT; '
-guest_check+="test \"\$root_device\" = \"\$(cat $guest_sys/class/block/dm-0/dev)\" || fail ROOT_DEVICE; test \"\$(cat $guest_sys/class/block/dm-0/dm/name)\" = root || fail ROOT_NAME; "
-guest_check+='for tool in /usr/sbin/mkinitfs /usr/bin/boot-deploy /sbin/openrc /usr/bin/fde-unlock /usr/bin/unl0kr; do test -x "$tool" || fail TOOL; done; for package in postmarketos-mkinitfs boot-deploy unl0kr; do apk info -e "$package" || fail PACKAGE; done; '
-guest_check+="kernel_cache=/var/cache/bootart-kernel-update/aarch64; test \"\$(stat -c %s \"\$kernel_cache/$device_kernel_apk\")\" = $device_kernel_bytes || fail KERNEL_DEVICE_SIZE; set -- \$(sha256sum \"\$kernel_cache/$device_kernel_apk\"); test \"\$1\" = $device_kernel_sha || fail KERNEL_DEVICE_SHA; test \"\$(stat -c %s \"\$kernel_cache/$mainline_kernel_apk\")\" = $mainline_kernel_bytes || fail KERNEL_MAINLINE_SIZE; set -- \$(sha256sum \"\$kernel_cache/$mainline_kernel_apk\"); test \"\$1\" = $mainline_kernel_sha || fail KERNEL_MAINLINE_SHA; "
-guest_check+="kernel_index=\"\$kernel_cache/$kernel_index\"; test \"\$(stat -c %s \"\$kernel_index\")\" = $kernel_index_bytes || fail KERNEL_INDEX_SIZE; set -- \$(sha256sum \"\$kernel_index\"); test \"\$1\" = $kernel_index_sha || fail KERNEL_INDEX_SHA; unset kernel_index kernel_cache; "
-guest_check+='marker=BOOTART_VM_POSTMARKETOS_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker root_device roots prefix; '
-guest_check+="'"
+guest_core_check="sh -c 'set -u; fail() { prefix=SART_VM_POSTMARKETOS_BASE_FAIL_; printf \"%s%s\\n\" \"\$prefix\" \"\$1\"; exit 1; }; case \"\$(cat /proc/1/comm)\" in $expected_pid1) : ;; *) fail PID1 ;; esac; root_device=; roots=0; while read -r _ _ device _ mountpoint rest; do if test \"\$mountpoint\" = /; then root_device=\$device; roots=\$((roots + 1)); fi; done < /proc/self/mountinfo; test \"\$roots\" = 1 || fail ROOT_COUNT; "
+guest_core_check+="test \"\$root_device\" = \"\$(cat $guest_sys/class/block/dm-0/dev)\" || fail ROOT_DEVICE; test \"\$(cat $guest_sys/class/block/dm-0/dm/name)\" = root || fail ROOT_NAME; "
+guest_core_check+="for tool in /usr/sbin/mkinitfs /usr/bin/boot-deploy $expected_manager_tool /usr/bin/fde-unlock /usr/bin/unl0kr; do test -x \"\$tool\" || fail TOOL; done; test ! -x $forbidden_manager_tool || fail ALTERNATE_MANAGER; for package in postmarketos-mkinitfs boot-deploy unl0kr; do apk info -e \"\$package\" || fail PACKAGE; done; "
+guest_core_check+="initramfs_magic=\$(head -c 3 /boot/initramfs | od -An -tx1 | tr -d '[:space:]'); test \"\$initramfs_magic\" = 1f8b08 || fail INITRAMFS_GZIP; marker=SART_VM_POSTMARKETOS_CORE_; marker=\${marker}PASS_V1; printf \"%s\\n\" \"\$marker\"; unset initramfs_magic marker root_device roots prefix; '"
+capacity_check=
+if [[ "$service_manager" == systemd ]]; then
+    capacity_check='sh -c '\''set -u; fail() { prefix=SART_VM_POSTMARKETOS_BASE_FAIL_; printf "%s%s\n" "$prefix" "$1"; exit 1; }; test "$(stat -c %d /)" != "$(stat -c %d /boot)" || fail BOOT_CAPACITY_DEVICE; test "$(findmnt -n -o FSTYPE /boot)" = vfat || fail BOOT_CAPACITY_FILESYSTEM; test -f /boot/.sart-vm-capacity-reserve && test ! -L /boot/.sart-vm-capacity-reserve || fail BOOT_CAPACITY_RESERVE; test "$(stat -c %u /boot/.sart-vm-capacity-reserve)" = 0 || fail BOOT_CAPACITY_OWNER; test "$(stat -c %s /boot/.sart-vm-capacity-reserve)" -gt 0 || fail BOOT_CAPACITY_RESERVE_SIZE; set -- $(df -Pk /boot | tail -n 1); boot_total_kib=$2; boot_free_kib=$4; case "$boot_total_kib:$boot_free_kib" in *[!0-9:]*|:*) fail BOOT_CAPACITY_FORMAT ;; esac; test "$boot_total_kib" -ge 480000 && test "$boot_total_kib" -le 530000 || fail BOOT_CAPACITY_TOTAL; test "$boot_free_kib" -ge 320000 && test "$boot_free_kib" -le 330000 || fail BOOT_CAPACITY_FREE; marker=SART_VM_POSTMARKETOS_BOOT_CAPACITY_; marker=${marker}V1; printf "%s|%s|%s\n" "$marker" "$boot_total_kib" "$boot_free_kib"'\'''
+fi
+case "$service_manager" in
+    openrc) stock_oracle_tail=BASE_PASS_V1 ;;
+    systemd) stock_oracle_tail=SYSTEMD_BASE_PASS_V1 ;;
+esac
+guest_kernel_check="sh -c 'set -u; fail() { prefix=SART_VM_POSTMARKETOS_BASE_FAIL_; printf \"%s%s\\n\" \"\$prefix\" \"\$1\"; exit 1; }; kernel_cache=/var/cache/sart-kernel-update/aarch64; test \"\$(stat -c %s \"\$kernel_cache/$device_kernel_apk\")\" = $device_kernel_bytes || fail KERNEL_DEVICE_SIZE; set -- \$(sha256sum \"\$kernel_cache/$device_kernel_apk\"); test \"\$1\" = $device_kernel_sha || fail KERNEL_DEVICE_SHA; test \"\$(stat -c %s \"\$kernel_cache/$mainline_kernel_apk\")\" = $mainline_kernel_bytes || fail KERNEL_MAINLINE_SIZE; set -- \$(sha256sum \"\$kernel_cache/$mainline_kernel_apk\"); test \"\$1\" = $mainline_kernel_sha || fail KERNEL_MAINLINE_SHA; "
+guest_kernel_check+="kernel_index=\"\$kernel_cache/$kernel_index\"; test \"\$(stat -c %s \"\$kernel_index\")\" = $kernel_index_bytes || fail KERNEL_INDEX_SIZE; set -- \$(sha256sum \"\$kernel_index\"); test \"\$1\" = $kernel_index_sha || fail KERNEL_INDEX_SHA; marker=SART_VM_POSTMARKETOS_; marker=\${marker}$stock_oracle_tail; printf \"%s\\n\" \"\$marker\"; unset kernel_index kernel_cache marker prefix; '"
 serial_send() {
     local payload=$1 status
     set +e
@@ -351,27 +381,36 @@ serial_send() {
 serial_send $'\nuser\n'
 wait_for_log 'Password:' "$login_timeout" ||
     vm_die 'postmarketOS serial login did not request the user password'
-serial_send $'bootart\n'
-wait_for_log 'bootart-pmos:~$' "$login_timeout" ||
+serial_send $'sart\n'
+wait_for_log 'sart-pmos:~$' "$login_timeout" ||
     vm_die 'postmarketOS authenticated shell prompt did not appear'
 
 # The offline kernel APK cache is deliberately root-only.  Verify it through
 # the installed user's real administration path instead of weakening its
 # permissions merely for the stock-state assertion.  The sudo marker appears
 # once in the echoed command and once in the password prompt.
-sudo_marker=BOOTART_PMOS_VERIFY_SUDO:
+sudo_marker=SART_PMOS_VERIFY_SUDO:
 sudo_marker_count="$(count_log "$sudo_marker")"
 serial_send "$guest_sudo -S -p $sudo_marker -s"$'\n'
 wait_for_log_count "$sudo_marker" "$((sudo_marker_count + 2))" "$login_timeout" ||
     vm_die 'postmarketOS stock verifier did not reach the administrator password prompt'
-serial_send $'bootart\n'
+serial_send $'sart\n'
 wait_for_log '/home/user #' "$login_timeout" ||
     vm_die 'postmarketOS stock verifier did not obtain the installed root shell'
 unset guest_sudo sudo_marker sudo_marker_count
-serial_send "$guest_check"$'\n'
+if [[ -n "$capacity_check" ]]; then
+    serial_send "$capacity_check"$'\n'
+    wait_for_log 'SART_VM_POSTMARKETOS_BOOT_CAPACITY_V1|' "$login_timeout" ||
+        vm_die 'postmarketOS stock verifier did not attest constrained /boot capacity'
+fi
+core_oracle=SART_VM_POSTMARKETOS_CORE_PASS_V1
+serial_send "$guest_core_check"$'\n'
+wait_for_log "$core_oracle" "$login_timeout" ||
+    vm_die 'postmarketOS guest core verification did not emit its authenticated result'
+serial_send "$guest_kernel_check"$'\n'
 guest_result=no
 for ((elapsed=0; elapsed < login_timeout; elapsed+=1)); do
-    if grep -a -F -q -- 'BOOTART_VM_POSTMARKETOS_BASE_PASS_V1' "$raw_serial"; then
+    if grep -a -F -q -- "$stock_oracle" "$raw_serial"; then
         guest_result=yes
         break
     fi
@@ -379,7 +418,7 @@ for ((elapsed=0; elapsed < login_timeout; elapsed+=1)); do
     # executing it.  Only accept a complete, standalone failure oracle; never
     # mistake the literal prefix in that echoed command for a guest result.
     failure="$(awk '{ sub(/\r$/, "") }
-        /^BOOTART_VM_POSTMARKETOS_BASE_FAIL_[A-Z_]+$/ { result=$0 }
+        /^SART_VM_POSTMARKETOS_BASE_FAIL_[A-Z_]+$/ { result=$0 }
         END { print result }' "$raw_serial")"
     if [[ -n "$failure" ]]; then
         vm_die "postmarketOS guest verification rejected stock state: $failure"
@@ -389,6 +428,7 @@ for ((elapsed=0; elapsed < login_timeout; elapsed+=1)); do
 done
 [[ "$guest_result" == yes ]] ||
     vm_die 'postmarketOS guest verification did not emit its authenticated result'
+unset core_oracle guest_core_check guest_kernel_check stock_oracle_tail
 qmp_controlled_stop
 
 set +e
@@ -397,7 +437,7 @@ set -e
 qemu_pid=
 [[ $qemu_status -eq 0 ]] || vm_die "postmarketOS QEMU did not power off cleanly: status $qemu_status"
 scrub_serial
-[[ "$(grep -a -Fc BOOTART_VM_POSTMARKETOS_BASE_PASS_V1 "$serial_log" || true)" == 1 ]] ||
+[[ "$(grep -a -Fc "$stock_oracle" "$serial_log" || true)" == 1 ]] ||
     vm_die 'postmarketOS stock oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 134217728 'postmarketOS stock serial evidence'
 printf -v secret_pattern '%s%s' 112 358
@@ -413,15 +453,16 @@ vm_assert_run_files_at_most "$vm_root" "$run_dir" 12884901888
 
 verified_tmp="$run_dir/base.verified"
 printf '%s\n' \
-    'schema=BOOTART_POSTMARKETOS_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
+    'schema=SART_POSTMARKETOS_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" "source_lineage_sha256=$source_lineage_sha" \
+    "boot_size_mib=${lineage_boot_size_mib:-legacy}" \
     "uefi_code_sha256=$uefi_code_sha" \
     "uefi_vars_template_sha256=$uefi_vars_template_sha" \
     "stock_serial_sha256=$(sha256sum "$serial_log" | awk '{ print $1 }')" \
     "stock_password_screen_sha256=$(sha256sum "$screen" | awk '{ print $1 }')" \
     "stock_password_retry_screen_sha256=$(sha256sum "$retry_screen" | awk '{ print $1 }')" \
-    'stock_oracle=BOOTART_VM_POSTMARKETOS_BASE_PASS_V1' > "$verified_tmp"
+    "stock_oracle=$stock_oracle" > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" || vm_die 'refusing to replace postmarketOS verified lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_POSTMARKETOS_BASE_PASS_V1\n'
+printf '%s\n' "$stock_oracle"

@@ -6,14 +6,14 @@ umask 077
 
 [[ $# -eq 9 ]] || exit 2
 action=$1; repo_root=$2; vm_root=$3; run_dir=$4; base_image=$5
-overlay=$6; bootart=$7; oracle=$8; fixture=$9
+overlay=$6; sart=$7; oracle=$8; fixture=$9
 [[ "$fixture" == arch-mkinitcpio-systemd ]] || exit 2
 [[ -n "$repo_root" && -n "$vm_root" && -n "$base_image" ]] || exit 2
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -58,7 +58,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112; expected_secret+=358
@@ -70,16 +70,16 @@ EOF
         guest_poweroff='power''off'; guest_remove='r''m'; guest_copy='c''p'
         guest_move='m''v'; guest_chmod='ch''mod'; guest_tee='t''ee'; guest_sh='s''h'
         guest_generator='mkinit''cpio'; guest_dev='/''dev'; guest_tty='/''dev/tty'
-        guest_var_tmp='/''var/tmp'; guest_transport="$guest_dev/disk/by-label/BOOTART"
-        guest_manifest='/''var/lib/bootart/in''stall/manifest.v1'
+        guest_var_tmp='/''var/tmp'; guest_transport="$guest_dev/disk/by-label/SART"
+        guest_manifest='/''var/lib/sart/in''stall/manifest.v1'
         guest_image=/boot/initramfs-linux.img
         guest_grub_cfg=/boot/grub/grub.cfg
         guest_grub_reboot=/usr/bin/grub-reboot
         guest_grub_update=/usr/bin/grub-mkconfig
-        guest_runtime_hook=/usr/lib/initcpio/hooks/bootart
-        guest_disable_script=/etc/grub.d/42_bootart_vm_disabled
-        shell_prompt='[bootart@bootart-vm ~]$'
-        guest_disable_write="/usr/bin/sed -e 's/[.]bootart-known-good//g' -e 's/bootart-known-good/bootart-disabled/g' -e '/^[[:space:]]*linux / s/\$/ bootart=0/' /etc/grub.d/41_bootart_known_good | $guest_sudo -n /usr/bin/$guest_tee $guest_disable_script >/dev/null"
+        guest_runtime_hook=/usr/lib/initcpio/hooks/sart
+        guest_disable_script=/etc/grub.d/42_sart_vm_disabled
+        shell_prompt='[sart@sart-vm ~]$'
+        guest_disable_write="/usr/bin/sed -e 's/[.]sart-known-good//g' -e 's/sart-known-good/sart-disabled/g' -e '/^[[:space:]]*linux / s/\$/ sart=0/' /etc/grub.d/41_sart_known_good | $guest_sudo -n /usr/bin/$guest_tee $guest_disable_script >/dev/null"
 
         count_log() {
             { grep -a -F -o -- "$1" "$run_dir/serial.log" 2>/dev/null || true; } | wc -l
@@ -157,22 +157,22 @@ EOF
         unlock_stock() { wait_stock_prompt; sleep 2; qmp_type_secret; qmp_key ret; }
         login_guest() {
             local wanted=$1 password_count prompt_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:'); prompt_count=$(count_log "$shell_prompt")
-            send_serial bootart; wait_count 'Password:' "$((password_count + 1))"
+            send_serial sart; wait_count 'Password:' "$((password_count + 1))"
             send_serial ubuntu; wait_count "$shell_prompt" "$((prompt_count + 1))"
         }
         privileged_step() {
             local request=$1 marker=$2 limit=${3:-600} marker_count suffix
             marker_count=$(count_log "$marker")
-            if [[ "$marker" == BOOTART_VM_* ]]; then
-                suffix=${marker#BOOTART_}; request+=" && m=BOOTART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
+            if [[ "$marker" == SART_VM_* ]]; then
+                suffix=${marker#SART_}; request+=" && m=SART_ && m=\${m}$suffix && printf '%s\\n' \"\$m\""
             fi
             send_serial "$request"; wait_count "$marker" "$((marker_count + 1))" "$limit"
         }
         reboot_stock() {
             local login_count
-            login_count=$(count_log 'bootart-vm login:')
+            login_count=$(count_log 'sart-vm login:')
             send_serial "$guest_sudo -n $guest_reboot"
             unlock_stock
             login_guest "$((login_count + 1))"
@@ -180,71 +180,71 @@ EOF
 
         unlock_stock
         login_guest 1
-        privileged_step "$guest_sudo -n $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_RECOVERY_MOUNT_DIR_V1
-        privileged_step "$guest_sudo -n $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_RECOVERY_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_sudo -n $guest_sh -c '/usr/bin/sha256sum $guest_image $guest_grub_cfg > $guest_var_tmp/bootart-recovery-baseline.sha256; test ! -e /usr/bin/bootart; test ! -e $guest_manifest'" \
-            BOOTART_VM_RECOVERY_BASELINE_V1
+        privileged_step "$guest_sudo -n $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_RECOVERY_MOUNT_DIR_V1
+        privileged_step "$guest_sudo -n $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_RECOVERY_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_sudo -n $guest_sh -c '/usr/bin/sha256sum $guest_image $guest_grub_cfg > $guest_var_tmp/sart-recovery-baseline.sha256; test ! -e /usr/bin/sart; test ! -e $guest_manifest'" \
+            SART_VM_RECOVERY_BASELINE_V1
 
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; journal=/.bootart-installer-journal.v1; manifest=$guest_manifest; test -x /usr/bin/pgrep; ! /usr/bin/pgrep -x bootart; /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm <$guest_tty >$guest_tty 2>&1 & pid=\$!; elapsed=0; while /usr/bin/kill -0 \"\$pid\" 2>/dev/null && ! { test -r \"\$journal\" && /usr/bin/grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; } && test \"\$elapsed\" -lt 12000; do /usr/bin/sleep 0.05; elapsed=\$((elapsed + 1)); done; test -r \"\$journal\"; /usr/bin/grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; /usr/bin/kill -STOP \"\$pid\"; test ! -e \"\$manifest\"; /usr/bin/kill -KILL \"\$pid\"; set +e; wait \"\$pid\"; set -e; /usr/bin/sleep 1; ! /usr/bin/pgrep -x bootart; /usr/bin/sync'" \
-            BOOTART_VM_RECOVERY_PRODUCTION_CRASH_V1 1200
-        privileged_step "$guest_sudo -n /mnt/bootart-transport/bootart $guest_install recover --confirm-host bootart-vm" \
-            'bootart install recover: rolled-back'
-        privileged_step "$guest_sudo -n $guest_sh -c '/usr/bin/sha256sum -c $guest_var_tmp/bootart-recovery-baseline.sha256; test ! -e /usr/bin/bootart; test ! -e $guest_manifest; test ! -e /.bootart-installer-journal.v1'" \
-            BOOTART_VM_RECOVERY_CRASH_ROLLED_BACK_V1
-        privileged_step "$guest_sudo -n /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            'bootart install apply: installed' 1200
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; journal=/.sart-installer-journal.v1; manifest=$guest_manifest; test -x /usr/bin/pgrep; ! /usr/bin/pgrep -x sart; /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm <$guest_tty >$guest_tty 2>&1 & pid=\$!; elapsed=0; while /usr/bin/kill -0 \"\$pid\" 2>/dev/null && ! { test -r \"\$journal\" && /usr/bin/grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; } && test \"\$elapsed\" -lt 12000; do /usr/bin/sleep 0.05; elapsed=\$((elapsed + 1)); done; test -r \"\$journal\"; /usr/bin/grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; /usr/bin/kill -STOP \"\$pid\"; test ! -e \"\$manifest\"; /usr/bin/kill -KILL \"\$pid\"; set +e; wait \"\$pid\"; set -e; /usr/bin/sleep 1; ! /usr/bin/pgrep -x sart; /usr/bin/sync'" \
+            SART_VM_RECOVERY_PRODUCTION_CRASH_V1 1200
+        privileged_step "$guest_sudo -n /mnt/sart-transport/sart $guest_install recover --confirm-host sart-vm" \
+            'sart install recover: rolled-back'
+        privileged_step "$guest_sudo -n $guest_sh -c '/usr/bin/sha256sum -c $guest_var_tmp/sart-recovery-baseline.sha256; test ! -e /usr/bin/sart; test ! -e $guest_manifest; test ! -e /.sart-installer-journal.v1'" \
+            SART_VM_RECOVERY_CRASH_ROLLED_BACK_V1
+        privileged_step "$guest_sudo -n /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            'sart install apply: installed' 1200
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_sudo -n /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_RECOVERY_INSTALLED_STATUS_V1
-        privileged_step "$guest_sudo -n $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_RECOVERY_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_sudo -n /usr/bin/sart $guest_install status" \
+            SART_VM_RECOVERY_INSTALLED_STATUS_V1
+        privileged_step "$guest_sudo -n $guest_umount /mnt/sart-transport" \
+            SART_VM_RECOVERY_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport; sleep 3
 
-        privileged_step "$guest_sudo -n $guest_grub_reboot bootart-known-good" \
-            BOOTART_VM_RECOVERY_KNOWN_GOOD_SELECTED_V1
+        privileged_step "$guest_sudo -n $guest_grub_reboot sart-known-good" \
+            SART_VM_RECOVERY_KNOWN_GOOD_SELECTED_V1
         reboot_stock
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x bootart; /usr/bin/bootart $guest_install status; unset root_source'" \
-            BOOTART_VM_RECOVERY_KNOWN_GOOD_BOOT_V1
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x sart; /usr/bin/sart $guest_install status; unset root_source'" \
+            SART_VM_RECOVERY_KNOWN_GOOD_BOOT_V1
 
-        privileged_step "$guest_sudo -n /usr/bin/$guest_copy -a $guest_runtime_hook $guest_runtime_hook.bootart-vm-save" \
-            BOOTART_VM_RECOVERY_FAILURE_HOOK_SAVED_V1
+        privileged_step "$guest_sudo -n /usr/bin/$guest_copy -a $guest_runtime_hook $guest_runtime_hook.sart-vm-save" \
+            SART_VM_RECOVERY_FAILURE_HOOK_SAVED_V1
         privileged_step "$guest_sudo -n $guest_sh -c 'printf \"%s\\n\" \"run_hook() {\" \"    /usr/bin/false\" \"    return 0\" \"}\" > $guest_runtime_hook'" \
-            BOOTART_VM_RECOVERY_FAILURE_HOOK_STAGED_V1
+            SART_VM_RECOVERY_FAILURE_HOOK_STAGED_V1
         privileged_step "$guest_sudo -n /usr/bin/$guest_chmod 0755 $guest_runtime_hook" \
-            BOOTART_VM_RECOVERY_FAILURE_HOOK_MODE_V1
-        privileged_step "$guest_sudo -n /usr/bin/$guest_generator -k \"\$(uname -r)\" -g $guest_image.bootart-vm-fail" \
-            BOOTART_VM_RECOVERY_FAILURE_IMAGE_BUILT_V1 1200
-        privileged_step "$guest_sudo -n /usr/bin/$guest_move $guest_runtime_hook.bootart-vm-save $guest_runtime_hook" \
-            BOOTART_VM_RECOVERY_FAILURE_HOOK_RESTORED_V1
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; active=$guest_image; /usr/bin/$guest_copy -a \"\$active\" \"\$active.bootart-vm-save\"; /usr/bin/$guest_move \"\$active.bootart-vm-fail\" \"\$active\"; /usr/bin/sync'" \
-            BOOTART_VM_RECOVERY_FAILURE_IMAGE_ACTIVATED_V1
+            SART_VM_RECOVERY_FAILURE_HOOK_MODE_V1
+        privileged_step "$guest_sudo -n /usr/bin/$guest_generator -k \"\$(uname -r)\" -g $guest_image.sart-vm-fail" \
+            SART_VM_RECOVERY_FAILURE_IMAGE_BUILT_V1 1200
+        privileged_step "$guest_sudo -n /usr/bin/$guest_move $guest_runtime_hook.sart-vm-save $guest_runtime_hook" \
+            SART_VM_RECOVERY_FAILURE_HOOK_RESTORED_V1
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; active=$guest_image; /usr/bin/$guest_copy -a \"\$active\" \"\$active.sart-vm-save\"; /usr/bin/$guest_move \"\$active.sart-vm-fail\" \"\$active\"; /usr/bin/sync'" \
+            SART_VM_RECOVERY_FAILURE_IMAGE_ACTIVATED_V1
         reboot_stock
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x bootart; unset root_source'" \
-            BOOTART_VM_RECOVERY_DAEMON_FAILURE_FALLBACK_V1
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; active=$guest_image; /usr/bin/$guest_move \"\$active.bootart-vm-save\" \"\$active\"; /usr/bin/sync; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_RECOVERY_FAILURE_IMAGE_RESTORED_V1
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; test \"\$(cat /proc/1/comm)\" = systemd; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x sart; unset root_source'" \
+            SART_VM_RECOVERY_DAEMON_FAILURE_FALLBACK_V1
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; active=$guest_image; /usr/bin/$guest_move \"\$active.sart-vm-save\" \"\$active\"; /usr/bin/sync; /usr/bin/sart $guest_install status'" \
+            SART_VM_RECOVERY_FAILURE_IMAGE_RESTORED_V1
 
         privileged_step "$guest_disable_write" \
-            BOOTART_VM_RECOVERY_DISABLE_CONFIG_V1
+            SART_VM_RECOVERY_DISABLE_CONFIG_V1
         privileged_step "$guest_sudo -n /usr/bin/$guest_chmod 0755 $guest_disable_script" \
-            BOOTART_VM_RECOVERY_DISABLE_MODE_V1
+            SART_VM_RECOVERY_DISABLE_MODE_V1
         privileged_step "$guest_sudo -n $guest_grub_update -o $guest_grub_cfg" \
-            BOOTART_VM_RECOVERY_DISABLE_GRUB_V1
-        privileged_step "$guest_sudo -n $guest_grub_reboot bootart-disabled" \
-            BOOTART_VM_RECOVERY_DISABLE_SELECTED_V1
+            SART_VM_RECOVERY_DISABLE_GRUB_V1
+        privileged_step "$guest_sudo -n $guest_grub_reboot sart-disabled" \
+            SART_VM_RECOVERY_DISABLE_SELECTED_V1
         reboot_stock
-        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; case \" \$(cat /proc/cmdline) \" in *\" bootart=0 \"*) ;; *) exit 1;; esac; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x bootart; unset root_source'" \
-            BOOTART_VM_RECOVERY_DISABLED_STOCK_BOOT_V1
+        privileged_step "$guest_sudo -n $guest_sh -c 'set -eu; case \" \$(cat /proc/cmdline) \" in *\" sart=0 \"*) ;; *) exit 1;; esac; root_source=\$(findmnt -n -o SOURCE /); case \"\$root_source\" in $guest_dev/mapper/*) ;; *) exit 1;; esac; ! pgrep -x sart; unset root_source'" \
+            SART_VM_RECOVERY_DISABLED_STOCK_BOOT_V1
         privileged_step "$guest_sudo -n $guest_remove -f $guest_disable_script" \
-            BOOTART_VM_RECOVERY_DISABLE_CONFIG_REMOVED_V1
+            SART_VM_RECOVERY_DISABLE_CONFIG_REMOVED_V1
         privileged_step "$guest_sudo -n $guest_grub_update -o $guest_grub_cfg" \
-            BOOTART_VM_RECOVERY_NORMAL_GRUB_RESTORED_V1
-        privileged_step "$guest_sudo -n /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_RECOVERY_FINAL_STATUS_V1
+            SART_VM_RECOVERY_NORMAL_GRUB_RESTORED_V1
+        privileged_step "$guest_sudo -n /usr/bin/sart $guest_install status" \
+            SART_VM_RECOVERY_FINAL_STATUS_V1
 
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\\n%s\\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\\n%s\\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1; wait_count "$oracle" 1

@@ -1,5 +1,5 @@
 {
-  description = "bootart static-musl C++23 package and QEMU development shell";
+  description = "sart static-musl C++23 package and QEMU development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
@@ -13,9 +13,18 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
-        projectLines = lib.filter (line: line != "") (lib.splitString "\n" (builtins.readFile ./PROJECT));
-        projectName = builtins.elemAt projectLines 0;
-        projectVersion = builtins.elemAt projectLines 1;
+        makefileLines = lib.splitString "\n" (builtins.readFile ./Makefile);
+        makeValue = key:
+          let
+            prefix = "override ${key} := ";
+            matches = lib.filter (line: lib.hasPrefix prefix line) makefileLines;
+          in
+          if builtins.length matches == 1 then
+            lib.removePrefix prefix (builtins.head matches)
+          else
+            throw "Makefile must define ${key} exactly once";
+        projectName = makeValue "PROJECT_NAME";
+        projectVersion = makeValue "PROJECT_VERSION";
         supportedLinux = builtins.elem system [
           "x86_64-linux"
           "aarch64-linux"
@@ -27,18 +36,19 @@
             "aarch64"
           else
             null;
-        bootartSource = lib.fileset.toSource {
+        sartSource = lib.fileset.toSource {
           root = ./.;
           fileset = lib.fileset.unions [
-            ./PROJECT
             ./LICENSE
             ./README.md
             ./Makefile
-            ./cpp
+            ./include
+            ./src
+            ./tests
             ./scripts/artifact-inspect.sh
           ];
         };
-        mkBootartStatic =
+        mkSartStatic =
           {
             packageSet,
             buildPackages,
@@ -48,7 +58,7 @@
           packageSet.stdenv.mkDerivation {
             pname = projectName;
             version = projectVersion;
-            src = bootartSource;
+            src = sartSource;
             strictDeps = true;
             dontConfigure = true;
             nativeBuildInputs = with buildPackages; [
@@ -69,7 +79,7 @@
             '';
             installPhase = ''
               runHook preInstall
-              install -Dm755 target/cpp/release/bootart "$out/bin/bootart"
+              install -Dm755 target/cpp/release/sart "$out/bin/sart"
               runHook postInstall
             '';
             postFixup = ''
@@ -77,30 +87,30 @@
                 ${buildPackages.bash}/bin/bash \
                 ${./scripts/artifact-inspect.sh} \
                 ${lib.escapeShellArg expectedArchitecture} \
-                "$out/bin/bootart" "$out/bin"
+                "$out/bin/sart" "$out/bin"
             '';
             meta = {
               description = "Self-contained text boot splash";
               license = lib.licenses.mit;
-              mainProgram = "bootart";
+              mainProgram = "sart";
               platforms = [
                 "x86_64-linux"
                 "aarch64-linux"
               ];
             };
           };
-        bootartStatic = mkBootartStatic {
+        sartStatic = mkSartStatic {
           packageSet = pkgs.pkgsStatic;
           buildPackages = pkgs.buildPackages;
           expectedArchitecture = expectedElfArch;
           readelfProgram = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
         };
         aarch64StaticPackageSet = pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
-        bootartStaticAarch64 =
+        sartStaticAarch64 =
           if system == "aarch64-linux" then
-            bootartStatic
+            sartStatic
           else
-            mkBootartStatic {
+            mkSartStatic {
               packageSet = aarch64StaticPackageSet;
               buildPackages = aarch64StaticPackageSet.buildPackages;
               expectedArchitecture = "aarch64";
@@ -108,12 +118,12 @@
             };
       in
       (lib.optionalAttrs supportedLinux {
-        packages.bootart-static = bootartStatic;
-        packages.bootart-static-aarch64 = bootartStaticAarch64;
-        packages.bootart-cpp-static = bootartStatic;
-        packages.default = bootartStatic;
-        checks.bootart-static = bootartStatic;
-        checks.bootart-cpp-static = bootartStatic;
+        packages.sart-static = sartStatic;
+        packages.sart-static-aarch64 = sartStaticAarch64;
+        packages.sart-cpp-static = sartStatic;
+        packages.default = sartStatic;
+        checks.sart-static = sartStatic;
+        checks.sart-cpp-static = sartStatic;
       })
       // {
         devShells.default = pkgs.mkShell {
@@ -153,12 +163,12 @@
             gawk
           ];
 
-          BOOTART_VM_ROOT = "${toString ./.}/target/vm";
-          BOOTART_MUSL_CXX = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}g++";
-          BOOTART_MUSL_AR = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}ar";
-          BOOTART_MUSL_READELF = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
-          BOOTART_MUSL_ZLIB = "${pkgs.pkgsStatic.zlib}";
-          BOOTART_MUSL_ZSTD = "${pkgs.pkgsStatic.zstd.out}";
+          SART_VM_ROOT = "${toString ./.}/target/vm";
+          SART_MUSL_CXX = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}g++";
+          SART_MUSL_AR = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}ar";
+          SART_MUSL_READELF = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
+          SART_MUSL_ZLIB = "${pkgs.pkgsStatic.zlib}";
+          SART_MUSL_ZSTD = "${pkgs.pkgsStatic.zstd.out}";
         };
       }
     );

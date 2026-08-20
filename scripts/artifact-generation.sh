@@ -6,7 +6,7 @@ set -euo pipefail
 export LC_ALL=C
 
 die() {
-    printf 'bootart-artifact: ERROR: %s\n' "$*" >&2
+    printf 'sart-artifact: ERROR: %s\n' "$*" >&2
     exit 1
 }
 
@@ -61,12 +61,12 @@ expected_members=$(printf '%s\n' \
     'd|real-root/usr' \
     'd|real-root/usr/bin' \
     'd|release' \
-    'f|initramfs/usr/bin/bootart' \
+    'f|initramfs/usr/bin/sart' \
     'f|nix-output-path' \
-    'f|real-root/usr/bin/bootart' \
-    'f|release/bootart')
+    'f|real-root/usr/bin/sart' \
+    'f|release/sart')
 [[ "$actual_members" == "$expected_members" ]] ||
-    die 'artifact generation must contain exactly three bootart copies and nix-output-path'
+    die 'artifact generation must contain exactly three sart copies and nix-output-path'
 writable=$(find "$generation" -perm /0222 -print -quit)
 [[ -z "$writable" ]] || die "published artifact generation is writable: $writable"
 
@@ -81,9 +81,9 @@ do
 done
 
 for file in \
-    release/bootart \
-    real-root/usr/bin/bootart \
-    initramfs/usr/bin/bootart \
+    release/sart \
+    real-root/usr/bin/sart \
+    initramfs/usr/bin/sart \
     nix-output-path
 do
     path=$generation/$file

@@ -11,7 +11,7 @@ vm_root=$3
 run_dir=$4
 base_image=$5
 overlay=$6
-bootart=$7
+sart=$7
 oracle=$8
 fixture=$9
 [[ "$fixture" == alpine-mkinitfs-openrc ]] || exit 2
@@ -19,8 +19,8 @@ fixture=$9
 
 case "$action" in
     prepare)
-        xorriso -as mkisofs -quiet -V BOOTART -o "$run_dir/seed.img" \
-            -graft-points /bootart="$bootart"
+        xorriso -as mkisofs -quiet -V SART -o "$run_dir/seed.img" \
+            -graft-points /sart="$sart"
         cat > "$run_dir/machine.options" <<EOF
 -nodefaults
 -no-user-config
@@ -65,7 +65,7 @@ virtio-blk-pci,drive=transport,id=transport-device,bus=transport-root-port
 EOF
         ;;
     drive)
-        [[ "${BOOTART_VM_SECRET_FD:-}" == 9 ]] || exit 2
+        [[ "${SART_VM_SECRET_FD:-}" == 9 ]] || exit 2
         IFS= read -r secret <&9 || exit 2
         if IFS= read -r unexpected <&9; then exit 2; fi
         expected_secret=112
@@ -84,14 +84,14 @@ EOF
         guest_copy='c''p'
         guest_sed='s''ed'
         guest_dev='/''dev'
-        guest_transport="$guest_dev/disk/by-label/BOOTART"
+        guest_transport="$guest_dev/disk/by-label/SART"
         guest_tty="$guest_dev/ttyS0"
-        guest_manifest='/''var/lib/bootart/in''stall/manifest.v1'
-        guest_journal=/.bootart-installer-journal.v1
+        guest_manifest='/''var/lib/sart/in''stall/manifest.v1'
+        guest_journal=/.sart-installer-journal.v1
         guest_initramfs=/boot/initramfs-virt
         guest_extlinux=/boot/extlinux.conf
-        guest_saved_extlinux=/var/tmp/bootart-recovery-active-extlinux.conf
-        guest_baseline=/var/tmp/bootart-recovery-baseline.sha256
+        guest_saved_extlinux=/var/tmp/sart-recovery-active-extlinux.conf
+        guest_baseline=/var/tmp/sart-recovery-baseline.sha256
 
         count_log() {
             { grep -a -F -o -- "$1" "$run_dir/serial.log" 2>/dev/null || true; } | wc -l
@@ -151,7 +151,7 @@ EOF
         }
         login_guest() {
             local wanted=$1 password_count
-            wait_count 'bootart-vm login:' "$wanted"
+            wait_count 'sart-vm login:' "$wanted"
             password_count=$(count_log 'Password:')
             send_serial alpine
             wait_count 'Password:' "$((password_count + 1))"
@@ -161,8 +161,8 @@ EOF
         privileged_step() {
             local request=$1 marker=$2 limit=${3:-600} marker_count marker_suffix
             marker_count=$(count_log "$marker")
-            marker_suffix=${marker#BOOTART_}
-            send_serial "$request && m=BOOTART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
+            marker_suffix=${marker#SART_}
+            send_serial "$request && m=SART_ && m=\${m}$marker_suffix && printf '%s\\n' \"\$m\""
             wait_count_for "$marker" "$((marker_count + 1))" "$limit"
         }
         unlock_stock() {
@@ -174,52 +174,52 @@ EOF
 
         unlock_stock 1
         login_guest 1
-        privileged_step "$guest_doas $guest_sh -ec 'sha256sum $guest_initramfs $guest_extlinux /usr/share/mkinitfs/initramfs-init /etc/mkinitfs/mkinitfs.conf > $guest_baseline; test ! -e $guest_manifest; test ! -e /usr/bin/bootart'" \
-            BOOTART_VM_MKINITFS_RECOVERY_BASELINE_V1
-        privileged_step "$guest_doas $guest_mkdir -p /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_RECOVERY_MOUNT_DIR_V1
-        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_RECOVERY_TRANSPORT_MOUNTED_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install plan" \
-            BOOTART_VM_MKINITFS_RECOVERY_PLAN_V1
+        privileged_step "$guest_doas $guest_sh -ec 'sha256sum $guest_initramfs $guest_extlinux /usr/share/mkinitfs/initramfs-init /etc/mkinitfs/mkinitfs.conf > $guest_baseline; test ! -e $guest_manifest; test ! -e /usr/bin/sart'" \
+            SART_VM_MKINITFS_RECOVERY_BASELINE_V1
+        privileged_step "$guest_doas $guest_mkdir -p /mnt/sart-transport" \
+            SART_VM_MKINITFS_RECOVERY_MOUNT_DIR_V1
+        privileged_step "$guest_doas $guest_mount -o ro $guest_transport /mnt/sart-transport" \
+            SART_VM_MKINITFS_RECOVERY_TRANSPORT_MOUNTED_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install plan" \
+            SART_VM_MKINITFS_RECOVERY_PLAN_V1
 
         # Kill the ordinary production ELF after its rollback journal is
         # durable but before mutation starts. Explicit recovery must restore
         # the exact stock preimage before a fresh install is allowed.
-        privileged_step "$guest_doas $guest_sh -ec 'set -eu; journal=$guest_journal; manifest=$guest_manifest; /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm <$guest_tty >$guest_tty 2>&1 & pid=\$!; elapsed=0; while kill -0 \"\$pid\" 2>/dev/null && ! { test -r \"\$journal\" && grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; } && test \"\$elapsed\" -lt 12000; do sleep 0.05; elapsed=\$((elapsed + 1)); done; test -r \"\$journal\"; grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; kill -STOP \"\$pid\"; test ! -e \"\$manifest\"; kill -KILL \"\$pid\"; set +e; wait \"\$pid\"; set -e; sleep 1; sync'" \
-            BOOTART_VM_MKINITFS_RECOVERY_PRODUCTION_CRASH_V1 1200
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install recover --confirm-host bootart-vm" \
-            BOOTART_VM_MKINITFS_RECOVERY_ROLLBACK_V1
-        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e $guest_journal; test ! -e $guest_manifest; test ! -e /usr/bin/bootart'" \
-            BOOTART_VM_MKINITFS_RECOVERY_CRASH_ROLLED_BACK_V1
-        privileged_step "$guest_doas /mnt/bootart-transport/bootart $guest_install apply --confirm-host bootart-vm" \
-            BOOTART_VM_MKINITFS_RECOVERY_INSTALLED_V1 1200
-        privileged_step "$guest_doas /usr/bin/bootart $guest_install status" \
-            BOOTART_VM_MKINITFS_RECOVERY_STATUS_V1
+        privileged_step "$guest_doas $guest_sh -ec 'set -eu; journal=$guest_journal; manifest=$guest_manifest; /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm <$guest_tty >$guest_tty 2>&1 & pid=\$!; elapsed=0; while kill -0 \"\$pid\" 2>/dev/null && ! { test -r \"\$journal\" && grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; } && test \"\$elapsed\" -lt 12000; do sleep 0.05; elapsed=\$((elapsed + 1)); done; test -r \"\$journal\"; grep -q \"^phase[[:space:]]ready\$\" \"\$journal\"; kill -STOP \"\$pid\"; test ! -e \"\$manifest\"; kill -KILL \"\$pid\"; set +e; wait \"\$pid\"; set -e; sleep 1; sync'" \
+            SART_VM_MKINITFS_RECOVERY_PRODUCTION_CRASH_V1 1200
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install recover --confirm-host sart-vm" \
+            SART_VM_MKINITFS_RECOVERY_ROLLBACK_V1
+        privileged_step "$guest_doas $guest_sh -ec 'sha256sum -c $guest_baseline; test ! -e $guest_journal; test ! -e $guest_manifest; test ! -e /usr/bin/sart'" \
+            SART_VM_MKINITFS_RECOVERY_CRASH_ROLLED_BACK_V1
+        privileged_step "$guest_doas /mnt/sart-transport/sart $guest_install apply --confirm-host sart-vm" \
+            SART_VM_MKINITFS_RECOVERY_INSTALLED_V1 1200
+        privileged_step "$guest_doas /usr/bin/sart $guest_install status" \
+            SART_VM_MKINITFS_RECOVERY_STATUS_V1
 
         prefix=${oracle%_PASS_V1}
         send_serial "p=$prefix; p=\${p}_PROVISIONED_V1; printf '\n%s\n' \"\$p\""
         wait_count "${prefix}_PROVISIONED_V1" 1
-        privileged_step "$guest_doas $guest_umount /mnt/bootart-transport" \
-            BOOTART_VM_MKINITFS_RECOVERY_TRANSPORT_UNMOUNTED_V1
+        privileged_step "$guest_doas $guest_umount /mnt/sart-transport" \
+            SART_VM_MKINITFS_RECOVERY_TRANSPORT_UNMOUNTED_V1
         qmp_remove_transport
         sleep 2
 
         # Select the product-installed known-good label for exactly one test
         # boot. The saved generated configuration is restored before status is
-        # checked, so the lane proves Bootart's recovery entry without leaving
+        # checked, so the lane proves Sart's recovery entry without leaving
         # a harness-owned boot configuration behind.
-        privileged_step "$guest_doas $guest_sh -ec '$guest_copy $guest_extlinux $guest_saved_extlinux; grep -q \"^LABEL bootart-known-good\$\" $guest_extlinux; $guest_sed \"s/^DEFAULT .*/DEFAULT bootart-known-good/\" $guest_saved_extlinux > $guest_extlinux; grep -q \"^DEFAULT bootart-known-good\$\" $guest_extlinux; sync'" \
-            BOOTART_VM_MKINITFS_RECOVERY_KNOWN_GOOD_SELECTED_V1
-        display_count=$(count_log 'BOOTART_LIFECYCLE_V1|event=display-acquired')
-        login_before=$(count_log 'bootart-vm login:')
+        privileged_step "$guest_doas $guest_sh -ec '$guest_copy $guest_extlinux $guest_saved_extlinux; grep -q \"^LABEL sart-known-good\$\" $guest_extlinux; $guest_sed \"s/^DEFAULT .*/DEFAULT sart-known-good/\" $guest_saved_extlinux > $guest_extlinux; grep -q \"^DEFAULT sart-known-good\$\" $guest_extlinux; sync'" \
+            SART_VM_MKINITFS_RECOVERY_KNOWN_GOOD_SELECTED_V1
+        display_count=$(count_log 'SART_LIFECYCLE_V1|event=display-acquired')
+        login_before=$(count_log 'sart-vm login:')
         syslinux_before=$(count_log SYSLINUX)
         send_serial "$guest_doas $guest_reboot"
         unlock_stock "$((syslinux_before + 1))"
         login_guest "$((login_before + 1))"
-        [[ "$(count_log 'BOOTART_LIFECYCLE_V1|event=display-acquired')" == "$display_count" ]]
-        privileged_step "$guest_doas $guest_sh -ec 'grep -Eq \"(^|[[:space:]])bootart=0([[:space:]]|\$)\" /proc/cmdline; grep -Eq \"(^|[[:space:]])rd[.]bootart=0([[:space:]]|\$)\" /proc/cmdline; test \"\$(findmnt -n -o SOURCE /)\" = $guest_dev/mapper/root; test ! -S /run/bootart/control.sock; $guest_copy $guest_saved_extlinux $guest_extlinux; sync; /usr/bin/bootart $guest_install status'" \
-            BOOTART_VM_MKINITFS_RECOVERY_KNOWN_GOOD_BOOT_V1
+        [[ "$(count_log 'SART_LIFECYCLE_V1|event=display-acquired')" == "$display_count" ]]
+        privileged_step "$guest_doas $guest_sh -ec 'grep -Eq \"(^|[[:space:]])sart=0([[:space:]]|\$)\" /proc/cmdline; grep -Eq \"(^|[[:space:]])rd[.]sart=0([[:space:]]|\$)\" /proc/cmdline; test \"\$(findmnt -n -o SOURCE /)\" = $guest_dev/mapper/root; test ! -S /run/sart/control.sock; $guest_copy $guest_saved_extlinux $guest_extlinux; sync; /usr/bin/sart $guest_install status'" \
+            SART_VM_MKINITFS_RECOVERY_KNOWN_GOOD_BOOT_V1
 
         send_serial "p=$prefix; p=\${p}_EARLY_V1; printf '\n%s\n' \"\$p\"; p=$prefix; p=\${p}_PASS_V1; printf '\n%s\n' \"\$p\""
         wait_count "${prefix}_EARLY_V1" 1

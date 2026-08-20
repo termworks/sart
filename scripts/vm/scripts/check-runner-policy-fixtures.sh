@@ -16,10 +16,10 @@ policy="$repo_root/scripts/vm/scripts/check-runner-policy.sh"
 }
 
 tmp_parent=${TMPDIR:-/tmp}
-tmp="$(mktemp -d "$tmp_parent/bootart-runner-policy.XXXXXXXXXX")"
+tmp="$(mktemp -d "$tmp_parent/sart-runner-policy.XXXXXXXXXX")"
 cleanup() {
     case "$tmp" in
-        "$tmp_parent"/bootart-runner-policy.*) rm -rf -- "$tmp" ;;
+        "$tmp_parent"/sart-runner-policy.*) rm -rf -- "$tmp" ;;
         *) printf 'refusing unsafe fixture cleanup: %s\n' "$tmp" >&2 ;;
     esac
 }
@@ -54,7 +54,7 @@ bash "$policy" "$empty" >/dev/null
 fixture="$(new_fixture accepted)"
 runner="$(write_runner "$fixture" 'case "${1:-}" in
 prepare) printf "%s\n" -nodefaults > "$3/machine.options" ;;
-drive) grep -F BOOTART_VM_ "$3/serial.log"; socat - UNIX-CONNECT:"$3/qmp.sock" ;;
+drive) grep -F SART_VM_ "$3/serial.log"; socat - UNIX-CONNECT:"$3/qmp.sock" ;;
 *) exit 2 ;;
 esac')"
 bash "$policy" "$fixture" >/dev/null
@@ -76,8 +76,16 @@ fixture="$(new_fixture indirect-launch)"
 write_runner "$fixture" 'exec "$launcher"' >/dev/null
 expect_rejected "$fixture" indirect-launch
 
+fixture="$(new_fixture interactive-rm)"
+write_runner "$fixture" 'rm "$3/write-protected-payload"' >/dev/null
+expect_rejected "$fixture" interactive-rm
+
+fixture="$(new_fixture option-unsafe-rmdir)"
+write_runner "$fixture" 'rmdir "$3/seed-root"' >/dev/null
+expect_rejected "$fixture" option-unsafe-rmdir
+
 fixture="$(new_fixture feature-gated-product-seam)"
-write_runner "$fixture" 'bootart install apply --interrupt-at-checkpoint 7' >/dev/null
+write_runner "$fixture" 'sart install apply --interrupt-at-checkpoint 7' >/dev/null
 expect_rejected "$fixture" feature-gated-product-seam
 
 fixture="$(new_fixture forged-result)"
@@ -108,4 +116,4 @@ fixture="$(new_fixture symlinked-runner)"
 ln -s -- /dev/null "$fixture/scripts/vm/runners/example/lifecycle.sh"
 expect_rejected "$fixture" symlinked-runner
 
-printf 'bootart-vm: runner policy rejection fixtures PASS (runners not executed)\n'
+printf 'sart-vm: runner policy rejection fixtures PASS (runners not executed)\n'

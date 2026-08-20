@@ -32,7 +32,7 @@ for sealed in "$base" "$lineage"; do
         vm_die "missing or unsealed Arch provisioned input: $sealed"
     vm_assert_owned "$sealed"
 done
-[[ "$(sed -n 's/^schema=//p' "$lineage")" == BOOTART_ARCH_PROVISIONED_V1 &&
+[[ "$(sed -n 's/^schema=//p' "$lineage")" == SART_ARCH_PROVISIONED_V1 &&
    "$(sed -n 's/^status=//p' "$lineage")" == PROVISIONED_UNVERIFIED ]] ||
     vm_die 'Arch lineage is not awaiting stock verification'
 base_sha="$(sed -n 's/^base_sha256=//p' "$lineage")"
@@ -47,14 +47,14 @@ QEMU_IMG="$qemu_img" vm_assert_qcow2_virtual_size "$base" 25769803776 2576980377
 if [[ -e "$verified" || -L "$verified" ]]; then
     [[ -f "$verified" && ! -L "$verified" && "$(vm_stat_mode "$verified")" == 400 ]] ||
         vm_die 'Arch stock-verification lineage is unsafe'
-    [[ "$(sed -n 's/^schema=//p' "$verified")" == BOOTART_ARCH_PROVISIONED_V1 &&
+    [[ "$(sed -n 's/^schema=//p' "$verified")" == SART_ARCH_PROVISIONED_V1 &&
        "$(sed -n 's/^status=//p' "$verified")" == STOCK_VERIFIED &&
        "$(sed -n 's/^base_sha256=//p' "$verified")" == "$base_sha" &&
        "$(sed -n 's/^source_sha256=//p' "$verified")" == "$source_sha" &&
        "$(sed -n 's/^source_lineage_sha256=//p' "$verified")" == "$source_lineage_sha" &&
-       "$(sed -n 's/^stock_oracle=//p' "$verified")" == BOOTART_VM_ARCH_BASE_PASS_V1 ]] ||
+       "$(sed -n 's/^stock_oracle=//p' "$verified")" == SART_VM_ARCH_BASE_PASS_V1 ]] ||
         vm_die 'Arch stock-verification lineage is stale'
-    printf 'BOOTART_VM_ARCH_BASE_PASS_V1\n'
+    printf 'SART_VM_ARCH_BASE_PASS_V1\n'
     exit 0
 fi
 
@@ -231,10 +231,10 @@ sleep 8
 capture_screen "$retry_screen"
 [[ "$(sha256sum "$screen" | awk '{ print $1 }')" != "$(sha256sum "$retry_screen" | awk '{ print $1 }')" ]] ||
     vm_die 'stock Arch password screen did not react to wrong input'
-! grep -a -Fq 'bootart-vm login:' "$raw_serial" ||
+! grep -a -Fq 'sart-vm login:' "$raw_serial" ||
     vm_die 'wrong Arch passphrase unexpectedly reached login'
 for key in 1 1 2 3 5 8 ret; do qmp_send_key "$key"; done
-wait_for_count 'bootart-vm login:' 1 "$login_timeout" ||
+wait_for_count 'sart-vm login:' 1 "$login_timeout" ||
     vm_die 'stock Arch did not reach login after encrypted-root unlock'
 
 guest_sudo='su''do'; guest_power='power''off'; guest_remove='r''m'
@@ -248,24 +248,24 @@ guest_check+="test -x $guest_mk; test -x /usr/bin/lsinitcpio; test -x /usr/bin/g
 guest_check+='test -x /usr/lib/initcpio/functions; test -f /usr/lib/initcpio/init; test ! -x /usr/lib/initcpio/init; test -f /usr/lib/initcpio/hooks/encrypt; test ! -x /usr/lib/initcpio/hooks/encrypt; test -f /usr/lib/initcpio/inst''all/encrypt; test ! -x /usr/lib/initcpio/inst''all/encrypt; '
 guest_check+='grep -Fxq "HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)" /etc/mkinitcpio.conf; '
 guest_check+='test "$(cat /usr/lib/modules/$(uname -r)/pkgbase)" = linux; test -f /etc/mkinitcpio.d/linux.preset; test -f /boot/vmlinuz-linux; image=/boot/initramfs-linux.img; test -f "$image"; '
-guest_check+='cache=/var/cache/bootart-kernel-update; (cd "$cache" && sha256sum -c SHA256SUMS); test -f "$cache/linux-lts-6.18.41-1-x86_64.pkg.tar.zst"; test "$(find "$cache" -mindepth 1 -maxdepth 1 -type f | wc -l)" = 2; '
-guest_check+='test ! -e /usr/bin/bootart; test ! -e /etc/bootart; test ! -e /var/lib/bootart; work=$(mktemp -d); (cd "$work" && /usr/bin/lsinitcpio -x "$image"); test -x "$work/init"; test -f "$work/hooks/encrypt"; test -x "$work/usr/bin/cryptsetup"; ! find "$work" -iname "*bootart*" -print -quit | grep -q .; '
-guest_check+='scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "BOOTART_VM_SECRET_PATH|%s\n" "$matches"; '
+guest_check+='cache=/var/cache/sart-kernel-update; (cd "$cache" && sha256sum -c SHA256SUMS); test -f "$cache/linux-lts-6.18.41-1-x86_64.pkg.tar.zst"; test "$(find "$cache" -mindepth 1 -maxdepth 1 -type f | wc -l)" = 2; '
+guest_check+='test ! -e /usr/bin/sart; test ! -e /etc/sart; test ! -e /var/lib/sart; work=$(mktemp -d); (cd "$work" && /usr/bin/lsinitcpio -x "$image"); test -x "$work/init"; test -f "$work/hooks/encrypt"; test -x "$work/usr/bin/cryptsetup"; ! find "$work" -iname "*sart*" -print -quit | grep -q .; '
+guest_check+='scan=112; scan=${scan}358; boundary="(^|[^[:alnum:]])${scan}([^[:alnum:]]|$)"; matches=$(printf "%s\n" "$boundary" | grep -r -a -E -l --devices=skip -f - /etc /var/lib /var/log /boot "$work" || true); if [ -n "$matches" ]; then printf "SART_VM_SECRET_PATH|%s\n" "$matches"; '
 guest_check+="$guest_remove -r -f -- \"\$work\"; exit 1; fi; unset scan boundary matches; $guest_remove -r -f -- \"\$work\"; "
-guest_check+='printf "BOOTART_VM_ARCH_FACT|kernel=%s|image=%s|root=%s|boot=%s\n" "$(uname -r)" "$image" "$source" "$boot_source"; marker=BOOTART_VM_ARCH_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source boot_source; '
+guest_check+='printf "SART_VM_ARCH_FACT|kernel=%s|image=%s|root=%s|boot=%s\n" "$(uname -r)" "$image" "$source" "$boot_source"; marker=SART_VM_ARCH_BASE_; marker=${marker}PASS_V1; printf "%s\n" "$marker"; unset marker image source boot_source; '
 guest_check+="$guest_power'"
 
 password_count="$(count_log 'Password:')"
-prompt='[bootart@bootart-vm ~]$'
+prompt='[sart@sart-vm ~]$'
 prompt_count="$(count_log "$prompt")"
-send_serial_line bootart
+send_serial_line sart
 wait_for_count 'Password:' "$((password_count + 1))" "$login_timeout" ||
     vm_die 'stock Arch login did not request password'
 send_serial_line ubuntu
 wait_for_count "$prompt" "$((prompt_count + 1))" "$login_timeout" ||
     vm_die 'stock Arch login did not reach shell'
 send_serial_line "$guest_check"
-wait_for_count 'BOOTART_VM_ARCH_BASE_PASS_V1' 1 "$login_timeout" ||
+wait_for_count 'SART_VM_ARCH_BASE_PASS_V1' 1 "$login_timeout" ||
     vm_die 'stock Arch guest checks did not emit authenticated result'
 
 set +e
@@ -274,7 +274,7 @@ set -e
 qemu_pid=
 [[ $qemu_status -eq 0 ]] || vm_die "stock Arch QEMU did not power off cleanly: status $qemu_status"
 scrub_serial
-[[ "$(grep -a -Fc BOOTART_VM_ARCH_BASE_PASS_V1 "$serial_log" || true)" == 1 ]] ||
+[[ "$(grep -a -Fc SART_VM_ARCH_BASE_PASS_V1 "$serial_log" || true)" == 1 ]] ||
     vm_die 'stock Arch oracle must occur exactly once'
 vm_assert_file_size_at_most "$serial_log" 67108864 'stock Arch serial evidence'
 secret_pattern=112; secret_pattern=${secret_pattern}358
@@ -293,13 +293,13 @@ serial_sha="$(sha256sum "$serial_log" | awk '{ print $1 }')"
 screen_sha="$(sha256sum "$screen" | awk '{ print $1 }')"
 retry_screen_sha="$(sha256sum "$retry_screen" | awk '{ print $1 }')"
 printf '%s\n' \
-    'schema=BOOTART_ARCH_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
+    'schema=SART_ARCH_PROVISIONED_V1' 'status=STOCK_VERIFIED' \
     "base_sha256=$base_sha" "source_sha256=$source_sha" \
     "source_lineage_sha256=$source_lineage_sha" "stock_serial_sha256=$serial_sha" \
     "stock_password_screen_sha256=$screen_sha" \
     "stock_password_retry_screen_sha256=$retry_screen_sha" \
-    'stock_oracle=BOOTART_VM_ARCH_BASE_PASS_V1' > "$verified_tmp"
+    'stock_oracle=SART_VM_ARCH_BASE_PASS_V1' > "$verified_tmp"
 chmod 0400 -- "$verified_tmp"
 ln -- "$verified_tmp" "$verified" || vm_die 'refusing to replace Arch verification lineage'
 rm -f -- "$verified_tmp"
-printf 'BOOTART_VM_ARCH_BASE_PASS_V1\n'
+printf 'SART_VM_ARCH_BASE_PASS_V1\n'

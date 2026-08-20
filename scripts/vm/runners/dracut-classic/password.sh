@@ -9,7 +9,7 @@ vm_root=${3:-}
 run_dir=${4:-}
 image=${5:-}
 overlay=${6:-}
-bootart_physical=${7:-}
+sart_physical=${7:-}
 oracle=${8:-}
 
 case "$action" in
@@ -63,7 +63,7 @@ case "$action" in
         done
         ;;
     *)
-        printf 'usage: runner.sh {prepare|drive} REPO VM RUN IMAGE OVERLAY BOOTART ORACLE\n' >&2
+        printf 'usage: runner.sh {prepare|drive} REPO VM RUN IMAGE OVERLAY SART ORACLE\n' >&2
         exit 2
         ;;
 esac

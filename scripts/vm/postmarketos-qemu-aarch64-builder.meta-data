@@ -1,2 +1,2 @@
-instance-id: bootart-postmarketos-qemu-aarch64-builder
-local-hostname: bootart-pmos-builder
+instance-id: sart-postmarketos-qemu-aarch64-builder
+local-hostname: sart-pmos-builder

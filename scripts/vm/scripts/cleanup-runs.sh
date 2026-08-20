@@ -11,7 +11,7 @@ vm_root=$2
 
 vm_check_layout "$repo_root" "$vm_root"
 if [[ ! -e "$vm_root" ]]; then
-    printf 'bootart-vm: no VM state to clean\n'
+    printf 'sart-vm: no VM state to clean\n'
     exit 0
 fi
 vm_validate_state "$repo_root" "$vm_root"
@@ -44,6 +44,6 @@ for run_dir in "${runs[@]}"; do
     # and mount checks, otherwise find cannot unlink their children.
     find "$run_dir" -xdev -type d -exec chmod u+rwx -- '{}' +
     find "$run_dir" -xdev -depth -delete
-    printf 'bootart-vm: removed owned run: %s\n' "$run_dir"
+    printf 'sart-vm: removed owned run: %s\n' "$run_dir"
 done
-printf 'bootart-vm: run cleanup complete; cache retained\n'
+printf 'sart-vm: run cleanup complete; cache retained\n'
