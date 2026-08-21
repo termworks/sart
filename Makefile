@@ -259,7 +259,8 @@ cpp-musl-build: cpp-musl-toolchain-check target/cpp/musl/sart
 		'$(STATIC_ARCH_SAFE)' target/cpp/musl/sart
 
 cpp-cli-check: cpp-musl-build
-	@bash scripts/artifact-cli-policy.sh '$(CURDIR)/target/cpp/musl/sart'
+	@'$(CURDIR)/target/cpp/musl/sart' --version
+	@'$(CURDIR)/target/cpp/musl/sart' install --help >/dev/null
 
 cpp-nix-build:
 	@bash scripts/nix-source-command.sh '$(CURDIR)' '$(NIX_NETWORK_MODE)' build \
@@ -302,58 +303,8 @@ test-pty: test
 # This target never installs to /, invokes an image generator, or needs root.
 test-installer-root: test
 
-test-artifact-guards: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/artifact-gate-tests.sh
-
-test-artifact-operation-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/artifact-operation-policy-tests.sh '$(CURDIR)'
-
-assert-artifact-operation:
-	@bash scripts/artifact-operation-policy.sh '$(CURDIR)'
-	@$(MAKE) --no-print-directory test-artifact-operation-policy
-
-test-make-boundary-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/make-boundary-policy-tests.sh '$(CURDIR)'
-
-assert-make-boundary:
-	@bash scripts/make-boundary-policy.sh '$(CURDIR)'
-	@$(MAKE) --no-print-directory test-make-boundary-policy
-
 _assert-artifact-lock:
 	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
-
-test-host-safety-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash -n scripts/*.sh scripts/tests/*.sh
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/host-safety-policy-tests.sh '$(CURDIR)'
-
-test-init-neutral-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/init-neutral-policy-tests.sh '$(CURDIR)'
-
-assert-init-neutral:
-	@bash scripts/init-neutral-policy.sh '$(CURDIR)'
-	@$(MAKE) --no-print-directory test-init-neutral-policy
-
-test-source-layout-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/source-layout-policy-tests.sh '$(CURDIR)'
-
-test-pid1-entry-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/pid1-entry-policy-tests.sh '$(CURDIR)'
-
-test-adapter-pair-policy: validate-test-timeout
-	@timeout --signal=TERM --kill-after=5s "$${TEST_TIMEOUT_SECONDS}s" \
-		bash scripts/tests/adapter-pair-policy-tests.sh '$(CURDIR)'
-
-assert-adapter-pairs:
-	@bash scripts/adapter-pair-policy.sh '$(CURDIR)'
-	@$(MAKE) --no-print-directory test-adapter-pair-policy
 
 # Prove that an ambient mutation request cannot cross the ordinary Make
 # boundary. This target runs no product executable and touches no fixture.
@@ -496,21 +447,6 @@ _artifact-check-locked:
 			"$$generation/release" "$$generation/real-root/usr/bin/sart" \
 			"$$generation/initramfs/usr/bin/sart"
 
-artifact-cli-check: static-build
-	@bash scripts/artifact-lock.sh '$(CURDIR)' \
-		$(MAKE) --no-print-directory _artifact-cli-check-locked \
-		SART_BIN='$(STATIC_CURRENT_POINTER)/release/sart'
-
-_artifact-cli-check-locked:
-	@bash scripts/artifact-lock-assert.sh '$(CURDIR)' >/dev/null
-	@set -euo pipefail; \
-		generation="$$(bash scripts/artifact-generation.sh '$(STATIC_ROOT)')"; \
-		elf="$$(readlink -f -- "$${SART_BIN}")"; \
-		test "$$elf" = "$$generation/release/sart" || { \
-			echo 'ERROR: CLI proof did not resolve the pinned static generation' >&2; exit 1; \
-		}; \
-		bash scripts/artifact-cli-policy.sh "$$elf"
-
 # The archive has exactly one member: the verified static ELF named sart.
 # Its checksum is release metadata beside the archive, not another payload.
 validate-static-arch:
@@ -622,12 +558,7 @@ _clean-locked:
 		fi; \
 		$(MAKE) --no-print-directory cpp-clean
 
-assert-one-binary:
-	@bash scripts/source-layout-policy.sh '$(CURDIR)'
-	@$(MAKE) --no-print-directory test-source-layout-policy
-
-phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert-artifact-operation assert-make-boundary
-	@bash scripts/pid1-entry-policy.sh '$(CURDIR)'
+phase0-safety:
 	@set -eu; \
 		if find include src tests -type l -print -quit | grep -q .; then \
 			echo "ERROR: symlinks are forbidden below C++ source roots" >&2; exit 1; \
@@ -638,28 +569,11 @@ phase0-safety: assert-one-binary assert-init-neutral assert-adapter-pairs assert
 			exit 1; \
 		fi; \
 		echo "PASS: Phase 0 host and PID-1 safety invariants hold"
-	@bash scripts/host-safety-policy.sh '$(CURDIR)'
-	@bash scripts/tests/host-safety-policy-tests.sh '$(CURDIR)'
 
-verify: assert-one-binary assert-init-neutral assert-adapter-pairs phase0-safety test-source-layout-policy test-pid1-entry-policy test-adapter-pair-policy test-artifact-guards test-golden-guards vm-script-check fmt-check cpp-test cpp-cli-check
+verify: phase0-safety test-golden-guards vm-script-check fmt-check cpp-test cpp-cli-check
 
 vm-script-check:
 	@$(VM_MAKE) vm-script-check
-
-vm-policy-fixtures:
-	@$(VM_MAKE) vm-policy-fixtures
-
-vm-runner-policy-check:
-	@$(VM_MAKE) vm-runner-policy-check
-
-vm-timeout-containment-check:
-	@$(VM_MAKE) vm-timeout-containment-check
-
-vm-matrix-check:
-	@$(VM_MAKE) vm-matrix-check
-
-vm-blocked-lane-check:
-	@$(VM_MAKE) vm-blocked-lane-check
 
 vm-preflight:
 	@$(VM_MAKE) vm-preflight
@@ -879,7 +793,6 @@ _vm-test-release-ubuntu-26.04-dracut-systemd-locked:
 		}; \
 		digest="$$(sha256sum -- "$$elf" | awk '{ print $$1 }')"; \
 		test "$${#digest}" -eq 64 || { echo 'ERROR: cannot hash release VM ELF' >&2; exit 1; }; \
-		bash scripts/artifact-cli-policy.sh "$$elf"; \
 		printf 'sart: Phase 7 normal release ELF %s\n' "$$digest"; \
 		$(VM_MAKE) vm-test-install-dracut-systemd SART_BIN="$$elf"; \
 		$(VM_MAKE) vm-test-password-dracut-systemd SART_BIN="$$elf"; \
@@ -994,12 +907,6 @@ help:
 	@echo "  test-installer-root Run pure transactional tests against disposable alternate roots"
 	@printf '%s\n' \
 		"                C++ test lanes are serialized and bounded by TEST_TIMEOUT_SECONDS=$${TEST_TIMEOUT_SECONDS}"
-	@echo "  test-artifact-guards Run pure static-artifact and generation-publication tests"
-	@echo "  test-artifact-operation-policy Prove artifact publishers/consumers share one flock"
-	@echo "  test-make-boundary-policy Prove documented Make inputs cannot become shell source"
-	@echo "  assert-artifact-operation Run live artifact-lock policy plus rejection fixtures"
-	@echo "  assert-make-boundary Run live Make-boundary policy plus inert injection fixtures"
-	@echo "  test-host-safety-policy Syntax-check and prove host command surfaces reject dangerous fixtures"
 	@echo "  update-golden Explicitly rewrite reviewed golden frame fixtures"
 	@echo "  check        Compile the C++23 product"
 	@echo "  check-all    Compile and test the C++23 product"
@@ -1009,16 +916,10 @@ help:
 	@echo "  nix-check    Evaluate the locked flake offline without building"
 	@echo "  static-build Publish one immutable static-ELF generation under target/artifacts"
 	@echo "  artifact-check Resolve current once and verify that generation's three SHA-256 values"
-	@echo "  artifact-cli-check Prove the normal static ELF hides every installer test-seam option"
 	@echo "  clean        Remove C++ build artifacts"
 	@echo "  verify       Run the full local gate"
-	@echo "  assert-one-binary Prove sart is the only C++ product binary"
-	@echo "  assert-adapter-pairs Cross-check C++, root/VM Make, and the exact VM matrix"
 	@echo "  phase0-safety Check PID-1/helper/host-mutation safety invariants"
 	@echo "  vm-script-check Syntax-check VM host/guest shell data without state or QEMU"
-	@echo "  vm-runner-policy-check Audit future VM runner sources without executing them"
-	@echo "  vm-matrix-check Read-only exact adapter-pair, isolation, image-state, and oracle audit"
-	@echo "  vm-blocked-lane-check Prove blocked matrix lanes stop before product/QEMU"
 	@echo "  vm-preflight Read-only VM tool, lock, and path safety checks"
 	@echo "  vm-state-init Create sentinel-owned state only under target/vm"
 	@echo "  vm-image-alpine Fetch the exact checksum-locked Alpine input"

@@ -121,7 +121,6 @@ directly.
 make verify
 make static-build
 make artifact-check
-make artifact-cli-check
 ```
 
 The full installed-Ubuntu VM gates are:

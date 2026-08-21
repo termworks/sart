@@ -140,14 +140,7 @@ not historical results. Product support is owned by the mechanism pair table
 and named release evidence; the lock does not mutate itself in response to a
 local run. Other pairs remain experimental and cannot use production mutation.
 
-Run static harness validation with:
-
-```sh
-make vm-script-check
-make vm-runner-policy-check
-make vm-matrix-check
-make vm-blocked-lane-check
-```
+Run shell syntax validation with `make vm-script-check`.
 
 The common runner has separate `prepare` and `drive` phases under an enumerated
 `env -i` environment. A runner cannot choose or launch QEMU, attest a different

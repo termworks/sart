@@ -459,13 +459,8 @@ make fmt-check
 make check
 make test
 make test-installer-root
-make test-host-safety-policy
-make test-init-neutral-policy
-make test-pid1-entry-policy
-make test-adapter-pair-policy
 make static-build
 make artifact-check
-make artifact-cli-check
 make vm-script-check
 make verify
 ```

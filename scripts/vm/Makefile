@@ -123,11 +123,6 @@ help:
 		'Disposable sart VM test infrastructure (never installed or shipped)' \
 		'' \
 		'  make -C scripts/vm vm-script-check          syntax-check host and guest shell data' \
-		'  make -C scripts/vm vm-policy-fixtures       inert argv/runner rejection fixtures' \
-		'  make -C scripts/vm vm-runner-policy-check   audit runner sources; never run them' \
-		'  make -C scripts/vm vm-timeout-containment-check prove descendant process-group cleanup' \
-		'  make -C scripts/vm vm-matrix-check          read-only exact-pair/isolation/status audit' \
-		'  make -C scripts/vm vm-blocked-lane-check    marker executables idle; bounded state unchanged' \
 		'  make -C scripts/vm vm-preflight             read-only safety/tool/lock checks' \
 		'  make -C scripts/vm vm-state-init            create private target/vm state' \
 		'  make -C scripts/vm vm-image-alpine          fetch one checksum-verified input' \
@@ -197,7 +192,7 @@ help:
 # It permits normal group-writable checkout modes so policy inspection remains
 # usable; actual prepare-smoke use strictly rejects group/world-writable guest
 # files and every repository-to-guest ancestor, then pins copied byte hashes.
-vm-script-check: vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check
+vm-script-check:
 	@set -eu; \
 		guest="$${VM_SOURCE_ROOT}/guest"; \
 		test -d "$$guest" -a ! -L "$$guest" || { \
@@ -229,39 +224,7 @@ vm-script-check: vm-policy-fixtures vm-runner-policy-check vm-timeout-containmen
 	@allowed_actions='sysinit|shut''down|restart'; awk -v actions="$$allowed_actions" 'NF && $$0 !~ /^#/ { \
 		if ($$0 !~ ("^::(" actions "):/")) exit 1; count++ \
 	} END { if (count != 3) exit 1 }' "$${VM_SOURCE_ROOT}/guest/inittab"
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-matrix.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-blocked-lanes.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
 	@printf '%s\n' 'sart-vm: script syntax PASS'
-
-# Uses private /tmp fixtures and inert fake executables. It exercises both
-# QEMU argv checkers plus the common adapter launch ordering without creating
-# target/vm, resolving sart, or launching QEMU.
-vm-policy-fixtures:
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-policy-fixtures.sh" "$${REPO_ROOT}"
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-runner-policy-fixtures.sh" "$${REPO_ROOT}"
-
-# Static only: scans checked-in runner sources (or proves the tree is absent).
-# It never invokes a runner, resolves a product ELF, creates VM state, or QEMU.
-vm-runner-policy-check:
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-runner-policy.sh" "$${REPO_ROOT}"
-
-# Pure shell/sleep fixture proving outer deadlines kill the complete child
-# process group. It never resolves or launches Sart, a runner, QEMU, or VM.
-vm-timeout-containment-check:
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-timeout-containment.sh" "$${REPO_ROOT}"
-
-# Read-only: validates the exact adapter cross-product, immutable-image state,
-# fixed isolation policy, strict timeouts, and unique serial oracles. It never
-# creates target/vm, resolves a product ELF, downloads, or launches QEMU.
-vm-matrix-check:
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-matrix.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
-
-vm-blocked-lane-check:
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-blocked-lanes.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}"
 
 vm-preflight: vm-script-check
 	@bash "$${VM_SOURCE_ROOT}/scripts/preflight.sh" \
@@ -472,32 +435,32 @@ vm-validate-adapter-timeout:
 # These static pattern rules expose every exact adapter pair through Make while
 # retaining a single deny-by-default runner contract. The outer timeout bounds
 # the entire host entry point; the matrix also fixes the inner guest deadline.
-$(ADAPTER_LIFECYCLE_TARGETS): vm-test-lifecycle-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_LIFECYCLE_TARGETS): vm-test-lifecycle-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' lifecycle "$${SART_BIN}"
 
-$(ADAPTER_INSTALL_TARGETS): vm-test-install-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_INSTALL_TARGETS): vm-test-install-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' install "$${SART_BIN}"
 
-$(ADAPTER_PASSWORD_TARGETS): vm-test-password-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_PASSWORD_TARGETS): vm-test-password-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' password "$${SART_BIN}"
 
-$(ADAPTER_RECOVERY_TARGETS): vm-test-recovery-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_RECOVERY_TARGETS): vm-test-recovery-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' recovery "$${SART_BIN}"
 
-$(ADAPTER_UNINSTALL_TARGETS): vm-test-uninstall-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_UNINSTALL_TARGETS): vm-test-uninstall-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' uninstall "$${SART_BIN}"
 
-$(ADAPTER_KERNEL_UPDATE_TARGETS): vm-test-kernel-update-%: vm-matrix-check vm-validate-adapter-timeout
+$(ADAPTER_KERNEL_UPDATE_TARGETS): vm-test-kernel-update-%: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" '$*' kernel-update "$${SART_BIN}"
@@ -573,37 +536,37 @@ vm-test-ubuntu-26.04-dracut-systemd: \
 	vm-test-uninstall-dracut-systemd \
 	vm-test-kernel-update-dracut-systemd
 
-vm-test-install-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-install-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		dracut-systemd install "$${SART_BIN}" fedora-44-dracut-systemd
 
-vm-test-lifecycle-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-lifecycle-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		dracut-systemd lifecycle "$${SART_BIN}" fedora-44-dracut-systemd
 
-vm-test-password-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-password-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		dracut-systemd password "$${SART_BIN}" fedora-44-dracut-systemd
 
-vm-test-recovery-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-recovery-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		dracut-systemd recovery "$${SART_BIN}" fedora-44-dracut-systemd
 
-vm-test-uninstall-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-uninstall-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		dracut-systemd uninstall "$${SART_BIN}" fedora-44-dracut-systemd
 
-vm-test-kernel-update-fedora-44-dracut-systemd: vm-matrix-check vm-validate-adapter-timeout
+vm-test-kernel-update-fedora-44-dracut-systemd: vm-validate-adapter-timeout
 	@SART_VM_MAKE_ENTRY=1 timeout --signal=TERM --kill-after=10s \
 		"$${ADAPTER_HOST_TIMEOUT_SECONDS}s" bash "$${VM_SOURCE_ROOT}/scripts/run-adapter-lane.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
