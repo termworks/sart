@@ -1,4 +1,4 @@
-XMAKE ?= xmake
+XMAKE ?= $(if $(shell command -v xmake 2>/dev/null),xmake,nix develop --impure -c xmake)
 
 .DEFAULT_GOAL := build
 .NOTPARALLEL:
