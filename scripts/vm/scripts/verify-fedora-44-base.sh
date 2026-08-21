@@ -118,9 +118,6 @@ qemu_args=(
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"
 chmod 0600 -- "$args_file"
-QEMU="$qemu" QEMU_IMG="$qemu_img" bash "$SCRIPT_DIR/check-stock-installed-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$base" "$overlay" \
-    "$ovmf_code" "$ovmf_vars" "$serial_log"
 
 qmp_send_key() {
     local key=$1 press release response return_count

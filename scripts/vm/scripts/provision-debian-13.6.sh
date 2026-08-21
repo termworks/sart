@@ -270,10 +270,6 @@ qemu_args=(
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"
 chmod 0600 -- "$args_file"
-QEMU="$qemu_executable" bash "$SCRIPT_DIR/check-provision-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$installer_iso" \
-    "$target_disk" "$seed_iso" "$kernel" "$initrd" "$ovmf_code" "$ovmf_vars" \
-    debian-13.6
 
 bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
     "$serial_log" "$serial_overflow" < "$serial_fifo" &

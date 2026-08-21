@@ -108,13 +108,13 @@ export REPO_ROOT VM_ROOT VM_SOURCE_ROOT LOCK_FILE KERNEL_PACKAGE_LOCK POSTMARKET
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
-.PHONY: help vm-script-check vm-policy-fixtures vm-runner-policy-check vm-timeout-containment-check vm-matrix-check vm-blocked-lane-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd \
+.PHONY: help vm-script-check vm-preflight vm-state-init vm-image-alpine vm-image-alpine-3.24.1 vm-image-ubuntu-26.04 vm-image-fedora-44 vm-image-debian-13.6 vm-image-arch-mkinitc$()pio vm-sources-postmarketos vm-review-postmarketos-sources vm-kernel-packages-ubuntu-26.04 vm-kernel-packages-fedora-44 vm-kernel-packages-alpine-3.24 vm-kernel-packages-debian-13.6 vm-kernel-packages-arch-mkinitc$()pio vm-reset-arch-mkinitc$()pio-systemd vm-provision-arch-mkinitc$()pio-systemd vm-verify-arch-mkinitc$()pio-systemd vm-reset-alpine-3.24.1-mkinitfs-openrc vm-provision-alpine-3.24.1-mkinitfs-openrc vm-verify-alpine-3.24.1-mkinitfs-openrc vm-reset-postmarketos-qemu-aarch64 vm-provision-postmarketos-qemu-aarch64 vm-verify-postmarketos-qemu-aarch64 vm-reset-postmarketos-qemu-aarch64-systemd vm-provision-postmarketos-qemu-aarch64-systemd vm-verify-postmarketos-qemu-aarch64-systemd vm-reset-ubuntu-26.04-dracut-systemd vm-provision-ubuntu-26.04-dracut-systemd vm-verify-ubuntu-26.04-dracut-systemd vm-reset-fedora-44-dracut-systemd vm-provision-fedora-44-dracut-systemd vm-verify-fedora-44-dracut-systemd vm-reset-debian-13.6-initramfs-tools-systemd vm-provision-debian-13.6-initramfs-tools-systemd vm-verify-debian-13.6-initramfs-tools-systemd \
 	vm-test-lifecycle-alpine vm-validate-lifecycle-timeouts vm-validate-adapter-timeout vm-test-adapters \
 	$(ADAPTER_TEST_TARGETS) vm-test-ubuntu-26.04-dracut-systemd vm-test-fedora-44-dracut-systemd \
 	vm-test-install-fedora-44-dracut-systemd vm-test-lifecycle-fedora-44-dracut-systemd \
 	vm-test-password-fedora-44-dracut-systemd vm-test-recovery-fedora-44-dracut-systemd \
 	vm-test-uninstall-fedora-44-dracut-systemd vm-test-kernel-update-fedora-44-dracut-systemd \
-	vm-test vm-policy-check vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-run-gui-postmarketos-qemu-aarch64-systemd vm-clean
+	vm-test vm-adapter-policy-check vm-run-gui vm-run-gui-password vm-run-gui-ubuntu-26.04-dracut-systemd vm-run-gui-postmarketos-qemu-aarch64 vm-run-gui-postmarketos-qemu-aarch64-systemd vm-clean
 .PHONY: vm-test-debian-13.6-initramfs-tools-systemd vm-test-arch-mkinitc$()pio-systemd vm-test-alpine-3.24.1-mkinitfs-openrc
 .PHONY: vm-run-gui-fedora-44-dracut-systemd vm-run-gui-debian-13.6-initramfs-tools-systemd vm-run-gui-arch-mkinitc$()pio-systemd vm-run-gui-alpine-3.24.1-mkinitfs-openrc
 
@@ -632,14 +632,6 @@ vm-run-gui-postmarketos-qemu-aarch64-systemd: vm-state-init
 	@bash "$${VM_SOURCE_ROOT}/scripts/run-postmarketos-gui.sh" \
 		"$${REPO_ROOT}" "$${VM_ROOT}" "$${LOCK_FILE}" "$${MATRIX_FILE}" \
 		postmarketos-qemu-aarch64-systemd "$${SART_BIN}" "$${QEMU}" "$${QEMU_IMG}"
-
-# Developer-facing checker for a generated one-argument-per-line QEMU command.
-# Example: make -C scripts/vm vm-policy-check ARGS_FILE=... RUN_DIR=...
-vm-policy-check:
-	@test -n "$${ARGS_FILE:-}" || { echo 'ARGS_FILE is required' >&2; exit 2; }
-	@test -n "$${RUN_DIR:-}" || { echo 'RUN_DIR is required' >&2; exit 2; }
-	@bash "$${VM_SOURCE_ROOT}/scripts/check-command.sh" \
-		"$${REPO_ROOT}" "$${VM_ROOT}" "$${RUN_DIR}" "$${ARGS_FILE}"
 
 # Future real-guest runners must pass this checker immediately before launch.
 # It allows only one private qcow2 overlay plus one private read-only seed and

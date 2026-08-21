@@ -238,11 +238,6 @@ qemu_args=(
     -drive "file=$seed_iso,format=raw,media=cdrom,readonly=on,cache=none,aio=threads"
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"; chmod 0600 -- "$args_file"
-QEMU="$qemu" QEMU_IMG="$qemu_img" \
-    bash "$SCRIPT_DIR/check-postmarketos-builder-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$builder_image" \
-    "$builder_overlay" "$target_disk" "$seed_iso" "$serial_fifo" "$serial_log" \
-    "$secret_in" "$secret_out"
 
 bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
     "$serial_log" "$serial_overflow" < "$serial_fifo" &

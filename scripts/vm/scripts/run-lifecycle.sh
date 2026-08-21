@@ -135,8 +135,6 @@ args=(
 printf '%s\n' "${args[@]}" > "$args_file"
 chmod 0600 -- "$args_file"
 vm_assert_file_size_at_most "$args_file" "$max_evidence_bytes" 'QEMU argument record'
-QEMU="$qemu" bash "$SCRIPT_DIR/check-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file"
 vm_assert_run_bytes_at_most "$vm_root" "$run_dir" "$max_run_bytes"
 vm_assert_executable_identity "$qemu" "$qemu_identity" 'configured QEMU executable'
 

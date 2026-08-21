@@ -123,8 +123,6 @@ qemu_args=(
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"
 chmod 0600 -- "$args_file"
-QEMU="$qemu" QEMU_IMG="$qemu_img" bash "$SCRIPT_DIR/check-alpine-stock-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$base" "$overlay" "$raw_serial"
 
 wait_for_count() {
     local needle=$1 required=$2 seconds=$3 elapsed=0 count

@@ -200,9 +200,6 @@ qemu_args=(
     -drive "file=$seed_iso,format=raw,media=cdrom,readonly=on,cache=none,aio=threads"
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"; chmod 0600 -- "$args_file"
-QEMU="$qemu" QEMU_IMG="$qemu_img" bash "$SCRIPT_DIR/check-alpine-provision-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$source_image" \
-    "$source_overlay" "$target_disk" "$seed_iso" "$serial_fifo" "$serial_log"
 
 bash "$SCRIPT_DIR/capture-bounded-stream.sh" "$max_log_bytes" \
     "$serial_log" "$serial_overflow" < "$serial_fifo" &

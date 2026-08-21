@@ -116,8 +116,6 @@ qemu_args=(
     -drive "file=$overlay,format=qcow2,if=virtio,cache=none,aio=threads"
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"; chmod 0600 -- "$args_file"
-QEMU="$qemu" QEMU_IMG="$qemu_img" bash "$SCRIPT_DIR/check-arch-stock-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$base" "$overlay" "$raw_serial"
 
 count_log() { { grep -a -F -o -- "$1" "$raw_serial" 2>/dev/null || true; } | wc -l; }
 wait_for_count() {

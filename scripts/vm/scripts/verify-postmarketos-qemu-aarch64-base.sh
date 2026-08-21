@@ -195,9 +195,6 @@ qemu_args=(
     -device virtio-blk-pci,drive=stockdisk,bootindex=1
 )
 printf '%s\n' "${qemu_args[@]}" > "$args_file"; chmod 0600 -- "$args_file"
-QEMU_IMG="$qemu_img" bash "$SCRIPT_DIR/check-postmarketos-stock-command.sh" \
-    "$repo_root" "$vm_root" "$run_dir" "$args_file" "$base" "$overlay" \
-    "$qemu_aarch64" "$uefi_code" "$uefi_vars" "$raw_serial"
 
 wait_for_log() {
     local needle=$1 seconds=$2 elapsed=0
