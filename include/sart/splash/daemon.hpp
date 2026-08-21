@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sart/display_text_vt.hpp"
+#include "sart/display/text_vt.hpp"
 #include "sart/splash/engine.hpp"
 #include "sart/splash/runtime.hpp"
 #include "sart/splash/state.hpp"

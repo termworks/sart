@@ -1,6 +1,6 @@
 #include "sart/splash/state.hpp"
 
-#include "sart/art.hpp"
+#include "sart/visual/art.hpp"
 
 #include <format>
 #include <type_traits>

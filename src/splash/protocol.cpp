@@ -1,6 +1,6 @@
 #include "sart/splash/protocol.hpp"
 
-#include "sart/art.hpp"
+#include "sart/visual/art.hpp"
 
 #include <algorithm>
 #include <cerrno>

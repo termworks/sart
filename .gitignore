@@ -30,3 +30,5 @@ compile_commands.json
 !/PLAN.md
 !/src/install/
 !/src/install/**
+!/include/sart/install/
+!/include/sart/install/**

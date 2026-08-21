@@ -1,9 +1,9 @@
 #pragma once
 
-#include "sart/art.hpp"
-#include "sart/display.hpp"
-#include "sart/frame_engine.hpp"
+#include "sart/display/backend.hpp"
 #include "sart/splash/state.hpp"
+#include "sart/visual/art.hpp"
+#include "sart/visual/frame_engine.hpp"
 
 #include <chrono>
 #include <memory>

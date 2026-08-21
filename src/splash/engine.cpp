@@ -1,6 +1,6 @@
 #include "sart/splash/engine.hpp"
 
-#include "sart/password_coordinator.hpp"
+#include "sart/password/coordinator.hpp"
 
 #include <algorithm>
 #include <format>
