@@ -1,5 +1,5 @@
 set_project("sart")
-set_version("0.1.0")
+set_version("0.1.1")
 set_xmakever("2.8.5")
 
 add_rules("mode.debug", "mode.release")
