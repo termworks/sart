@@ -1,5 +1,5 @@
 set_project("sart")
-set_version("0.1.0")
+set_version("0.1.1")
 set_xmakever("2.8.5")
 
 add_rules("mode.debug", "mode.release")
@@ -259,6 +259,7 @@ printf '%s\n' 'PASS: Phase 0 host and PID-1 safety invariants hold'
         output("  make static-build      publish a static-musl generation")
         output("  make artifact-check    inspect the published generation")
         output("  make release-package   create the deterministic archive")
+        output("  make release TYPE=...  publish through git-rel and veri")
         output("  make vm-script-check   validate VM infrastructure")
         output("  make vm-test-*         run an init-system VM lane")
         output("  make clean             remove generated outputs")

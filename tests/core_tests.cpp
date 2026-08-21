@@ -883,6 +883,9 @@ suffix
         const std::filesystem::path patch_root(created);
         const auto target = patch_root / "usr/share/mkinitfs/initramfs-init";
         std::filesystem::create_directories(target.parent_path());
+        for (const auto &directory : {patch_root / "usr", patch_root / "usr/share", target.parent_path()}) {
+            REQUIRE(chmod(directory.c_str(), 0755) == 0);
+        }
         const std::string original = "#!/bin/sh\nVERSION=3.14.0-r0\n\n"
                                      "# check if root=... was set\nif [ -n \"$KOPT_root\" ]; then\n"
                                      "\t$MOCK nlplug-findfs\n"
