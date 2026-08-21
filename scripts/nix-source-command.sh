@@ -76,7 +76,7 @@ do
     copy_file "$relative"
 done
 
-for directory in include src tests xmake; do
+for directory in include src tests; do
     [[ -d "$repo_root/$directory" && ! -L "$repo_root/$directory" ]] ||
         die "$directory must be a regular directory"
     if unsafe_link=$(find "$repo_root/$directory" -xdev -type l -print -quit) &&

@@ -42,7 +42,6 @@
             ./LICENSE
             ./README.md
             ./xmake.lua
-            ./xmake
             ./include
             ./src
             ./tests

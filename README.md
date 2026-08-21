@@ -72,9 +72,9 @@ xmake build sart
 xmake test
 ```
 
-Project name and version live in `xmake.lua`; no generated project file is
-used. C++ code is grouped by domain in matching source, header, and namespace
-trees:
+Project metadata, targets, and tasks live in the single root `xmake.lua`; no
+Xmake source directory or generated project file is used. C++ code is grouped
+by domain in matching source, header, and namespace trees:
 
 ```text
 include/sart/{core,display,embedded,install,integration,password,splash,visual}/
