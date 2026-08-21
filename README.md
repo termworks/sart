@@ -39,8 +39,9 @@ The installed Linux system still supplies the kernel, systemd, dracut,
 cryptsetup, and GRUB. The installer validates their exact approved paths and
 properties and never downloads packages.
 
-`flake.nix` supplies the pinned compiler, musl toolchain, zlib, and zstd.
-Build the immutable dependency-free runtime ELF through Make:
+`flake.nix` supplies the pinned compiler, Xmake, doctest, musl toolchain, zlib,
+and zstd. Xmake owns the build graph and repository tasks. The root Makefile is
+a small command forwarder, so the repository entrypoint remains:
 
 ```sh
 make static-build
@@ -51,6 +52,37 @@ The copyable file is:
 ```text
 target/artifacts/current/release/sart
 ```
+
+## Development
+
+Enter the pinned shell, then use the Make entrypoints:
+
+```sh
+nix develop --impure
+make build
+make test
+make fmt-check
+```
+
+The corresponding Xmake commands are available directly:
+
+```sh
+xmake f -m debug --tests=y
+xmake build sart
+xmake test
+```
+
+Project name and version live in `xmake.lua`; no generated project file is
+used. C++ code is grouped by domain in matching source, header, and namespace
+trees:
+
+```text
+include/sart/{core,display,embedded,install,integration,password,splash,visual}/
+src/{core,display,embedded,install,integration,password,splash,visual}/
+```
+
+The doctest suite is split across the same domains and covers pure unit,
+protocol, daemon, installer, terminal, password, artifact, and CLI behavior.
 
 ## Installation commands
 
@@ -139,8 +171,8 @@ make vm-test-release-ubuntu-26.04-dracut-systemd
 The last target repeats all six lanes using the ordinary no-feature release
 ELF and its canonical production CLI. Fedora uses the same ELF and generic
 backend through explicit fixture targets such as
-`make vm-test-install-fedora-44-dracut-systemd`; see `PROGRES.md` for which of
-those runtime proofs have actually passed.
+`make vm-test-install-fedora-44-dracut-systemd`. Runtime proof is recorded in
+the retained lane result files below `target/vm/`.
 
 For human inspection of that same installed-Ubuntu path:
 
@@ -158,8 +190,7 @@ stops and cleans the disposable GUI run.
 The simpler `make vm-run-gui` and `make vm-run-gui-password` targets remain
 component previews; they are not installed-Ubuntu acceptance evidence.
 
-See [`PLAN.md`](PLAN.md) for the architecture and acceptance contract and
-[`PROGRES.md`](PROGRES.md) for verified implementation evidence.
+See [`PLAN.md`](PLAN.md) for the architecture and acceptance contract.
 
 ## License
 

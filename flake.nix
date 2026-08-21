@@ -13,18 +13,18 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
-        makefileLines = lib.splitString "\n" (builtins.readFile ./Makefile);
-        makeValue = key:
+        xmakeLines = lib.splitString "\n" (builtins.readFile ./xmake.lua);
+        xmakeValue = key:
           let
-            prefix = "override ${key} := ";
-            matches = lib.filter (line: lib.hasPrefix prefix line) makefileLines;
+            prefix = "set_${key}(\"";
+            matches = lib.filter (line: lib.hasPrefix prefix line) xmakeLines;
           in
           if builtins.length matches == 1 then
-            lib.removePrefix prefix (builtins.head matches)
+            lib.removeSuffix "\")" (lib.removePrefix prefix (builtins.head matches))
           else
-            throw "Makefile must define ${key} exactly once";
-        projectName = makeValue "PROJECT_NAME";
-        projectVersion = makeValue "PROJECT_VERSION";
+            throw "xmake.lua must define ${key} exactly once";
+        projectName = xmakeValue "project";
+        projectVersion = xmakeValue "version";
         supportedLinux = builtins.elem system [
           "x86_64-linux"
           "aarch64-linux"
@@ -41,7 +41,8 @@
           fileset = lib.fileset.unions [
             ./LICENSE
             ./README.md
-            ./Makefile
+            ./xmake.lua
+            ./xmake
             ./include
             ./src
             ./tests
@@ -65,7 +66,7 @@
               bash
               binutils
               coreutils
-              gnumake
+              xmake
             ];
             buildInputs = with packageSet; [
               zlib
@@ -74,12 +75,13 @@
             ];
             buildPhase = ''
               runHook preBuild
-              make cpp-release-build
+              xmake f -m release --tests=n --musl=y
+              xmake build sart
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
-              install -Dm755 target/cpp/release/sart "$out/bin/sart"
+              install -Dm755 target/cpp/musl/sart "$out/bin/sart"
               runHook postInstall
             '';
             postFixup = ''
@@ -129,10 +131,12 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             gnumake
+            xmake
             pkg-config
             clang
             mold
             git-cliff
+            doctest
             pkgs.pkgsStatic.stdenv.cc
             pkgs.pkgsStatic.stdenv.cc.bintools.bintools
             binutils
@@ -169,6 +173,7 @@
           SART_MUSL_READELF = "${pkgs.pkgsStatic.stdenv.cc.bintools.bintools}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}readelf";
           SART_MUSL_ZLIB = "${pkgs.pkgsStatic.zlib}";
           SART_MUSL_ZSTD = "${pkgs.pkgsStatic.zstd.out}";
+          DOCTEST_INCLUDE_DIR = "${pkgs.doctest}/include";
         };
       }
     );

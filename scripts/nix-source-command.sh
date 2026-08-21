@@ -71,12 +71,12 @@ copy_file() {
 }
 
 for relative in \
-    flake.nix flake.lock LICENSE README.md Makefile scripts/artifact-inspect.sh
+    flake.nix flake.lock LICENSE README.md xmake.lua scripts/artifact-inspect.sh
 do
     copy_file "$relative"
 done
 
-for directory in include src tests; do
+for directory in include src tests xmake; do
     [[ -d "$repo_root/$directory" && ! -L "$repo_root/$directory" ]] ||
         die "$directory must be a regular directory"
     if unsafe_link=$(find "$repo_root/$directory" -xdev -type l -print -quit) &&

@@ -1,32 +1,34 @@
-#include "sart/adapter.hpp"
-#include "sart/animation.hpp"
-#include "sart/art.hpp"
-#include "sart/cmdline.hpp"
-#include "sart/display.hpp"
-#include "sart/display_buffer.hpp"
-#include "sart/display_text_vt.hpp"
-#include "sart/embedded.hpp"
-#include "sart/frame_engine.hpp"
-#include "sart/installer.hpp"
-#include "sart/installer_backends.hpp"
-#include "sart/integration.hpp"
-#include "sart/integration_patch.hpp"
-#include "sart/integration_resources.hpp"
-#include "sart/password_coordinator.hpp"
-#include "sart/password_input.hpp"
-#include "sart/password_native.hpp"
-#include "sart/password_secure.hpp"
-#include "sart/password_systemd.hpp"
-#include "sart/process.hpp"
-#include "sart/renderer.hpp"
-#include "sart/sha256.hpp"
+#include "sart/core/cmdline.hpp"
+#include "sart/core/process.hpp"
+#include "sart/core/sha256.hpp"
+#include "sart/display/backend.hpp"
+#include "sart/display/buffer.hpp"
+#include "sart/display/text_vt.hpp"
+#include "sart/embedded/resources.hpp"
+#include "sart/install/adapter.hpp"
+#include "sart/install/backends.hpp"
+#include "sart/install/installer.hpp"
+#include "sart/integration/integration.hpp"
+#include "sart/integration/patch.hpp"
+#include "sart/integration/resources.hpp"
+#include "sart/password/coordinator.hpp"
+#include "sart/password/input.hpp"
+#include "sart/password/native.hpp"
+#include "sart/password/secure.hpp"
+#include "sart/password/systemd.hpp"
 #include "sart/splash/client.hpp"
 #include "sart/splash/command.hpp"
 #include "sart/splash/engine.hpp"
 #include "sart/splash/protocol.hpp"
 #include "sart/splash/runtime.hpp"
 #include "sart/splash/state.hpp"
-#include "sart/terminal.hpp"
+#include "sart/visual/animation.hpp"
+#include "sart/visual/art.hpp"
+#include "sart/visual/frame_engine.hpp"
+#include "sart/visual/renderer.hpp"
+#include "sart/visual/terminal.hpp"
+
+#include <doctest/doctest.h>
 
 #include <algorithm>
 #include <array>
@@ -59,13 +61,6 @@ namespace {
     struct TestFailure final : std::runtime_error {
         using std::runtime_error::runtime_error;
     };
-
-#define CHECK(...)                                                                                                     \
-    do {                                                                                                               \
-        if (!(__VA_ARGS__)) {                                                                                          \
-            throw TestFailure(std::string("check failed: ") + #__VA_ARGS__);                                           \
-        }                                                                                                              \
-    } while (false)
 
     template <typename Function> void check_art_error(sart::ArtErrorCode expected, Function &&function) {
         try {
@@ -151,7 +146,7 @@ namespace {
         CHECK(sart::smoothstep(1.0F) == 1.0F);
         for (std::uint64_t seed = 0; seed < 10; ++seed) {
             const auto value = sart::normalized_hash(seed, 3, 4);
-            CHECK(value >= 0.0F && value <= 1.0F);
+            CHECK((value >= 0.0F && value <= 1.0F));
         }
         const auto art = sart::Art::parse("X X\n XX");
         const sart::AnimationMetadata metadata(art, 42);
@@ -229,18 +224,18 @@ namespace {
         display.queue_input(sart::InputEvent::bytes({0x1b}));
         auto input = display.poll_input(std::chrono::milliseconds(5));
         const std::array<std::uint8_t, 1> escape{0x1b};
-        CHECK(input && input->equals_bytes(escape));
+        CHECK((input && input->equals_bytes(escape)));
         display.details(true);
         CHECK(display.state() == sart::DisplayState::details);
         CHECK(!display.poll_input(std::chrono::milliseconds(0)));
         display.queue_input(sart::InputEvent::return_to_splash());
         auto returned = display.poll_input(std::chrono::milliseconds(0));
-        CHECK(returned && returned->kind() == sart::InputEvent::Kind::return_to_splash);
+        CHECK((returned && returned->kind() == sart::InputEvent::Kind::return_to_splash));
         display.details(false);
         display.hide();
         display.restore();
         display.restore();
-        CHECK(display.frames().size() == 1 && display.frames()[0] == display_scene);
+        CHECK((display.frames().size() == 1 && display.frames()[0] == display_scene));
         CHECK(display.operations().size() == 10);
         CHECK(display.operations().front().kind == sart::BufferOperation::Kind::acquire);
         CHECK(display.operations().back().kind == sart::BufferOperation::Kind::restore);
@@ -350,15 +345,15 @@ namespace {
         state.input = {0x1b};
         auto input = backend.poll_input(std::chrono::milliseconds(0));
         const std::array<std::uint8_t, 1> escape{0x1b};
-        CHECK(input && input->equals_bytes(escape));
+        CHECK((input && input->equals_bytes(escape)));
         state.dimensions = sart::Dimensions(21, 6);
         auto resized = backend.poll_input(std::chrono::milliseconds(0));
-        CHECK(resized && resized->kind() == sart::InputEvent::Kind::resized);
+        CHECK((resized && resized->kind() == sart::InputEvent::Kind::resized));
         backend.details(true);
         CHECK(backend.state() == sart::DisplayState::details);
         state.active = 7;
         auto returned = backend.poll_input(std::chrono::milliseconds(0));
-        CHECK(returned && returned->kind() == sart::InputEvent::Kind::return_to_splash);
+        CHECK((returned && returned->kind() == sart::InputEvent::Kind::return_to_splash));
         backend.details(false);
         backend.restore();
         CHECK(backend.state() == sart::DisplayState::restored);
@@ -403,7 +398,7 @@ namespace {
         static_cast<void>(state.apply(SetProgress{50}));
         engine.start(state);
         const auto first = engine.tick_at(state, std::chrono::milliseconds(0));
-        CHECK(first.frame_rendered && !first.stopped);
+        CHECK((first.frame_rendered && !first.stopped));
         CHECK(backend->frames().size() == 1);
         const auto encoded = sart::encode_scene(backend->frames().back());
         CHECK(encoded.find("Loading") != std::string::npos);
@@ -607,7 +602,7 @@ namespace {
         transferred_secret.push("through-fd");
         transferred.responder.reply_secret(transferred_secret);
         auto final_secret = credentials.client.receive(32);
-        CHECK(final_secret && final_secret->size() == 10);
+        CHECK((final_secret && final_secret->size() == 10));
 
         const auto now = monotonic_microseconds();
         NativeRequestMetadata request{NativeAdapter::mkinitfs_busybox,
@@ -723,7 +718,7 @@ namespace {
                 CHECK(resource.contents.contains("# sart:begin"));
                 CHECK(resource.contents.contains("# sart:end"));
             } else {
-                CHECK(resource.materialization.mode == 0644 || resource.materialization.mode == 0755);
+                CHECK((resource.materialization.mode == 0644 || resource.materialization.mode == 0755));
                 CHECK(paths.insert(resource.materialization.path).second);
                 if (resource.materialization.mode == 0755) {
                     CHECK(resource.contents.starts_with("#!"));
@@ -1186,7 +1181,7 @@ suffix
         const auto settings =
             parse_update_extlinux_settings("overwrite=1\ndefault=virt\nroot=LABEL=/\nmodules=ext4,virtio\n"
                                            "default_kernel_opts=console=ttyS0,115200n8\n");
-        CHECK(settings.overwrite && settings.default_label == "virt");
+        CHECK((settings.overwrite && settings.default_label == "virt"));
         CHECK(parse_extlinux_entry_command_line("LABEL virt\n  APPEND root=LABEL=/ quiet\n", "virt") ==
               "root=LABEL=/ quiet");
         const auto patched_init = sart::integration::patch_mkinitfs_init(init_source);
@@ -1482,9 +1477,9 @@ suffix
         const auto frame = Frame::text(Opcode::status, 0x0102030405060708ULL, "ready");
         const auto encoded = frame.encode();
         CHECK(std::equal(protocol_magic.begin(), protocol_magic.end(), encoded.begin()));
-        CHECK(encoded[4] == 0 && encoded[5] == 1);
-        CHECK(encoded[6] == 0 && encoded[7] == 4);
-        CHECK(encoded[12] == 1 && encoded[19] == 8);
+        CHECK((encoded[4] == 0 && encoded[5] == 1));
+        CHECK((encoded[6] == 0 && encoded[7] == 4));
+        CHECK((encoded[12] == 1 && encoded[19] == 8));
         CHECK(encoded[23] == 5);
         CHECK(Frame::decode_exact(encoded) == frame);
         CHECK(Frame::progress(8, 73).progress_value() == 73);
@@ -1642,7 +1637,7 @@ suffix
         CHECK(send_request(client, quit).opcode() == Opcode::ack);
         int status{};
         CHECK(waitpid(child, &status, 0) == child);
-        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        CHECK((WIFEXITED(status) && WEXITSTATUS(status) == 0));
         CHECK(!std::filesystem::exists(runtime));
     }
 
@@ -1662,43 +1657,23 @@ suffix
 
 } // namespace
 
-int main() {
-    const std::array tests{
-        std::pair{"art validation and layout", &art_validation_and_layout},
-        std::pair{"animation determinism", &animation_is_deterministic},
-        std::pair{"renderer golden parity", &renderer_matches_rust_goldens},
-        std::pair{"display and frame engine", &display_and_frame_engine_contracts},
-        std::pair{"Linux text VT backend", &text_vt_backend_contracts},
-        std::pair{"splash engine", &splash_engine_contracts},
-        std::pair{"password memory and input", &password_memory_and_input_contracts},
-        std::pair{"systemd password transport", &systemd_password_contracts},
-        std::pair{"digest and CPIO inspection", &digest_and_cpio_contracts},
-        std::pair{"native password transport", &native_password_transport_contracts},
-        std::pair{"native password coordinator", &native_password_coordinator_contracts},
-        std::pair{"embedded and cmdline", &embedded_and_cmdline_contracts},
-        std::pair{"installer transaction", &installer_transaction_contracts},
-        std::pair{"installer backends", &installer_backend_contracts},
-        std::pair{"splash state", &splash_state_contracts},
-        std::pair{"control protocol", &protocol_contracts},
-        std::pair{"command mapping", &command_mapping_contracts},
-        std::pair{"runtime and client", &runtime_and_client_contracts},
-        std::pair{"daemon process", &daemon_process_contracts},
-        std::pair{"binary smoke", &binary_smoke},
-    };
-    std::size_t failures{};
-    for (const auto &[name, test] : tests) {
-        try {
-            test();
-            std::cout << "PASS: " << name << '\n';
-        } catch (const std::exception &error) {
-            ++failures;
-            std::cerr << "FAIL: " << name << ": " << error.what() << '\n';
-        }
-    }
-    if (failures != 0) {
-        std::cerr << failures << " C++ test group(s) failed\n";
-        return 1;
-    }
-    std::cout << "PASS: all C++ core tests\n";
-    return 0;
-}
+TEST_CASE("art validation and layout") { art_validation_and_layout(); }
+TEST_CASE("animation determinism") { animation_is_deterministic(); }
+TEST_CASE("renderer golden parity") { renderer_matches_rust_goldens(); }
+TEST_CASE("display and frame engine") { display_and_frame_engine_contracts(); }
+TEST_CASE("Linux text VT backend") { text_vt_backend_contracts(); }
+TEST_CASE("splash engine") { splash_engine_contracts(); }
+TEST_CASE("password memory and input") { password_memory_and_input_contracts(); }
+TEST_CASE("systemd password transport") { systemd_password_contracts(); }
+TEST_CASE("digest and CPIO inspection") { digest_and_cpio_contracts(); }
+TEST_CASE("native password transport") { native_password_transport_contracts(); }
+TEST_CASE("native password coordinator") { native_password_coordinator_contracts(); }
+TEST_CASE("embedded and cmdline") { embedded_and_cmdline_contracts(); }
+TEST_CASE("installer transaction") { installer_transaction_contracts(); }
+TEST_CASE("installer backends") { installer_backend_contracts(); }
+TEST_CASE("splash state") { splash_state_contracts(); }
+TEST_CASE("control protocol") { protocol_contracts(); }
+TEST_CASE("command mapping") { command_mapping_contracts(); }
+TEST_CASE("runtime and client") { runtime_and_client_contracts(); }
+TEST_CASE("daemon process") { daemon_process_contracts(); }
+TEST_CASE("binary smoke") { binary_smoke(); }
